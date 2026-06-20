@@ -47,6 +47,8 @@ func main() {
 		handleAudit()
 	case "install-agent":
 		handleInstallAgent()
+	case "init-config":
+		handleInitConfig()
 	case "eval":
 		handleEval()
 	case "explain-failure":
@@ -86,6 +88,7 @@ func printUsage() {
 	fmt.Println("  validate       Plan and optionally run validation for changed or named files")
 	fmt.Println("  audit          Check local privacy and index hygiene")
 	fmt.Println("  install-agent  Write SnapZip agent integration files")
+	fmt.Println("  init-config    Write a starter .snapzip/config.toml project profile")
 	fmt.Println("  eval           Run included public benchmark suites")
 	fmt.Println("  explain-failure Build context from test/build failure output")
 	fmt.Println("  repair-pack    Alias for explain-failure with repair-oriented context")

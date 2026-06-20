@@ -33,6 +33,7 @@ It combines SQLite FTS5 search, path-aware relevance, compression-distance re-ra
 *   **Repo maps, symbols, and references**: Stores file paths, line ranges, content hashes, indexed functions/classes/types, and lightweight call/reference sites for structural lookup.
 *   **Task-specific context packs**: Build bounded packs for debug, refactor, test, and docs workflows.
 *   **Validation planning**: Finds likely affected tests, suggests validation commands, and can run a supplied command with repair context on failure.
+*   **Project profiles**: Optional `.snapzip/config.toml` lets teams share validation commands without shipping any local memory.
 *   **Syntax checks where available**: Uses local toolchains for Go, Python, JavaScript, Ruby, PHP, Perl, Lua, shell, C/C++, Swift, and TypeScript validation during optimization.
 *   **Private feedback memory**: Stores negative project feedback locally so agents can avoid repeating known mistakes.
 *   **Simple agent integration**: Works as a CLI, JSON-output command, or read-only MCP stdio server for coding agents and editor integrations.
@@ -106,6 +107,12 @@ If you installed with `go install`, run the CLI as `snapzip`. If you built local
 Run the onboarding wizard to initialize a fresh local `memory.db`:
 ```bash
 snapzip init-db
+```
+
+Optionally create a project profile for shared validation commands:
+
+```bash
+snapzip init-config --dir .
 ```
 
 ---
@@ -237,9 +244,32 @@ snapzip validate --db-dir . --path core/database.go
 snapzip validate --db-dir . --changed --cmd "go test ./..."
 ```
 
+If `.snapzip/config.toml` defines a validation command, SnapZip suggests it by default and runs it only when explicitly requested:
+
+```bash
+snapzip validate --db-dir . --changed --run-config
+```
+
 `explain-failure` is the same workflow as `repair-pack` with a diagnosis-oriented name.
 
-### F. Privacy Audit and Agent Setup
+### F. Project Profile, Privacy Audit, and Agent Setup
+Create a starter project profile:
+
+```bash
+snapzip init-config --dir .
+```
+
+Example `.snapzip/config.toml`:
+
+```toml
+[validation]
+command = "go test ./..."
+
+[validation.commands]
+go = "go test ./..."
+py = "python -m pytest"
+```
+
 Check local index hygiene:
 
 ```bash

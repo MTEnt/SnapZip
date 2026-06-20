@@ -236,9 +236,10 @@ func (s mcpServer) tools() []mcpTool {
 			InputSchema: objectSchema(
 				[]string{"path"},
 				map[string]any{
-					"path":   stringSchema("Comma-separated indexed source paths, such as core/database.go."),
-					"db_dir": stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
-					"limit":  integerSchema("Maximum tests, related files, and commands to return.", 1, 100),
+					"path":       stringSchema("Comma-separated indexed source paths, such as core/database.go."),
+					"db_dir":     stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
+					"config_dir": stringSchema("Directory containing optional .snapzip/config.toml. Defaults to db_dir."),
+					"limit":      integerSchema("Maximum tests, related files, and commands to return.", 1, 100),
 				},
 			),
 		},
@@ -490,6 +491,12 @@ func (s mcpServer) callValidationPlan(args map[string]any) mcpToolResult {
 	if err != nil {
 		return toolError(err.Error())
 	}
+	configDir := strings.TrimSpace(stringArg(args, "config_dir", stringArg(args, "db_dir", s.dbDir)))
+	config, err := core.LoadProjectConfig(configDir)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	plan.SuggestedCommands = core.MergeValidationCommands(core.ConfiguredValidationCommands(config, plan.Affected), plan.SuggestedCommands)
 
 	var builder strings.Builder
 	builder.WriteString("# SnapZip Validation Plan\n\n")

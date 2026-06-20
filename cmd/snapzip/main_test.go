@@ -122,6 +122,16 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 	if !strings.Contains(statsOutput, "knowledge rows: 1") {
 		t.Fatalf("reset did not leave a fresh one-file index:\n%s", statsOutput)
 	}
+
+	configRoot := t.TempDir()
+	initConfigOutput := runSnapZip(t, repoRoot, "init-config", "--dir", configRoot)
+	if !strings.Contains(initConfigOutput, "Wrote") {
+		t.Fatalf("init-config did not write starter config:\n%s", initConfigOutput)
+	}
+	initConfigOutput = runSnapZip(t, repoRoot, "init-config", "--dir", configRoot)
+	if !strings.Contains(initConfigOutput, "Skipped existing") {
+		t.Fatalf("init-config did not skip existing config:\n%s", initConfigOutput)
+	}
 }
 
 func TestMCPServerExposesSearchTool(t *testing.T) {
@@ -193,6 +203,7 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 
 	fixture := t.TempDir()
 	writeCLIFile(t, fixture, "go.mod", "module snapzipfixture\n\ngo 1.25\n")
+	writeCLIFile(t, fixture, ".snapzip/config.toml", "[validation]\ncommand = \"go test ./...\"\n\n[validation.commands]\ngo = \"go test ./pkg\"\n")
 	writeCLIFile(t, fixture, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
 	writeCLIFile(t, fixture, "pkg/cache_test.go", "package cache\n\nimport \"testing\"\n\nfunc TestConstructor(t *testing.T) { _ = NewCacheStore() }\n")
 
@@ -224,14 +235,19 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 		t.Fatalf("related output missing test file:\n%s", relatedOutput)
 	}
 
-	validatePlanOutput := runSnapZip(t, repoRoot, "validate", "--db-dir", dbDir, "--path", "pkg/cache.go", "--limit", "5")
-	if !strings.Contains(validatePlanOutput, "# SnapZip Validate") || !strings.Contains(validatePlanOutput, "pkg/cache_test.go") || !strings.Contains(validatePlanOutput, "go test ./pkg") {
+	validatePlanOutput := runSnapZip(t, repoRoot, "validate", "--db-dir", dbDir, "--path", "pkg/cache.go", "--dir", fixture, "--limit", "5")
+	if !strings.Contains(validatePlanOutput, "# SnapZip Validate") || !strings.Contains(validatePlanOutput, "pkg/cache_test.go") || !strings.Contains(validatePlanOutput, "configured validation command for go") {
 		t.Fatalf("validate plan output missing affected test or command:\n%s", validatePlanOutput)
 	}
 
 	validateRunOutput := runSnapZip(t, repoRoot, "validate", "--db-dir", dbDir, "--path", "pkg/cache.go", "--cmd", "go test ./...", "--dir", fixture, "--limit", "5")
 	if !strings.Contains(validateRunOutput, "Status: passed") || !strings.Contains(validateRunOutput, "Exit code: 0") {
 		t.Fatalf("validate run output missing passing command result:\n%s", validateRunOutput)
+	}
+
+	validateConfigRunOutput := runSnapZip(t, repoRoot, "validate", "--db-dir", dbDir, "--path", "pkg/cache.go", "--run-config", "--dir", fixture, "--limit", "5")
+	if !strings.Contains(validateConfigRunOutput, "Command: `go test ./pkg`") || !strings.Contains(validateConfigRunOutput, "Status: passed") {
+		t.Fatalf("validate --run-config did not execute configured command:\n%s", validateConfigRunOutput)
 	}
 
 	packOutput := runSnapZip(t, repoRoot, "pack", "--db-dir", dbDir, "--query", "CacheStore", "--mode", "test", "--limit", "3", "--budget", "4096")

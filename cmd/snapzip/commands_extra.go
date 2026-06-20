@@ -344,6 +344,7 @@ func handleValidate() {
 	since := fs.String("since", "", "Use files changed since a git ref")
 	dir := fs.String("dir", ".", "Git and command working directory")
 	commandText := fs.String("cmd", "", "Optional validation command to run, such as 'go test ./...'")
+	runConfig := fs.Bool("run-config", false, "Run the configured project validation command when --cmd is not provided")
 	query := fs.String("query", "", "Additional repair-pack search query when validation fails")
 	limit := fs.Int("limit", 10, "Maximum tests and related files to include")
 	budget := fs.Int("budget", core.DefaultContextPackBudgetBytes, "Approximate repair-pack byte budget")
@@ -374,6 +375,20 @@ func handleValidate() {
 	if err != nil {
 		fmt.Printf("Validate failed: %v\n", err)
 		os.Exit(1)
+	}
+	config, err := core.LoadProjectConfig(*dir)
+	if err != nil {
+		fmt.Printf("Validate failed: %v\n", err)
+		os.Exit(1)
+	}
+	configuredCommands := core.ConfiguredValidationCommands(config, plan.Affected)
+	plan.SuggestedCommands = core.MergeValidationCommands(configuredCommands, plan.SuggestedCommands)
+	if *runConfig && strings.TrimSpace(*commandText) == "" {
+		if len(configuredCommands) == 0 {
+			fmt.Println("Error: --run-config was provided, but no validation command is configured")
+			os.Exit(1)
+		}
+		*commandText = configuredCommands[0].Command
 	}
 	report := validateReport{
 		Status: "planned",
@@ -636,6 +651,7 @@ func runAudit(dbDir string) auditReport {
 	report := auditReport{DBDir: dbDir}
 	report.Checks = append(report.Checks, auditGitIgnored("memory.db"))
 	report.Checks = append(report.Checks, auditSnapZipIgnore("."))
+	report.Checks = append(report.Checks, auditProjectConfig("."))
 	report.Checks = append(report.Checks, auditDBStats(dbDir)...)
 	report.Checks = append(report.Checks, auditSecrets(dbDir))
 	report.Checks = append(report.Checks,
@@ -662,6 +678,19 @@ func auditSnapZipIgnore(root string) auditCheck {
 		return auditCheck{Name: ".snapzipignore", Passed: true, Details: "optional .snapzipignore not present; default dependency/generated skips still apply"}
 	}
 	return auditCheck{Name: ".snapzipignore", Passed: true, Details: fmt.Sprintf("%d local ignore patterns loaded", len(patterns))}
+}
+
+func auditProjectConfig(root string) auditCheck {
+	config, err := core.LoadProjectConfig(root)
+	if err != nil {
+		return auditCheck{Name: ".snapzip/config.toml", Passed: false, Details: err.Error()}
+	}
+	if !config.Found {
+		return auditCheck{Name: ".snapzip/config.toml", Passed: true, Details: "optional project profile not present"}
+	}
+	configuredCount := len(core.ConfiguredValidationCommands(config, core.AffectedReport{}))
+	configuredCount += len(config.Validation.Commands)
+	return auditCheck{Name: ".snapzip/config.toml", Passed: true, Details: fmt.Sprintf("project profile loaded with %d validation command entries", configuredCount)}
 }
 
 func auditDBStats(dbDir string) []auditCheck {
@@ -743,6 +772,30 @@ func handleInstallAgent() {
 	}
 }
 
+func handleInitConfig() {
+	fs := flag.NewFlagSet("init-config", flag.ExitOnError)
+	dir := fs.String("dir", ".", "Project directory")
+	force := fs.Bool("force", false, "Overwrite existing .snapzip/config.toml")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
+	_ = fs.Parse(os.Args[2:])
+
+	path, written, err := core.WriteDefaultProjectConfig(*dir, *force)
+	if err != nil {
+		fmt.Printf("Config init failed: %v\n", err)
+		os.Exit(1)
+	}
+	result := map[string]any{"path": path, "written": written}
+	if *jsonOutput {
+		writeJSON(result)
+		return
+	}
+	if written {
+		fmt.Printf("Wrote %s\n", path)
+	} else {
+		fmt.Printf("Skipped existing %s\n", path)
+	}
+}
+
 func installAgentFiles(root, target string, force bool) ([]string, []string, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -796,6 +849,7 @@ Before non-trivial code changes, run ` + "`snapzip pack --query \"<topic>\" --li
 Use ` + "`snapzip symbol-context --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip symbols --query \"<symbol>\" --limit 10`" + `, or ` + "`snapzip map --limit 50`" + ` for structural context.
 Use ` + "`snapzip related --path <file>`" + ` and ` + "`snapzip affected --path <file>`" + ` to find related files and likely tests.
 Use ` + "`snapzip validate --path <file>`" + ` to plan validation, or ` + "`snapzip validate --changed --cmd \"<test command>\"`" + ` to run validation and get failure context.
+If ` + "`.snapzip/config.toml`" + ` defines validation, use ` + "`snapzip validate --changed --run-config`" + ` when explicitly running the configured project command.
 Use ` + "`snapzip repair-pack --error-file <test-output>`" + ` or ` + "`snapzip diagnose --cmd \"<test command>\"`" + ` after failing tests.
 Do not assume SnapZip memory exists on fresh installs; index first with ` + "`snapzip index --langs all --crawl .`" + ` when appropriate.
 `
