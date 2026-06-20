@@ -530,10 +530,13 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 	formula := readRepoFile(t, repoRoot, "packaging/homebrew/snapzip.rb")
 	for _, want := range []string{
 		"class Snapzip < Formula",
+		"url \"https://github.com/MTEnt/SnapZip/archive/refs/tags/v0.1.0.tar.gz\"",
+		"sha256 \"d541ae58c92feb50a06dca7e32940a10afbb2d3be9e769e4b819742c82779f98\"",
 		"head \"https://github.com/MTEnt/SnapZip.git\"",
 		"depends_on \"go\" => :build",
 		"system \"go\", \"build\"",
 		"assert_match \"knowledge rows: 1\"",
+		"assert_match \"snapzip v#{version}\"",
 	} {
 		if !strings.Contains(formula, want) {
 			t.Fatalf("Homebrew formula missing %q:\n%s", want, formula)
@@ -541,7 +544,7 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 	}
 
 	packagingReadme := readRepoFile(t, repoRoot, "packaging/homebrew/README.md")
-	if !strings.Contains(packagingReadme, "brew install --HEAD") || !strings.Contains(packagingReadme, "checksums.txt") {
+	if !strings.Contains(packagingReadme, "brew tap MTEnt/snapzip") || !strings.Contains(packagingReadme, "brew install --HEAD") || !strings.Contains(packagingReadme, "snapzip version") {
 		t.Fatalf("Homebrew packaging README missing install or checksum guidance:\n%s", packagingReadme)
 	}
 

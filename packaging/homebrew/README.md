@@ -1,6 +1,13 @@
 # Homebrew Packaging
 
-This directory contains a head-only formula scaffold for a SnapZip tap.
+This directory contains the Homebrew formula used by the `MTEnt/homebrew-snapzip` tap.
+
+## Install From Tap
+
+```bash
+brew tap MTEnt/snapzip
+brew install snapzip
+```
 
 ## Development Install
 
@@ -8,17 +15,20 @@ This directory contains a head-only formula scaffold for a SnapZip tap.
 brew install --HEAD ./packaging/homebrew/snapzip.rb
 ```
 
-## Tap Setup
+## Tap Updates
 
-1. Create a tap repository, such as `MTEnt/homebrew-snapzip`.
-2. Copy `packaging/homebrew/snapzip.rb` to `Formula/snapzip.rb` in the tap.
-3. After publishing a SnapZip tag, replace the formula `head`-only install with a stable release URL and checksum from the GitHub release `checksums.txt` asset.
+1. Publish a SnapZip tag and confirm the GitHub release completed.
+2. Compute the source archive checksum:
+   ```bash
+   curl -L -o /tmp/snapzip-source.tar.gz https://github.com/MTEnt/SnapZip/archive/refs/tags/<tag>.tar.gz
+   shasum -a 256 /tmp/snapzip-source.tar.gz
+   ```
+3. Update `url`, `sha256`, and release ldflags in this formula.
+4. Copy the formula to `Formula/snapzip.rb` in the tap and run:
+   ```bash
+   brew audit --strict mtent/snapzip/snapzip
+   brew reinstall --build-from-source mtent/snapzip/snapzip
+   brew test mtent/snapzip/snapzip
+   ```
 
-Example stable source fields:
-
-```ruby
-url "https://github.com/MTEnt/SnapZip/archive/refs/tags/v0.1.0.tar.gz"
-sha256 "<sha256 from checksums.txt or the source archive>"
-```
-
-The formula builds from source with Go and keeps SnapZip's local-first behavior: no project memory is bundled with the package.
+The formula builds from source with Go and keeps SnapZip's local-first behavior: no project memory is bundled with the package. Release binaries installed through Homebrew stamp `snapzip version` with the formula version.
