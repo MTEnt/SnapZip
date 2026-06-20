@@ -5,13 +5,13 @@
 </p>
 
 <p align="center">
-  <strong>A local codebase context and verification helper for AI coding agents.</strong>
+  <strong>Local codebase memory for AI coding agents.</strong>
 </p>
 
 <p align="center">
   <a href="#key-features">Features</a> |
   <a href="#why-snapzip">Why SnapZip</a> |
-  <a href="#core-model-compression-guided-search">Model</a> |
+  <a href="#core-model-local-relevance-ranking">Model</a> |
   <a href="#installation--setup">Installation</a> |
   <a href="#cli-reference">CLI Reference</a> |
   <a href="#agent--ide-integrations">Integrations</a> |
@@ -20,9 +20,9 @@
 
 ---
 
-**SnapZip** is an open-source, local-first CLI that helps AI coding agents retrieve codebase-specific examples, check syntax locally, and remember project feedback in a private SQLite database.
+**SnapZip** is an open-source, local-first CLI that helps AI coding agents search relevant examples from your codebase, surface project feedback, and keep repo memory private.
 
-It combines SQLite FTS5 search, compression-distance re-ranking, Zstandard dictionary scoring, and lightweight compiler checks. All project memory is generated locally in `memory.db`; the repository does not ship with user memories or indexed code.
+It combines SQLite FTS5 search, path-aware relevance, compression-distance re-ranking, and lightweight local syntax checks. All project memory is generated locally in `memory.db`; the repository does not ship with user memories or indexed code.
 
 ---
 
@@ -38,31 +38,25 @@ It combines SQLite FTS5 search, compression-distance re-ranking, Zstandard dicti
 
 ## Why SnapZip?
 
-Standard LLM coding assistants write generic "textbook" code, turning repositories into a patchwork of inconsistent styles, naming collisions, and syntax typos. SnapZip solves these key pain points:
+Standard LLM coding assistants often need too much context or fall back to generic examples. SnapZip gives agents a small local memory layer they can query before making changes:
 
-1.  **Stop Wasting AI Context**: Rather than reading entire directory trees into the LLM's context window (bloating API bills and scattering attention), SnapZip queries local templates in microseconds, feeding only the relevant snippets.
-2.  **Catch Syntax Problems Earlier**: SnapZip can run local syntax checks for supported languages before a draft becomes final output.
-3.  **Learn from Project Feedback**: If you log a correction, SnapZip keeps it in the local database and can surface it before future work.
+1.  **Use focused local context**: Instead of loading broad directory trees into the LLM context window, SnapZip returns targeted snippets from a local SQLite index.
+2.  **Keep memory private**: Indexed snippets and feedback stay in a local `memory.db` file.
+3.  **Catch syntax problems earlier**: SnapZip can run local syntax checks for supported languages before an optimized draft becomes final output.
+4.  **Remember project feedback**: If you log a correction, SnapZip can surface it before future work.
 
 ---
 
-## Core Model: Compression-Guided Search
+## Core Model: Local Relevance Ranking
 
-Instead of generating text left-to-right (which gets stuck in repetitive loops), SnapZip treats code generation as a physical simulation over complete drafts $X$:
+SnapZip is primarily a retrieval and local-memory tool. It ranks indexed snippets with a blend of:
 
-### 1. Likelihood $P(X \mid \text{Codebase})$
-We estimate the likelihood of a draft matching the codebase's style by calculating its compressed byte-length $C_{dict}(X)$ under Zstd primed with the local context dictionary:
-$$P(X \mid \text{Codebase}) \propto \exp(-C_{dict}(X))$$
+*   SQLite FTS5 keyword matches
+*   source path and file-type relevance
+*   lexical overlap with the query
+*   Query-Normalized Distance (QND) compression scoring
 
-### 2. Prior $P(X)$
-Penalizes syntactically invalid constructs (such as unmatched brackets or parentheses):
-$$P(X) \propto \text{GrammarScore}(X)$$
-
-### 3. Metropolis-Hastings Proposal Acceptance
-To transition from draft $X$ to mutated draft $X'$, the mutation is accepted with probability $\alpha$:
-$$\alpha = \min\left(1, \exp\left(-\frac{\Delta C}{T}\right)\right)$$
-$$\Delta C = [C_{dict}(X') + \beta L_{prior}(X')] - [C_{dict}(X) + \beta L_{prior}(X)]$$
-*Where $T$ is temperature, and $\beta$ is the prior scale factor. Candidate improvements can then be checked with available local language tooling.*
+The optional optimizer is conservative. It uses local code context and Zstandard dictionary scoring, but only mutates files when a local syntax checker is available for that language. Invalid proposals are rejected, and unsupported languages return the seed draft unchanged.
 
 ---
 
@@ -70,7 +64,7 @@ $$\Delta C = [C_{dict}(X') + \beta L_{prior}(X')] - [C_{dict}(X) + \beta L_{prio
 
 ```text
 snapzip/
-|-- core/               # Go backend library (Zstd compression, SQLite indexing, MCMC loop)
+|-- core/               # Go backend library (SQLite indexing, ranking, compression scoring)
 |-- cmd/snapzip/        # CLI interface parsing and command routing
 |-- benchmarks/         # Reproducible raw vs SnapZip benchmark harnesses
 |-- assets/             # Branding logo and graphics
@@ -100,9 +94,11 @@ go build -o snapzip ./cmd/snapzip
 ```
 
 ### 3. Initialize the Database
-Run the onboarding wizard to initialize a fresh local `memory.db` and index your target codebase directories:
+If you installed with `go install`, run the CLI as `snapzip`. If you built locally with `go build -o snapzip`, run it as `./snapzip`.
+
+Run the onboarding wizard to initialize a fresh local `memory.db`:
 ```bash
-./snapzip init-db
+snapzip init-db
 ```
 
 ---
@@ -112,15 +108,17 @@ Run the onboarding wizard to initialize a fresh local `memory.db` and index your
 ### A. Codebase Indexing
 Index codebase files under a target directory, filtering by language name or extension:
 ```bash
-./snapzip init-db --db-dir . --langs popular --crawl /path/to/your/codebase
+snapzip init-db --db-dir . --langs popular --crawl /path/to/your/codebase
 ```
 
-`--langs` accepts presets (`popular`, `web`, `frontend`, `backend`, `mobile`, `systems`, `config`), extensions (`html,css,rb,py,js,rs,zig`), and language names (`ruby,python,javascript,rust`). Use `all` or `any` to index the full default source-code set. Explicit extensions are accepted even when they are not part of the default common-language list.
+`--langs` accepts presets (`popular`, `web`, `frontend`, `backend`, `mobile`, `systems`, `config`), extensions (`html,css,rb,py,js,rs,zig`), and language names (`ruby,python,javascript,rust`).
+
+Use `popular` for source-heavy indexing. Use `all` or `any` when you also want docs, configs, workflows, and project instructions included in search results. Explicit extensions are accepted even when they are not part of the default common-language list.
 
 Use `--reset` to remove an existing `memory.db` before indexing a fresh project:
 
 ```bash
-./snapzip init-db --db-dir . --langs popular --crawl /path/to/your/codebase --reset
+snapzip init-db --db-dir . --langs all --crawl /path/to/your/codebase --reset
 ```
 
 The indexer skips common dependency/build directories such as `.git`, `node_modules`, `vendor`, `dist`, `build`, `target`, `.venv`, and `__pycache__`. It also skips `memory.db`, binary-looking files, and files larger than 1 MiB by default. Larger accepted source files are split into bounded searchable chunks to keep search reranking responsive. Override the file cap with `--max-file-bytes`.
@@ -138,19 +136,19 @@ Elixir, Erlang, Clojure, F#, OCaml, Haskell, Julia, and common config files.
 ### B. Hybrid Context Search
 Search templates using keyword matching, source-path relevance, and parallel compression distance:
 ```bash
-./snapzip search --query "python lru cache" --limit 3
+snapzip search --query "python lru cache" --limit 3
 ```
 
 ### C. Inspect Database Stats
 Show indexed row counts and language breakdown:
 ```bash
-./snapzip stats --db-dir .
+snapzip stats --db-dir .
 ```
 
 ### D. Optimize a Code Sketch
-Run the Metropolis-Hastings MCMC optimizer over a draft to align it with local codebase styles:
+Run the conservative optimizer over a draft using local codebase context:
 ```bash
-./snapzip optimize \
+snapzip optimize \
   --sketch ./examples/draft_cache.py \
   --context ./examples/context_code \
   --output ./optimized_cache.py \
@@ -164,11 +162,11 @@ Optimization is conservative: SnapZip only mutates files when a local syntax che
 SnapZip does not log search queries into feedback memory. Feedback is only stored when you explicitly call `log-feedback` with a clear negative critique:
 *   **Log feedback**:
     ```bash
-    ./snapzip log-feedback --input "this cache eviction logic is incorrect" --bot-response "def put(...): ..."
+    snapzip log-feedback --input "this cache eviction logic is incorrect" --bot-response "def put(...): ..."
     ```
 *   **Retrieve recent feedback**:
     ```bash
-    ./snapzip get-feedback --limit 5
+    snapzip get-feedback --limit 5
     ```
 
 ---
@@ -187,7 +185,7 @@ Use [LLM_INSTRUCTIONS.md](LLM_INSTRUCTIONS.md) as a portable rule template for o
 
 ## Benchmarking Performance
 
-Build the CLI and run the reproducible benchmark runner:
+Build the CLI and run the included benchmark harness:
 ```bash
 go build -o snapzip ./cmd/snapzip
 python3 benchmarks/run.py --suite smoke --snapzip-bin ./snapzip
@@ -208,7 +206,7 @@ For low-level compression throughput, run the Go benchmarks:
 go test -bench=BenchmarkBCACompress -benchtime=5s ./examples
 ```
 
-Performance depends on CPU, Go version, dictionary size, and installed local language tools. Publish benchmark results with the exact command, SnapZip commit, machine details, and JSON report.
+These benchmarks validate SnapZip's local retrieval and syntax-check workflow against the included harnesses. They are useful for regression testing, but they are not universal claims about every codebase or every AI coding task. If you publish numbers, include the exact command, SnapZip commit, machine details, and JSON report.
 
 ---
 
