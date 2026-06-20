@@ -13,6 +13,7 @@ All notable changes to SnapZip are documented here.
 - Stopped search queries from writing to feedback memory and narrowed feedback sentiment matching.
 - Split indexed source into bounded chunks to reduce search reranking compression overhead.
 - Removed the disconnected visual parser sidecar.
+- Raised the minimum Go version to 1.25.8 to avoid vulnerable standard-library versions in CI.
 
 ## 0.1.0
 

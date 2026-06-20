@@ -11,6 +11,8 @@ go test ./...
 go build -o snapzip ./cmd/snapzip
 ```
 
+SnapZip requires Go 1.25.8 or later so vulnerability scans run against patched standard-library packages.
+
 ## Required Checks
 
 Run these before opening a pull request:

@@ -83,7 +83,7 @@ snapzip/
 
 ### 1. Prerequisites
 Ensure you have the following installed on your machine:
-*   **Go** (version 1.25 or later)
+*   **Go** (version 1.25.8 or later)
 *   **Python 3.x** (for Python syntax checks and benchmarks)
 
 ### 2. Install or Compile the CLI Binary
