@@ -517,6 +517,9 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 	if !strings.Contains(releaseWorkflow, "-X main.version=${GITHUB_REF_NAME}") || !strings.Contains(releaseWorkflow, "-X main.commit=${GITHUB_SHA}") {
 		t.Fatalf("release workflow does not stamp version metadata:\n%s", releaseWorkflow)
 	}
+	if !strings.Contains(releaseWorkflow, "--repo \"${GITHUB_REPOSITORY}\"") {
+		t.Fatalf("release workflow does not pass explicit repo to gh release:\n%s", releaseWorkflow)
+	}
 	gitignore := readRepoFile(t, repoRoot, ".gitignore")
 	for _, want := range []string{"memory.db-*", ".snapzip-ci/", ".snapzip-pr-context.*"} {
 		if !strings.Contains(gitignore, want) {
