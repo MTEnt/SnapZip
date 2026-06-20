@@ -20,13 +20,12 @@ type BCAConfig struct {
 // BCAOptimizer implements the Bayesian Compression Agent optimization loop
 type BCAOptimizer struct {
 	config     BCAConfig
-	dictID     uint32
-	dictBytes  []byte
 	encoder    *zstd.Encoder
 	vocabulary []string
 }
 
 func NewBCAOptimizer(cfg BCAConfig, dictBytes []byte, vocab []string) (*BCAOptimizer, error) {
+	cfg = normalizeBCAConfig(cfg)
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	dictID := r.Uint32()
 
@@ -39,11 +38,22 @@ func NewBCAOptimizer(cfg BCAConfig, dictBytes []byte, vocab []string) (*BCAOptim
 	}
 	return &BCAOptimizer{
 		config:     cfg,
-		dictID:     dictID,
-		dictBytes:  dictBytes,
 		encoder:    enc,
 		vocabulary: vocab,
 	}, nil
+}
+
+func normalizeBCAConfig(cfg BCAConfig) BCAConfig {
+	if cfg.MaxIterations < 0 {
+		cfg.MaxIterations = 0
+	}
+	if cfg.Temperature <= 0 {
+		cfg.Temperature = 0.15
+	}
+	if cfg.PriorWeight < 0 {
+		cfg.PriorWeight = 1.0
+	}
+	return cfg
 }
 
 // CompressDraft calculates compressed size C(X | Y) using the pre-primed dictionary
@@ -74,14 +84,22 @@ func (o *BCAOptimizer) PriorScore(draft []byte) float64 {
 
 // VerifyCompilation runs the compiler/linter check on a temporary file
 func VerifyCompilation(code string, filename string) bool {
-	tempFile := filepath.Join(os.TempDir(), "snapzip_temp_"+filename)
-	err := os.WriteFile(tempFile, []byte(code), 0644)
+	ext := filepath.Ext(filename)
+	temp, err := os.CreateTemp("", "snapzip-*"+ext)
 	if err != nil {
 		return false
 	}
+	tempFile := temp.Name()
 	defer os.Remove(tempFile)
 
-	ext := filepath.Ext(filename)
+	if _, err := temp.WriteString(code); err != nil {
+		_ = temp.Close()
+		return false
+	}
+	if err := temp.Close(); err != nil {
+		return false
+	}
+
 	var cmd *exec.Cmd
 	switch ext {
 	case ".go":
@@ -91,7 +109,7 @@ func VerifyCompilation(code string, filename string) bool {
 	case ".js":
 		cmd = exec.Command("node", "--check", tempFile)
 	default:
-		return true // skip for unsupported extensions
+		return true
 	}
 
 	err = cmd.Run()
@@ -127,7 +145,7 @@ func (o *BCAOptimizer) Mutate(draft []byte, r *rand.Rand) []byte {
 func (o *BCAOptimizer) Optimize(seedCode string, filename string) string {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	current := []byte(seedCode)
-	
+
 	currentCompSize := o.CompressDraft(current)
 	currentPrior := o.PriorScore(current)
 	currentScore := float64(currentCompSize) + o.config.PriorWeight*currentPrior
@@ -138,7 +156,7 @@ func (o *BCAOptimizer) Optimize(seedCode string, filename string) string {
 
 	for i := 0; i < o.config.MaxIterations; i++ {
 		proposal := o.Mutate(current, r)
-		
+
 		propCompSize := o.CompressDraft(proposal)
 		propPrior := o.PriorScore(proposal)
 		propScore := float64(propCompSize) + o.config.PriorWeight*propPrior
@@ -151,7 +169,7 @@ func (o *BCAOptimizer) Optimize(seedCode string, filename string) string {
 			accept = true
 		} else {
 			prob := math.Exp(-delta / o.config.Temperature)
-			if r.Float64() < prob {
+			if !math.IsNaN(prob) && r.Float64() < prob {
 				accept = true
 			}
 		}

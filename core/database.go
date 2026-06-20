@@ -69,6 +69,7 @@ func InitDB(dir string) (*sql.DB, error) {
 
 // AddKnowledge inserts a new codebase template or config note into SQLite and the FTS5 index
 func AddKnowledge(db *sql.DB, language, topic, content string) error {
+	language = NormalizeLanguage(language)
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -102,19 +103,9 @@ func AddKnowledge(db *sql.DB, language, topic, content string) error {
 
 // DetectLanguage parses terms in a query to find the target programming language
 func DetectLanguage(prompt string) string {
-	promptLower := strings.ToLower(prompt)
-	for _, lang := range []string{"python", "javascript", "bash", "sql", "go"} {
-		if strings.Contains(promptLower, lang) {
-			return lang
-		}
-		if lang == "javascript" && strings.Contains(promptLower, "js") {
-			return "javascript"
-		}
-		if lang == "sql" && strings.Contains(promptLower, "sqlite") {
-			return "sql"
-		}
-		if lang == "bash" && (strings.Contains(promptLower, "shell") || strings.Contains(promptLower, "sh")) {
-			return "bash"
+	for _, token := range languageTokens(prompt) {
+		if normalized := NormalizeLanguage(token); defaultCodeLanguages[normalized] {
+			return normalized
 		}
 	}
 	return ""
@@ -123,13 +114,13 @@ func DetectLanguage(prompt string) string {
 // RetrieveSimilarSnippets executes FTS5 full-text lookup and then parallel QND compression re-ranking
 func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit int) ([]Snippet, error) {
 	detectedLang := DetectLanguage(prompt)
-	
+
 	// Tokenize prompt for FTS5 MATCH
 	words := strings.Fields(strings.ReplaceAll(strings.ReplaceAll(prompt, "'", " "), "\"", " "))
 	var ftsTokens []string
 	for _, w := range words {
 		wLower := strings.ToLower(w)
-		if detectedLang != "" && (wLower == detectedLang || wLower == "python" || wLower == "javascript" || wLower == "js" || wLower == "bash" || wLower == "sh" || wLower == "sql" || wLower == "go") {
+		if detectedLang != "" && isLanguageQueryToken(wLower) {
 			continue
 		}
 		if len(w) > 1 {
@@ -223,62 +214,15 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 	return candidates, nil
 }
 
-// Feedback struct represents a logged negative feedback entry
-type Feedback struct {
-	ID          int    `json:"id"`
-	Sentiment   string `json:"sentiment"`
-	UserInput   string `json:"user_input"`
-	BotResponse string `json:"bot_response"`
-	CreatedAt   string `json:"created_at"`
-}
-
-// AddFeedback inserts a new feedback record if negative sentiment is detected
-func AddFeedback(db *sql.DB, userInput, botResponse string) (bool, error) {
-	lowerInput := strings.ToLower(userInput)
-	negativeWords := []string{
-		"fuck", "shit", "crap", "garbage", "trash", "useless", "broken",
-		"wrong", "incorrect", "fail", "error", "bad", "stupid", "dumb", "hate",
+func isLanguageQueryToken(token string) bool {
+	cleaned := strings.Trim(token, ".,:;()[]{}<>/\\\"'")
+	if cleaned == "" {
+		return false
 	}
-
-	isNegative := false
-	detectedWord := ""
-	for _, word := range negativeWords {
-		if strings.Contains(lowerInput, word) {
-			isNegative = true
-			detectedWord = word
-			break
-		}
+	normalized := NormalizeLanguage(cleaned)
+	if defaultCodeLanguages[normalized] {
+		return true
 	}
-
-	if !isNegative {
-		return false, nil
-	}
-
-	_, err := db.Exec(
-		"INSERT INTO negative_feedback (sentiment, user_input, bot_response) VALUES (?, ?, ?)",
-		detectedWord, userInput, botResponse,
-	)
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// RetrieveNegativeFeedback returns recent negative feedback entries to guide the AI
-func RetrieveNegativeFeedback(db *sql.DB, limit int) ([]Feedback, error) {
-	rows, err := db.Query("SELECT id, sentiment, user_input, bot_response, created_at FROM negative_feedback ORDER BY id DESC LIMIT ?", limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var list []Feedback
-	for rows.Next() {
-		var f Feedback
-		if err := rows.Scan(&f.ID, &f.Sentiment, &f.UserInput, &f.BotResponse, &f.CreatedAt); err != nil {
-			return nil, err
-		}
-		list = append(list, f)
-	}
-	return list, nil
+	_, ok := languageAliases[normalized]
+	return ok
 }

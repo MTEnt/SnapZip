@@ -1,6 +1,6 @@
-module snapzip
+module github.com/MTEnt/SnapZip
 
-go 1.26.4
+go 1.25.0
 
 require (
 	github.com/klauspost/compress v1.18.6

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"snapzip/core"
+	"github.com/MTEnt/SnapZip/core"
 )
 
 func BenchmarkBCACompress(b *testing.B) {

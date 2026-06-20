@@ -2,6 +2,7 @@
 /snapzip
 snapzip_temp_*
 sketch_*
+optimized_*.py
 
 # Database files
 *.db
