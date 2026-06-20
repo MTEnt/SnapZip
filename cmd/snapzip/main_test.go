@@ -133,6 +133,9 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	if err := core.AddKnowledge(db, "rb", "Source file: lib/cache.rb", "class CacheStore\nend\n"); err != nil {
 		t.Fatal(err)
 	}
+	if err := core.AddKnowledge(db, "rb", "Source file: test/cache_test.rb", "class CacheStoreTest\nend\n"); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +146,8 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"ruby CacheStore","limit":1}}}`,
 		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"context_pack","arguments":{"query":"ruby CacheStore","limit":1,"budget":2048}}}`,
+		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"repair_pack","arguments":{"error_output":"lib/cache.rb:1: uninitialized constant CacheStore","limit":2,"budget":4096}}}`,
+		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"affected_tests","arguments":{"path":"lib/cache.rb","limit":5}}}`,
 	}, "\n") + "\n"
 
 	var output bytes.Buffer
@@ -151,10 +156,10 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 4 {
-		t.Fatalf("got %d MCP responses, want 4:\n%s", len(lines), output.String())
+	if len(lines) != 6 {
+		t.Fatalf("got %d MCP responses, want 6:\n%s", len(lines), output.String())
 	}
-	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) {
+	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) {
 		t.Fatalf("tools/list did not expose expected tools:\n%s", lines[1])
 	}
 	if !strings.Contains(lines[2], "CacheStore") {
@@ -162,6 +167,12 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	}
 	if !strings.Contains(lines[3], "SnapZip Context Pack") || !strings.Contains(lines[3], "CacheStore") {
 		t.Fatalf("context_pack tool response did not include expected context:\n%s", lines[3])
+	}
+	if !strings.Contains(lines[4], "Context Receipts") || !strings.Contains(lines[4], "lib/cache.rb") {
+		t.Fatalf("repair_pack tool response did not include receipt-backed context:\n%s", lines[4])
+	}
+	if !strings.Contains(lines[5], "test/cache_test.rb") {
+		t.Fatalf("affected_tests tool response missing direct test:\n%s", lines[5])
 	}
 }
 
@@ -208,12 +219,34 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	repairOutput := runSnapZip(t, repoRoot, "repair-pack", "--db-dir", dbDir, "--error-file", errorFile, "--budget", "4096")
-	if !strings.Contains(repairOutput, "SnapZip Context Pack") || !strings.Contains(repairOutput, "cache") {
+	if !strings.Contains(repairOutput, "SnapZip Context Pack") || !strings.Contains(repairOutput, "Context Receipts") || !strings.Contains(repairOutput, "cache") {
 		t.Fatalf("repair-pack output missing failure context:\n%s", repairOutput)
+	}
+	repairJSON := runSnapZip(t, repoRoot, "repair-pack", "--db-dir", dbDir, "--error-file", errorFile, "--budget", "4096", "--json")
+	var repairPayload core.ContextPack
+	if err := json.Unmarshal([]byte(repairJSON), &repairPayload); err != nil {
+		t.Fatalf("repair-pack --json returned invalid JSON: %v\n%s", err, repairJSON)
+	}
+	if len(repairPayload.Receipts) == 0 {
+		t.Fatalf("repair-pack --json missing receipts:\n%s", repairJSON)
+	}
+
+	affectedOutput := runSnapZip(t, repoRoot, "affected", "--db-dir", dbDir, "--path", "pkg/cache.go")
+	if !strings.Contains(affectedOutput, "pkg/cache_test.go") {
+		t.Fatalf("affected output missing likely test:\n%s", affectedOutput)
+	}
+
+	diagnoseJSON := runSnapZip(t, repoRoot, "diagnose", "--db-dir", dbDir, "--cmd", "printf 'pkg/cache_test.go:3: undefined: CacheStore\\n'; exit 1", "--json")
+	var diagnosePayload diagnoseReport
+	if err := json.Unmarshal([]byte(diagnoseJSON), &diagnosePayload); err != nil {
+		t.Fatalf("diagnose --json returned invalid JSON: %v\n%s", err, diagnoseJSON)
+	}
+	if diagnosePayload.Passed || diagnosePayload.Pack == nil || len(diagnosePayload.Pack.Receipts) == 0 {
+		t.Fatalf("diagnose --json missing failure pack: %+v", diagnosePayload)
 	}
 
 	auditOutput := runSnapZip(t, repoRoot, "audit", "--db-dir", dbDir)
-	if !strings.Contains(auditOutput, "memory.db gitignore") || !strings.Contains(auditOutput, "MCP") {
+	if !strings.Contains(auditOutput, "memory.db gitignore") || !strings.Contains(auditOutput, ".snapzipignore") || !strings.Contains(auditOutput, "MCP") {
 		t.Fatalf("audit output missing expected checks:\n%s", auditOutput)
 	}
 

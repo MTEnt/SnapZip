@@ -23,6 +23,14 @@ The smoke suite runs the hard Red-Black Tree stress benchmark. The raw baseline 
 python3 benchmarks/run.py --suite smoke --snapzip-bin ./snapzip
 ```
 
+## Repair Retrieval Benchmark
+
+The repair retrieval suite uses a public-safe synthetic failure that resembles a unit-test traceback. It checks whether `repair-pack` ranks the target source function first and emits context receipts that explain the ranking.
+
+```bash
+python3 benchmarks/run.py --suite repair-retrieval --snapzip-bin ./snapzip
+```
+
 ## Full Algorithm Benchmark
 
 The 20-task suite covers common algorithm exercises such as LRU cache, trie wildcard search, graph shortest paths, dynamic programming, heapsort, A*, and Red-Black Tree insertion/deletion.
@@ -39,4 +47,4 @@ python3 benchmarks/run.py --suite all --snapzip-bin ./snapzip --json /tmp/snapzi
 
 ## Interpreting Results
 
-These benchmarks validate SnapZip's local retrieval, context priming, optimizer, and syntax-check workflow. They are not a claim that SnapZip replaces a general code generator or solves arbitrary tasks without reference context. For marketing or release notes, publish the raw JSON report, machine details, SnapZip commit, and exact command used.
+These benchmarks validate SnapZip's local retrieval, repair-context ranking, context priming, optimizer, and syntax-check workflow. They are not a claim that SnapZip replaces a general code generator or solves arbitrary tasks without reference context. For marketing or release notes, publish the raw JSON report, machine details, SnapZip commit, and exact command used.

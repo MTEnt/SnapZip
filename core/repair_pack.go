@@ -35,6 +35,7 @@ func BuildRepairContextPack(db *sql.DB, comp Compressor, failureOutput, extraQue
 	}
 	result.Query = query
 	result.Snippets = mergeRepairSnippets(focused, result.Snippets, limit)
+	result.Receipts = repairReceiptsForSnippets(result.Snippets, analysis, result.Receipts)
 	return buildContextPackFromResult(query, mode, budgetBytes, result), nil
 }
 
@@ -288,6 +289,92 @@ func mergeRepairSnippets(focused []Snippet, fallback []Snippet, limit int) []Sni
 	return merged
 }
 
+func repairReceiptsForSnippets(snippets []Snippet, analysis FailureAnalysis, fallback []ContextReceipt) []ContextReceipt {
+	fallbackByKey := map[string]ContextReceipt{}
+	for _, receipt := range fallback {
+		key := receipt.Path + ":" + fmt.Sprint(receipt.StartLine) + ":" + fmt.Sprint(receipt.EndLine)
+		fallbackByKey[key] = receipt
+	}
+
+	receipts := make([]ContextReceipt, 0, len(snippets))
+	for idx, snippet := range snippets {
+		reasons, evidence, confidence := repairReceiptDetails(snippet, analysis)
+		if len(reasons) == 0 {
+			key := snippet.Path + ":" + fmt.Sprint(snippet.StartLine) + ":" + fmt.Sprint(snippet.EndLine)
+			if fallbackReceipt, ok := fallbackByKey[key]; ok {
+				fallbackReceipt.Rank = idx + 1
+				receipts = append(receipts, fallbackReceipt)
+				continue
+			}
+			reasons = []string{"fallback retrieval match after repair-focused candidates"}
+			confidence = 0.45
+		}
+		receipts = append(receipts, receiptForSnippet(idx+1, snippet, confidence, reasons, evidence))
+	}
+	return receipts
+}
+
+func repairReceiptDetails(snippet Snippet, analysis FailureAnalysis) ([]string, []string, float64) {
+	var reasons []string
+	var evidence []string
+	confidence := 0.45
+
+	if snippet.Score <= -1.99 {
+		reasons = append(reasons, "matched an indexed symbol or identifier from the failure output")
+		confidence = 0.78
+	}
+	if snippet.Score <= -1.49 && snippet.Score > -1.99 {
+		reasons = append(reasons, "matched a concrete file/line reference from the failure output")
+		confidence = 0.72
+	}
+
+	for _, ref := range analysis.FileRefs {
+		if pathSuffixMatch(snippet.Path, ref.Path) {
+			if ref.Line > 0 && lineWithinSnippet(ref.Line, snippet) {
+				reasons = append(reasons, "covers failure stack location")
+				evidence = append(evidence, fmt.Sprintf("%s:%d", ref.Path, ref.Line))
+				confidence = maxFloat(confidence, 0.86)
+			} else {
+				reasons = append(reasons, "matches a file mentioned in the failure output")
+				evidence = append(evidence, ref.Path)
+				confidence = maxFloat(confidence, 0.68)
+			}
+			if ref.Function != "" {
+				evidence = append(evidence, "frame function "+ref.Function)
+			}
+		}
+	}
+
+	for _, symbol := range analysis.Symbols {
+		if symbol != "" && strings.Contains(snippet.Content, symbol) {
+			reasons = append(reasons, "contains failure-related symbol "+symbol)
+			evidence = append(evidence, symbol)
+			confidence = maxFloat(confidence, 0.82)
+		}
+	}
+	for _, identifier := range analysis.Identifiers {
+		if identifier != "" && strings.Contains(snippet.Content, identifier) {
+			reasons = append(reasons, "contains failure-related identifier "+identifier)
+			evidence = append(evidence, identifier)
+			confidence = maxFloat(confidence, 0.76)
+		}
+	}
+
+	if isTestPath(snippet.Path) {
+		reasons = append(reasons, "included as failing or related test context")
+		confidence = minFloat(confidence, 0.70)
+	} else if len(reasons) > 0 {
+		reasons = append(reasons, "source file ranked ahead of test/dependency context")
+		confidence = maxFloat(confidence, 0.80)
+	}
+	if isDependencyPath(snippet.Path) {
+		reasons = append(reasons, "dependency path retained only as supporting stack context")
+		confidence = minFloat(confidence, 0.50)
+	}
+
+	return uniqueStrings(reasons), uniqueStrings(evidence), confidence
+}
+
 func snippetDedupeKey(snippet Snippet) string {
 	if snippet.Path != "" {
 		return fmt.Sprintf("%s:%d:%d", snippet.Path, snippet.StartLine, snippet.EndLine)
@@ -348,4 +435,22 @@ func isDependencyPath(path string) bool {
 		strings.Contains(path, "/site-packages/") ||
 		strings.Contains(path, "/node_modules/") ||
 		strings.Contains(path, "/vendor/")
+}
+
+func lineWithinSnippet(line int, snippet Snippet) bool {
+	return line > 0 && snippet.StartLine > 0 && snippet.EndLine > 0 && line >= snippet.StartLine && line <= snippet.EndLine
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }

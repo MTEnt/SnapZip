@@ -186,7 +186,7 @@ func (s mcpServer) tools() []mcpTool {
 		{
 			Name:        "context_pack",
 			Title:       "Build SnapZip context pack",
-			Description: "Build a bounded Markdown context pack with relevant snippets and feedback memory.",
+			Description: "Build a bounded Markdown context pack with relevant snippets, receipts, and feedback memory.",
 			InputSchema: objectSchema(
 				[]string{"query"},
 				map[string]any{
@@ -196,6 +196,36 @@ func (s mcpServer) tools() []mcpTool {
 					"budget":         integerSchema("Approximate byte budget for rendered context.", core.MinContextPackBudgetBytes, core.MaxContextPackBudgetBytes),
 					"feedback_limit": integerSchema("Maximum feedback entries to include.", 0, 100),
 					"mode":           stringSchema("Optional pack mode: debug, refactor, test, or docs."),
+				},
+			),
+		},
+		{
+			Name:        "repair_pack",
+			Title:       "Build SnapZip repair pack",
+			Description: "Build a failure-aware context pack from test/build output using stack frames, symbols, identifiers, and context receipts.",
+			InputSchema: objectSchema(
+				nil,
+				map[string]any{
+					"error_output":   stringSchema("Raw test/build failure output. Preferred for MCP callers."),
+					"error_file":     stringSchema("Optional local file containing failure output."),
+					"query":          stringSchema("Optional extra query terms."),
+					"db_dir":         stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
+					"limit":          integerSchema("Maximum snippets to consider.", 1, 100),
+					"budget":         integerSchema("Approximate byte budget for rendered context.", core.MinContextPackBudgetBytes, core.MaxContextPackBudgetBytes),
+					"feedback_limit": integerSchema("Maximum feedback entries to include.", 0, 100),
+				},
+			),
+		},
+		{
+			Name:        "affected_tests",
+			Title:       "Find likely affected tests",
+			Description: "Find tests likely affected by changed or named indexed source files.",
+			InputSchema: objectSchema(
+				[]string{"path"},
+				map[string]any{
+					"path":   stringSchema("Comma-separated indexed source paths, such as core/database.go."),
+					"db_dir": stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
+					"limit":  integerSchema("Maximum tests and related files to return.", 1, 100),
 				},
 			),
 		},
@@ -280,6 +310,10 @@ func (s mcpServer) callTool(params json.RawMessage) (mcpToolResult, *rpcError) {
 		return s.callSearch(call.Arguments), nil
 	case "context_pack":
 		return s.callContextPack(call.Arguments), nil
+	case "repair_pack":
+		return s.callRepairPack(call.Arguments), nil
+	case "affected_tests":
+		return s.callAffectedTests(call.Arguments), nil
 	case "map":
 		return s.callMap(call.Arguments), nil
 	case "symbols":
@@ -349,6 +383,66 @@ func (s mcpServer) callContextPack(args map[string]any) mcpToolResult {
 		return toolError(err.Error())
 	}
 	return toolSuccess(core.RenderContextPack(pack), pack)
+}
+
+func (s mcpServer) callRepairPack(args map[string]any) mcpToolResult {
+	errorOutput := stringArg(args, "error_output", "")
+	errorFile := strings.TrimSpace(stringArg(args, "error_file", ""))
+	if strings.TrimSpace(errorOutput) == "" && errorFile != "" {
+		content, err := os.ReadFile(errorFile)
+		if err != nil {
+			return toolError(err.Error())
+		}
+		errorOutput = string(content)
+	}
+	if strings.TrimSpace(errorOutput) == "" {
+		return toolError("error_output or error_file is required")
+	}
+
+	db, done, err := s.openDB(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	defer done()
+
+	comp, err := core.NewZstdCompressor(zstd.SpeedDefault)
+	if err != nil {
+		return toolError(err.Error())
+	}
+
+	pack, err := core.BuildRepairContextPack(
+		db,
+		comp,
+		errorOutput,
+		stringArg(args, "query", ""),
+		"debug",
+		intArg(args, "limit", 6),
+		intArg(args, "budget", core.DefaultContextPackBudgetBytes),
+		intArg(args, "feedback_limit", 5),
+	)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	return toolSuccess(core.RenderContextPack(pack), pack)
+}
+
+func (s mcpServer) callAffectedTests(args map[string]any) mcpToolResult {
+	path := strings.TrimSpace(stringArg(args, "path", ""))
+	if path == "" {
+		return toolError("path is required")
+	}
+
+	db, done, err := s.openDB(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	defer done()
+
+	report, err := core.FindAffectedTests(db, strings.Split(path, ","), intArg(args, "limit", 10))
+	if err != nil {
+		return toolError(err.Error())
+	}
+	return toolSuccess(renderAffectedReport(report), report)
 }
 
 func (s mcpServer) callMap(args map[string]any) mcpToolResult {

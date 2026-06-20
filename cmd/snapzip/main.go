@@ -35,6 +35,10 @@ func main() {
 		handleSymbols()
 	case "related":
 		handleRelated()
+	case "affected":
+		handleAffected()
+	case "diagnose":
+		handleDiagnose()
 	case "audit":
 		handleAudit()
 	case "install-agent":
@@ -72,6 +76,8 @@ func printUsage() {
 	fmt.Println("  map            Show a compact repo map from indexed symbols")
 	fmt.Println("  symbols        Search indexed symbols")
 	fmt.Println("  related        Find files related to an indexed path")
+	fmt.Println("  affected       Find tests likely affected by changed or named files")
+	fmt.Println("  diagnose       Run a command and build a repair pack from failures")
 	fmt.Println("  audit          Check local privacy and index hygiene")
 	fmt.Println("  install-agent  Write SnapZip agent integration files")
 	fmt.Println("  eval           Run included public benchmark suites")

@@ -179,18 +179,138 @@ def run_hard_rbt(parent, args, snapzip_bin):
     }
 
 
+def write_file(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def naive_file_rank(root, query):
+    tokens = [token for token in re.split(r"[^A-Za-z0-9_]+", query.lower()) if len(token) > 2]
+    candidates = []
+    for path in root.rglob("*.py"):
+        if "memory.db" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore").lower()
+        rel = path.relative_to(root).as_posix()
+        score = sum(text.count(token) for token in tokens)
+        score += sum(3 for token in tokens if token in rel.lower())
+        if score > 0:
+            candidates.append({"path": rel, "score": score})
+    candidates.sort(key=lambda item: (-item["score"], item["path"]))
+    return candidates
+
+
+def run_repair_retrieval(parent, args, snapzip_bin):
+    work_dir = parent / "repair_retrieval"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    write_file(
+        work_dir / "youtube_dl" / "utils.py",
+        """
+import re
+
+def _match_one(filter_part, dct):
+    UNARY_OPERATORS = {
+        '': lambda v: v is not None,
+        '!': lambda v: v is None,
+    }
+    m = re.search(r'(?P<op>!?)(?P<key>[a-z_]+)$', filter_part)
+    if m:
+        op = UNARY_OPERATORS[m.group('op')]
+        return op(dct.get(m.group('key')))
+    raise ValueError(filter_part)
+
+def match_str(filter_str, dct):
+    return all(_match_one(part, dct) for part in filter_str.split('&'))
+""".strip()
+        + "\n",
+    )
+    write_file(
+        work_dir / "youtube_dl" / "extractor" / "bambuser.py",
+        ("is_live archived stream metadata\n" * 120),
+    )
+    write_file(
+        work_dir / "test" / "test_utils.py",
+        """
+from youtube_dl.utils import match_str
+
+def test_match_str():
+    assert not match_str('is_live', {'is_live': False})
+""".strip()
+        + "\n",
+    )
+    failure = "\n".join(
+        [
+            "Traceback (most recent call last):",
+            f'  File "{work_dir / "test" / "test_utils.py"}", line 4, in test_match_str',
+            "    assert not match_str('is_live', {'is_live': False})",
+            "AssertionError: True is not false",
+        ]
+    )
+    failure_file = work_dir / "failure.txt"
+    failure_file.write_text(failure + "\n", encoding="utf-8")
+
+    _, index_record = run_cmd(
+        [snapzip_bin, "index", "--reset", "--db-dir", str(work_dir), "--crawl", str(work_dir), "--langs", "python"],
+        work_dir,
+    )
+    raw_candidates = naive_file_rank(work_dir, failure)
+    _, repair_record = run_cmd(
+        [
+            snapzip_bin,
+            "repair-pack",
+            "--db-dir",
+            str(work_dir),
+            "--error-file",
+            str(failure_file),
+            "--json",
+            "--limit",
+            "4",
+            "--budget",
+            "6000",
+        ],
+        work_dir,
+    )
+    pack = parse_json_stdout(repair_record)
+    snippets = pack.get("snippets") or []
+    receipts = pack.get("receipts") or []
+    top = snippets[0] if snippets else {}
+    passed = (
+        top.get("path") == "youtube_dl/utils.py"
+        and "match_str" in top.get("content", "")
+        and len(receipts) > 0
+    )
+    return {
+        "name": "repair_retrieval",
+        "passed": passed,
+        "raw": {
+            "ranking": raw_candidates[:5],
+            "top_path": raw_candidates[0]["path"] if raw_candidates else "",
+        },
+        "snapzip": {
+            "top_path": top.get("path", ""),
+            "top_location": f"{top.get('path', '')}:{top.get('start_line', '')}-{top.get('end_line', '')}",
+            "receipt_count": len(receipts),
+            "pack": pack,
+            "index": index_record,
+            "repair_pack": repair_record,
+        },
+    }
+
+
 def snapzip_passed(result):
     if result["name"] == "algorithm_20":
         harness = result["snapzip"]["harness"]
         return harness["passed"] == harness["total"]
     if result["name"] == "hard_rbt":
         return bool(result["snapzip"]["stress"]["result"].get("passed"))
+    if result["name"] == "repair_retrieval":
+        return bool(result.get("passed"))
     return False
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run reproducible SnapZip benchmark comparisons.")
-    parser.add_argument("--suite", choices=["smoke", "algorithm-20", "hard-rbt", "all"], default="smoke")
+    parser.add_argument("--suite", choices=["smoke", "algorithm-20", "hard-rbt", "repair-retrieval", "all"], default="smoke")
     parser.add_argument("--snapzip-bin", default="", help="Path to a built snapzip binary")
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--json", default="", help="Optional path to write the JSON report")
@@ -217,6 +337,8 @@ def main():
 
         if args.suite in ("smoke", "hard-rbt", "all"):
             result["runs"].append(run_hard_rbt(work_parent, args, snapzip_bin))
+        if args.suite in ("repair-retrieval", "all"):
+            result["runs"].append(run_repair_retrieval(work_parent, args, snapzip_bin))
         if args.suite in ("algorithm-20", "all"):
             result["runs"].append(run_algorithm_20(work_parent, args, snapzip_bin))
 

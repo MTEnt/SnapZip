@@ -249,6 +249,133 @@ func handleRelated() {
 	fmt.Print(core.RenderRepoMap(core.RepoMap{Files: files}))
 }
 
+func handleAffected() {
+	fs := flag.NewFlagSet("affected", flag.ExitOnError)
+	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
+	pathInput := fs.String("path", "", "Comma-separated indexed source paths")
+	changed := fs.Bool("changed", false, "Use git changed files")
+	since := fs.String("since", "", "Use files changed since a git ref")
+	dir := fs.String("dir", ".", "Git working directory for --changed or --since")
+	limit := fs.Int("limit", 10, "Maximum tests and related files to return")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
+	_ = fs.Parse(os.Args[2:])
+
+	var paths []string
+	if strings.TrimSpace(*pathInput) != "" {
+		paths = append(paths, strings.Split(*pathInput, ",")...)
+	}
+	if *changed || strings.TrimSpace(*since) != "" {
+		root, err := filepath.Abs(*dir)
+		if err != nil {
+			fmt.Printf("Affected lookup failed: %v\n", err)
+			os.Exit(1)
+		}
+		changedFiles, err := gitChangedFiles(root, strings.TrimSpace(*since))
+		if err != nil {
+			fmt.Printf("Affected lookup failed: %v\n", err)
+			os.Exit(1)
+		}
+		paths = append(paths, changedFiles...)
+	}
+	if len(paths) == 0 {
+		fmt.Println("Error: provide --path or --changed/--since")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	db, err := openDBOrExit(*dbDir)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	report, err := core.FindAffectedTests(db, paths, *limit)
+	if err != nil {
+		fmt.Printf("Affected lookup failed: %v\n", err)
+		os.Exit(1)
+	}
+	if *jsonOutput {
+		writeJSON(report)
+		return
+	}
+	fmt.Print(renderAffectedReport(report))
+}
+
+type diagnoseReport struct {
+	Command  string            `json:"command"`
+	Dir      string            `json:"dir"`
+	ExitCode int               `json:"exit_code"`
+	Passed   bool              `json:"passed"`
+	Output   string            `json:"output"`
+	Pack     *core.ContextPack `json:"pack,omitempty"`
+}
+
+func handleDiagnose() {
+	fs := flag.NewFlagSet("diagnose", flag.ExitOnError)
+	commandText := fs.String("cmd", "", "Command to run, such as 'go test ./...'")
+	dir := fs.String("dir", ".", "Working directory for the command")
+	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
+	query := fs.String("query", "", "Additional repair-pack search query")
+	limit := fs.Int("limit", 6, "Maximum repair snippets to include")
+	budget := fs.Int("budget", core.DefaultContextPackBudgetBytes, "Approximate byte budget")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
+	alwaysPack := fs.Bool("always-pack", false, "Build a pack even when the command succeeds")
+	_ = fs.Parse(os.Args[2:])
+	if strings.TrimSpace(*commandText) == "" && fs.NArg() > 0 {
+		*commandText = strings.Join(fs.Args(), " ")
+	}
+	if strings.TrimSpace(*commandText) == "" {
+		fmt.Println("Error: provide --cmd or a command after flags")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	output, exitCode := runDiagnoseCommand(*commandText, *dir)
+	report := diagnoseReport{
+		Command:  *commandText,
+		Dir:      *dir,
+		ExitCode: exitCode,
+		Passed:   exitCode == 0,
+		Output:   output,
+	}
+
+	if exitCode != 0 || *alwaysPack {
+		db, err := openDBOrExit(*dbDir)
+		if err != nil {
+			os.Exit(1)
+		}
+		defer db.Close()
+		comp, err := core.NewZstdCompressor(zstd.SpeedDefault)
+		if err != nil {
+			fmt.Printf("Error initializing compressor: %v\n", err)
+			os.Exit(1)
+		}
+		pack, err := core.BuildRepairContextPack(db, comp, output, *query, "debug", *limit, *budget, 5)
+		if err != nil {
+			fmt.Printf("Diagnose failed: %v\n", err)
+			os.Exit(1)
+		}
+		report.Pack = &pack
+	}
+
+	if *jsonOutput {
+		writeJSON(report)
+		return
+	}
+	fmt.Printf("# SnapZip Diagnose\n\nCommand: `%s`\nExit code: %d\n", report.Command, report.ExitCode)
+	if report.Passed {
+		fmt.Println("Status: passed")
+	} else {
+		fmt.Println("Status: failed")
+	}
+	if report.Pack != nil {
+		fmt.Print("\n")
+		fmt.Print(core.RenderContextPack(*report.Pack))
+	} else {
+		fmt.Println("\nNo repair pack built because the command passed.")
+	}
+}
+
 func handleAudit() {
 	fs := flag.NewFlagSet("audit", flag.ExitOnError)
 	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
@@ -269,14 +396,71 @@ func handleAudit() {
 	}
 }
 
+func renderAffectedReport(report core.AffectedReport) string {
+	var builder strings.Builder
+	builder.WriteString("# SnapZip Affected Tests\n\n")
+	if len(report.InputPaths) > 0 {
+		builder.WriteString("Input paths:\n")
+		for _, path := range report.InputPaths {
+			fmt.Fprintf(&builder, "- %s\n", path)
+		}
+	}
+	builder.WriteString("\n## Likely Tests\n")
+	if len(report.Tests) == 0 {
+		builder.WriteString("\nNo likely tests found in the current index.\n")
+	} else {
+		for _, test := range report.Tests {
+			fmt.Fprintf(&builder, "\n- %s", test.Path)
+			if test.Confidence > 0 {
+				fmt.Fprintf(&builder, " (confidence %.2f)", test.Confidence)
+			}
+			builder.WriteByte('\n')
+			for _, reason := range test.Reasons {
+				fmt.Fprintf(&builder, "  - %s\n", reason)
+			}
+		}
+	}
+	if len(report.Related) > 0 {
+		builder.WriteString("\n## Related Files\n")
+		for _, file := range report.Related {
+			fmt.Fprintf(&builder, "\n- %s", file.Path)
+			if file.Confidence > 0 {
+				fmt.Fprintf(&builder, " (confidence %.2f)", file.Confidence)
+			}
+			builder.WriteByte('\n')
+			for _, reason := range file.Reasons {
+				fmt.Fprintf(&builder, "  - %s\n", reason)
+			}
+		}
+	}
+	return builder.String()
+}
+
+func runDiagnoseCommand(commandText, dir string) (string, int) {
+	cmd := exec.Command("sh", "-c", commandText)
+	cmd.Dir = dir
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err := cmd.Run()
+	if err == nil {
+		return output.String(), 0
+	}
+	if cmd.ProcessState != nil {
+		return output.String(), cmd.ProcessState.ExitCode()
+	}
+	return output.String() + err.Error(), 1
+}
+
 func runAudit(dbDir string) auditReport {
 	report := auditReport{DBDir: dbDir}
 	report.Checks = append(report.Checks, auditGitIgnored("memory.db"))
+	report.Checks = append(report.Checks, auditSnapZipIgnore("."))
 	report.Checks = append(report.Checks, auditDBStats(dbDir)...)
 	report.Checks = append(report.Checks, auditSecrets(dbDir))
 	report.Checks = append(report.Checks,
 		auditCheck{Name: "dependency dirs skipped", Passed: true, Details: "indexer skips .git, node_modules, vendor, dist, build, target, venv, .venv, and common generated directories"},
-		auditCheck{Name: "mcp write surface", Passed: true, Details: "MCP server exposes read-only search, context_pack, get_feedback, stats, map, symbols, and related tools"},
+		auditCheck{Name: "mcp write surface", Passed: true, Details: "MCP server exposes read-only search, context_pack, repair_pack, affected_tests, get_feedback, stats, map, symbols, and related tools"},
 	)
 	return report
 }
@@ -287,6 +471,17 @@ func auditGitIgnored(path string) auditCheck {
 		return auditCheck{Name: "memory.db gitignore", Passed: false, Details: path + " is not ignored by git"}
 	}
 	return auditCheck{Name: "memory.db gitignore", Passed: true, Details: path + " is ignored by git"}
+}
+
+func auditSnapZipIgnore(root string) auditCheck {
+	patterns, err := core.LoadSnapZipIgnore(root)
+	if err != nil {
+		return auditCheck{Name: ".snapzipignore", Passed: false, Details: err.Error()}
+	}
+	if len(patterns) == 0 {
+		return auditCheck{Name: ".snapzipignore", Passed: true, Details: "optional .snapzipignore not present; default dependency/generated skips still apply"}
+	}
+	return auditCheck{Name: ".snapzipignore", Passed: true, Details: fmt.Sprintf("%d local ignore patterns loaded", len(patterns))}
 }
 
 func auditDBStats(dbDir string) []auditCheck {
@@ -417,16 +612,17 @@ func agentRuleText() string {
 	return `# SnapZip Agent Integration
 
 Use SnapZip when available. Run ` + "`snapzip stats --db-dir .`" + ` to check whether local context exists.
-Before non-trivial code changes, run ` + "`snapzip pack --query \"<topic>\" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>`" + ` for targeted local context and feedback memory.
+Before non-trivial code changes, run ` + "`snapzip pack --query \"<topic>\" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>`" + ` for targeted local context, receipts, and feedback memory.
 Use ` + "`snapzip symbols --query \"<symbol>\" --limit 10`" + ` or ` + "`snapzip map --limit 50`" + ` for structural context.
-Use ` + "`snapzip repair-pack --error-file <test-output>`" + ` after failing tests.
+Use ` + "`snapzip related --path <file>`" + ` and ` + "`snapzip affected --path <file>`" + ` to find related files and likely tests.
+Use ` + "`snapzip repair-pack --error-file <test-output>`" + ` or ` + "`snapzip diagnose --cmd \"<test command>\"`" + ` after failing tests.
 Do not assume SnapZip memory exists on fresh installs; index first with ` + "`snapzip index --langs all --crawl .`" + ` when appropriate.
 `
 }
 
 func handleEval() {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
-	suite := fs.String("suite", "smoke", "Benchmark suite: smoke, algorithm-20, hard-rbt, all")
+	suite := fs.String("suite", "smoke", "Benchmark suite: smoke, algorithm-20, hard-rbt, repair-retrieval, all")
 	snapzipBin := fs.String("snapzip-bin", "", "Path to built snapzip binary")
 	iterations := fs.Int("iterations", 100, "Optimizer iterations for benchmark harness")
 	jsonPath := fs.String("json", "", "Optional path to write JSON report")

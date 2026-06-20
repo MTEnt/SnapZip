@@ -36,6 +36,7 @@ var defaultSkipDirs = stringSet(
 
 var defaultSkipFiles = stringSet(
 	".ds_store",
+	".snapzipignore",
 	"memory.db",
 )
 
@@ -44,6 +45,7 @@ type IndexOptions struct {
 	MaxContentBytes int
 	SkipDirs        map[string]bool
 	SkipFiles       map[string]bool
+	IgnorePatterns  []string
 }
 
 type ContextBundle struct {
@@ -67,12 +69,13 @@ func IndexDirectory(db *sql.DB, root string, filter LanguageFilter) (int, error)
 
 func IndexDirectoryWithOptions(db *sql.DB, root string, filter LanguageFilter, options IndexOptions) (int, error) {
 	options = normalizeIndexOptions(options)
+	options = withSnapZipIgnore(root, options)
 	indexed := 0
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if skip, err := shouldSkipEntry(path, entry, options); skip || err != nil {
+		if skip, err := shouldSkipEntry(root, path, entry, options); skip || err != nil {
 			return err
 		}
 		if entry.IsDir() {
@@ -96,6 +99,7 @@ func IndexDirectoryWithOptions(db *sql.DB, root string, filter LanguageFilter, o
 
 func IndexFilesWithOptions(db *sql.DB, root string, paths []string, filter LanguageFilter, options IndexOptions) (int, error) {
 	options = normalizeIndexOptions(options)
+	options = withSnapZipIgnore(root, options)
 	indexed := 0
 	for _, path := range paths {
 		if strings.TrimSpace(path) == "" {
@@ -126,6 +130,9 @@ func IndexFileWithOptions(db *sql.DB, root, path string, filter LanguageFilter, 
 		return 0, nil
 	}
 	relPath := relativeSourcePath(root, path)
+	if matchesIgnorePatterns(relPath, options.IgnorePatterns) {
+		return 0, nil
+	}
 	if options.SkipFiles[strings.ToLower(filepath.Base(relPath))] {
 		return 0, nil
 	}
@@ -163,6 +170,7 @@ func LoadContextDirectory(root string, filter LanguageFilter, maxBytes int) (Con
 		maxBytes = DefaultContextLimitBytes
 	}
 	options := DefaultIndexOptions()
+	options = withSnapZipIgnore(root, options)
 
 	vocab := make(map[string]bool)
 	var builder strings.Builder
@@ -172,7 +180,7 @@ func LoadContextDirectory(root string, filter LanguageFilter, maxBytes int) (Con
 		if walkErr != nil {
 			return walkErr
 		}
-		if skip, err := shouldSkipEntry(path, entry, options); skip || err != nil {
+		if skip, err := shouldSkipEntry(root, path, entry, options); skip || err != nil {
 			return err
 		}
 		if entry.IsDir() {
@@ -285,6 +293,37 @@ func normalizeIndexOptions(options IndexOptions) IndexOptions {
 	return options
 }
 
+func withSnapZipIgnore(root string, options IndexOptions) IndexOptions {
+	patterns, err := LoadSnapZipIgnore(root)
+	if err != nil || len(patterns) == 0 {
+		return options
+	}
+	options.IgnorePatterns = append(append([]string{}, options.IgnorePatterns...), patterns...)
+	return options
+}
+
+func LoadSnapZipIgnore(root string) ([]string, error) {
+	content, err := os.ReadFile(filepath.Join(root, ".snapzipignore"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var patterns []string
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(filepath.ToSlash(line), "./")
+		if line != "" {
+			patterns = append(patterns, strings.ToLower(line))
+		}
+	}
+	return uniqueStrings(patterns), nil
+}
+
 type contentChunk struct {
 	Data      []byte
 	StartLine int
@@ -359,8 +398,15 @@ func lastNewline(content []byte) int {
 	return -1
 }
 
-func shouldSkipEntry(path string, entry fs.DirEntry, options IndexOptions) (bool, error) {
+func shouldSkipEntry(root, path string, entry fs.DirEntry, options IndexOptions) (bool, error) {
 	base := strings.ToLower(entry.Name())
+	relPath := strings.ToLower(relativeSourcePath(root, path))
+	if matchesIgnorePatterns(relPath, options.IgnorePatterns) {
+		if entry.IsDir() {
+			return true, filepath.SkipDir
+		}
+		return true, nil
+	}
 	if entry.IsDir() {
 		if options.SkipDirs[base] {
 			return true, filepath.SkipDir
@@ -379,6 +425,42 @@ func shouldSkipEntry(path string, entry fs.DirEntry, options IndexOptions) (bool
 		return true, nil
 	}
 	return false, nil
+}
+
+func matchesIgnorePatterns(relPath string, patterns []string) bool {
+	relPath = strings.ToLower(strings.TrimPrefix(filepath.ToSlash(relPath), "./"))
+	base := strings.ToLower(filepath.Base(relPath))
+	for _, pattern := range patterns {
+		pattern = strings.ToLower(strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(pattern)), "./"))
+		if pattern == "" {
+			continue
+		}
+		if strings.HasSuffix(pattern, "/") {
+			prefix := strings.TrimSuffix(pattern, "/")
+			if relPath == prefix || strings.HasPrefix(relPath, prefix+"/") {
+				return true
+			}
+			continue
+		}
+		if !strings.Contains(pattern, "/") {
+			if base == pattern {
+				return true
+			}
+			for _, part := range strings.Split(relPath, "/") {
+				if part == pattern {
+					return true
+				}
+			}
+			continue
+		}
+		if relPath == pattern || strings.HasPrefix(relPath, pattern+"/") {
+			return true
+		}
+		if ok, _ := filepath.Match(pattern, relPath); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func isTextContent(content []byte) bool {

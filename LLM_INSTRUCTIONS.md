@@ -20,6 +20,10 @@ When `snapzip` is available in the workspace or on `PATH`:
    ```bash
    snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>
    ```
+   Prefer JSON when the caller needs machine-readable snippets and context receipts.
+   ```bash
+   snapzip pack --query "<topic>" --limit 5 --budget 12000 --json
+   ```
 
 4. Use structural lookup before editing files when symbol or ownership context matters.
    ```bash
@@ -37,18 +41,28 @@ When `snapzip` is available in the workspace or on `PATH`:
    ```bash
    snapzip repair-pack --error-file <test-output-file> --budget 12000
    ```
+   Or run the command through SnapZip and let it capture the failure output.
+   ```bash
+   snapzip diagnose --cmd "<test command>" --budget 12000
+   ```
 
-7. For draft files, run optimization with local context and write to an explicit output path.
+7. Before or after edits, ask for likely affected tests.
+   ```bash
+   snapzip affected --path <file> --limit 10
+   snapzip affected --changed --limit 10
+   ```
+
+8. For draft files, run optimization with local context and write to an explicit output path.
    ```bash
    snapzip optimize --sketch <draft_file> --context <context_dir> --output <output_file>
    ```
 
-8. If SnapZip is unavailable, continue with normal repository inspection and mention that no SnapZip memory or index was available.
+9. If SnapZip is unavailable, continue with normal repository inspection and mention that no SnapZip memory or index was available.
 
 ## Editor Rule Template
 
 ```text
-Use SnapZip when available. Run `snapzip stats --db-dir .` to check whether local context exists. Before implementing non-trivial changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, and `snapzip related --path <file>` for structural context. After failing tests, run `snapzip repair-pack --error-file <test-output>`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` before saving final code when practical.
+Use SnapZip when available. Run `snapzip stats --db-dir .` to check whether local context exists. Before implementing non-trivial changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context, receipts, and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, `snapzip related --path <file>`, and `snapzip affected --path <file>` for structural and test context. After failing tests, run `snapzip repair-pack --error-file <test-output>` or `snapzip diagnose --cmd "<test command>"`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` before saving final code when practical.
 ```
 
 ## Notes
@@ -61,4 +75,4 @@ For MCP-compatible clients, run SnapZip as a local stdio server:
 snapzip mcp --db-dir .
 ```
 
-The MCP server exposes read-only `search`, `context_pack`, `map`, `symbols`, `related`, `get_feedback`, and `stats` tools.
+The MCP server exposes read-only `search`, `context_pack`, `repair_pack`, `affected_tests`, `map`, `symbols`, `related`, `get_feedback`, and `stats` tools.

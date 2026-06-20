@@ -114,8 +114,14 @@ func TestBuildRepairContextPackPrefersSourceSymbolExcerpt(t *testing.T) {
 	if len(pack.Snippets) == 0 {
 		t.Fatal("got no repair snippets")
 	}
+	if len(pack.Receipts) == 0 {
+		t.Fatalf("repair pack did not include context receipts:\n%s", RenderContextPack(pack))
+	}
 	if pack.Snippets[0].Path != "youtube_dl/utils.py" {
 		t.Fatalf("top repair snippet = %q, want source function:\n%s", pack.Snippets[0].Path, RenderContextPack(pack))
+	}
+	if pack.Receipts[0].Path != "youtube_dl/utils.py" || !receiptHasReason(pack.Receipts[0], "failure-related symbol") {
+		t.Fatalf("top receipt did not explain source-symbol match: %+v", pack.Receipts[0])
 	}
 	if !strings.Contains(pack.Snippets[0].Content, "def match_str") {
 		t.Fatalf("top repair snippet did not include focused function:\n%s", pack.Snippets[0].Content)
@@ -123,6 +129,15 @@ func TestBuildRepairContextPackPrefersSourceSymbolExcerpt(t *testing.T) {
 	if strings.Contains(pack.Snippets[0].Path, "bambuser") {
 		t.Fatalf("unrelated extractor ranked first:\n%s", RenderContextPack(pack))
 	}
+}
+
+func receiptHasReason(receipt ContextReceipt, want string) bool {
+	for _, reason := range receipt.Reasons {
+		if strings.Contains(reason, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestExpandQueryForPackMode(t *testing.T) {

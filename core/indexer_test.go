@@ -94,6 +94,36 @@ func TestIndexDirectorySkipsGeneratedLargeAndBinaryFiles(t *testing.T) {
 	}
 }
 
+func TestIndexDirectoryRespectsSnapZipIgnore(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, ".snapzipignore", "private/\nignored.py\n")
+	writeTestFile(t, root, "pkg/cache.py", "class BoundedCache:\n    pass\n")
+	writeTestFile(t, root, "private/secret.py", "class ShouldNotIndexPrivate:\n    pass\n")
+	writeTestFile(t, root, "pkg/ignored.py", "class ShouldNotIndexIgnored:\n    pass\n")
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	count, err := IndexDirectory(db, root, NewLanguageFilter("python"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("indexed %d files, want 1", count)
+	}
+
+	results, err := RetrieveSimilarSnippets(db, mustTestCompressor(t), "ShouldNotIndex", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("ignored content was indexed: %+v", results)
+	}
+}
+
 func TestIndexDirectoryUpdatesExistingRows(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root, "pkg/cache.py", "class BoundedCache:\n    pass\n")
@@ -168,6 +198,29 @@ func TestIndexDirectoryChunksLargeFiles(t *testing.T) {
 		if result.StartLine <= 0 || result.EndLine < result.StartLine {
 			t.Fatalf("invalid chunk line range %d-%d", result.StartLine, result.EndLine)
 		}
+	}
+}
+
+func TestFindAffectedTestsUsesDirectAndRelatedSignals(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
+	writeTestFile(t, root, "pkg/cache_test.go", "package cache\n\nfunc TestCacheStore(t *testing.T) {}\n")
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := IndexDirectory(db, root, NewLanguageFilter("go")); err != nil {
+		t.Fatal(err)
+	}
+	report, err := FindAffectedTests(db, []string{"pkg/cache.go"}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Tests) == 0 || report.Tests[0].Path != "pkg/cache_test.go" {
+		t.Fatalf("affected tests = %+v, want pkg/cache_test.go", report.Tests)
 	}
 }
 

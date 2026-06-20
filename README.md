@@ -57,6 +57,9 @@ SnapZip is primarily a retrieval and local-memory tool. It ranks indexed snippet
 *   source path and file-type relevance
 *   lexical overlap with the query
 *   Query-Normalized Distance (QND) compression scoring
+*   repair-specific stack, symbol, identifier, and file/line signals when using failure workflows
+
+Every context pack includes context receipts when budget allows. Receipts explain why each snippet was included, such as a matched stack frame, matched symbol, related test, or fallback retrieval match. This makes the context auditable for humans and machine-readable for agents.
 
 The optional optimizer is conservative. It uses local code context and Zstandard dictionary scoring, but only mutates files when a local syntax checker is available for that language. Invalid proposals are rejected, and unsupported languages return the seed draft unchanged.
 
@@ -133,6 +136,15 @@ snapzip init-db --db-dir . --langs all --crawl /path/to/your/codebase --reset
 
 The indexer skips common dependency/build directories such as `.git`, `node_modules`, `vendor`, `dist`, `build`, `target`, `.venv`, and `__pycache__`. It also skips `memory.db`, binary-looking files, and files larger than 1 MiB by default. Larger accepted source files are split into bounded searchable chunks to keep search reranking responsive. Override the file cap with `--max-file-bytes`.
 
+Add `.snapzipignore` in a project root to exclude additional local-only files or directories before indexing:
+
+```text
+# .snapzipignore
+private/
+*.local.py
+scratch/
+```
+
 Indexed snippets include source path, line range, content hash, and source modification time. Supported source files also populate the local symbol table used by repo maps and related-file lookup.
 
 Common default formats include:
@@ -196,7 +208,26 @@ Build a context pack from failing test/build output:
 snapzip repair-pack --db-dir . --error-file /tmp/test-output.txt --budget 12000
 ```
 
-`explain-failure` is the same workflow with a diagnosis-oriented name.
+Repair packs parse stack frames, file paths, line numbers, symbols, and failure identifiers, then include context receipts explaining the ranking.
+
+```bash
+snapzip repair-pack --db-dir . --error-file /tmp/test-output.txt --budget 12000 --json
+```
+
+Run a command and build a repair pack from its captured failure output:
+
+```bash
+snapzip diagnose --db-dir . --cmd "go test ./..." --budget 12000
+```
+
+Find tests likely affected by a changed or named source file:
+
+```bash
+snapzip affected --db-dir . --path core/database.go
+snapzip affected --db-dir . --changed
+```
+
+`explain-failure` is the same workflow as `repair-pack` with a diagnosis-oriented name.
 
 ### F. Privacy Audit and Agent Setup
 Check local index hygiene:
@@ -222,7 +253,7 @@ Run SnapZip as a local read-only MCP stdio server:
 snapzip mcp --db-dir .
 ```
 
-The MCP server exposes `search`, `context_pack`, `map`, `symbols`, `related`, `get_feedback`, and `stats` tools. It writes protocol messages to stdout and logs only to stderr, so it can be launched by MCP-compatible clients.
+The MCP server exposes read-only `search`, `context_pack`, `repair_pack`, `affected_tests`, `map`, `symbols`, `related`, `get_feedback`, and `stats` tools. It writes protocol messages to stdout and logs only to stderr, so it can be launched by MCP-compatible clients.
 
 Example client configuration shape:
 
@@ -280,7 +311,7 @@ SnapZip does not log search queries into feedback memory. Feedback is only store
 Add a project or global agent rule that calls SnapZip when the binary is available:
 
 ```text
-Use SnapZip when available. Before non-trivial code changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, and `snapzip related --path <file>` for structural context. After failing tests, run `snapzip repair-pack --error-file <test-output>`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` when practical.
+Use SnapZip when available. Before non-trivial code changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context, receipts, and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, `snapzip related --path <file>`, and `snapzip affected --path <file>` for structural and test context. After failing tests, run `snapzip repair-pack --error-file <test-output>` or `snapzip diagnose --cmd "<test command>"`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` when practical.
 ```
 
 Use [LLM_INSTRUCTIONS.md](LLM_INSTRUCTIONS.md) as a portable rule template for other agents and editor integrations.
@@ -301,6 +332,12 @@ Or run the benchmark harness through SnapZip:
 snapzip eval --suite smoke --snapzip-bin ./snapzip
 ```
 
+Run the repair retrieval quality check:
+
+```bash
+python3 benchmarks/run.py --suite repair-retrieval --snapzip-bin ./snapzip
+```
+
 Run the full 20-task algorithm suite:
 ```bash
 python3 benchmarks/run.py --suite algorithm-20 --snapzip-bin ./snapzip
@@ -316,7 +353,7 @@ For low-level compression throughput, run the Go benchmarks:
 go test -bench=BenchmarkBCACompress -benchtime=5s ./examples
 ```
 
-These benchmarks validate SnapZip's local retrieval and syntax-check workflow against the included harnesses. They are useful for regression testing, but they are not universal claims about every codebase or every AI coding task. If you publish numbers, include the exact command, SnapZip commit, machine details, and JSON report.
+These benchmarks validate SnapZip's local retrieval, repair-context ranking, and syntax-check workflow against included public-safe harnesses. They are useful for regression testing, but they are not universal claims about every codebase or every AI coding task. If you publish numbers, include the exact command, SnapZip commit, machine details, and JSON report.
 
 ---
 

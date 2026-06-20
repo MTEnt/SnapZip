@@ -13,22 +13,37 @@ const maxContextPackFeedbackInputBytes = 512
 const maxContextPackFeedbackOutputBytes = 768
 
 type SearchResult struct {
-	Query         string     `json:"query"`
-	ExpandedQuery string     `json:"expanded_query,omitempty"`
-	Mode          string     `json:"mode,omitempty"`
-	Snippets      []Snippet  `json:"snippets"`
-	Feedback      []Feedback `json:"feedback,omitempty"`
+	Query         string           `json:"query"`
+	ExpandedQuery string           `json:"expanded_query,omitempty"`
+	Mode          string           `json:"mode,omitempty"`
+	Snippets      []Snippet        `json:"snippets"`
+	Receipts      []ContextReceipt `json:"receipts,omitempty"`
+	Feedback      []Feedback       `json:"feedback,omitempty"`
 }
 
 type ContextPack struct {
-	Query         string     `json:"query"`
-	ExpandedQuery string     `json:"expanded_query,omitempty"`
-	Mode          string     `json:"mode,omitempty"`
-	BudgetBytes   int        `json:"budget_bytes"`
-	UsedBytes     int        `json:"used_bytes"`
-	Truncated     bool       `json:"truncated"`
-	Snippets      []Snippet  `json:"snippets"`
-	Feedback      []Feedback `json:"feedback,omitempty"`
+	Query         string           `json:"query"`
+	ExpandedQuery string           `json:"expanded_query,omitempty"`
+	Mode          string           `json:"mode,omitempty"`
+	BudgetBytes   int              `json:"budget_bytes"`
+	UsedBytes     int              `json:"used_bytes"`
+	Truncated     bool             `json:"truncated"`
+	Snippets      []Snippet        `json:"snippets"`
+	Receipts      []ContextReceipt `json:"receipts,omitempty"`
+	Feedback      []Feedback       `json:"feedback,omitempty"`
+}
+
+type ContextReceipt struct {
+	Rank       int      `json:"rank"`
+	Path       string   `json:"path,omitempty"`
+	StartLine  int      `json:"start_line,omitempty"`
+	EndLine    int      `json:"end_line,omitempty"`
+	Topic      string   `json:"topic,omitempty"`
+	Language   string   `json:"language,omitempty"`
+	Score      float64  `json:"score"`
+	Confidence float64  `json:"confidence"`
+	Reasons    []string `json:"reasons"`
+	Evidence   []string `json:"evidence,omitempty"`
 }
 
 func SearchMemory(db *sql.DB, comp Compressor, query string, limit int, feedbackLimit int) (SearchResult, error) {
@@ -59,6 +74,7 @@ func SearchMemoryWithMode(db *sql.DB, comp Compressor, query, mode string, limit
 		ExpandedQuery: expandedQuery,
 		Mode:          mode,
 		Snippets:      snippets,
+		Receipts:      genericReceiptsForSnippets(snippets, mode),
 		Feedback:      feedback,
 	}, nil
 }
@@ -116,6 +132,11 @@ func buildContextPackFromResult(query, mode string, budgetBytes int, result Sear
 	}
 
 	if len(pack.Snippets) < len(result.Snippets) {
+		pack.Truncated = true
+	}
+	pack.Receipts = alignReceiptsWithSnippets(pack.Snippets, result.Receipts)
+	for len(pack.Receipts) > 0 && len([]byte(RenderContextPack(pack))) > budgetBytes {
+		pack.Receipts = pack.Receipts[:len(pack.Receipts)-1]
 		pack.Truncated = true
 	}
 	pack.UsedBytes = len([]byte(RenderContextPack(pack)))
@@ -184,6 +205,23 @@ func RenderContextPack(pack ContextPack) string {
 		return builder.String()
 	}
 
+	if len(pack.Receipts) > 0 {
+		builder.WriteString("\n## Context Receipts\n")
+		for _, receipt := range pack.Receipts {
+			fmt.Fprintf(&builder, "\n%d. %s", receipt.Rank, receiptLocation(receipt))
+			if receipt.Confidence > 0 {
+				fmt.Fprintf(&builder, " (confidence %.2f)", receipt.Confidence)
+			}
+			builder.WriteByte('\n')
+			for _, reason := range receipt.Reasons {
+				fmt.Fprintf(&builder, "   - %s\n", reason)
+			}
+			for _, evidence := range receipt.Evidence {
+				fmt.Fprintf(&builder, "   - Evidence: %s\n", evidence)
+			}
+		}
+	}
+
 	for idx, snippet := range pack.Snippets {
 		fmt.Fprintf(&builder, "\n### %d. %s\n\n", idx+1, snippet.Topic)
 		fmt.Fprintf(&builder, "Language: %s | Location: %s | Relevance Score: %.4f\n\n", snippet.Language, snippetLocation(snippet), snippet.Score)
@@ -240,6 +278,72 @@ func normalizePackMode(mode string) string {
 	default:
 		return ""
 	}
+}
+
+func genericReceiptsForSnippets(snippets []Snippet, mode string) []ContextReceipt {
+	receipts := make([]ContextReceipt, 0, len(snippets))
+	for idx, snippet := range snippets {
+		reasons := []string{"retrieved by hybrid FTS5/QND ranking"}
+		if mode != "" {
+			reasons = append(reasons, "query expanded for "+mode+" mode")
+		}
+		receipts = append(receipts, receiptForSnippet(idx+1, snippet, 0.55, reasons, nil))
+	}
+	return receipts
+}
+
+func alignReceiptsWithSnippets(snippets []Snippet, receipts []ContextReceipt) []ContextReceipt {
+	if len(snippets) == 0 {
+		return nil
+	}
+	byKey := map[string]ContextReceipt{}
+	for _, receipt := range receipts {
+		key := receipt.Path + ":" + fmt.Sprint(receipt.StartLine) + ":" + fmt.Sprint(receipt.EndLine)
+		byKey[key] = receipt
+	}
+
+	aligned := make([]ContextReceipt, 0, len(snippets))
+	for idx, snippet := range snippets {
+		key := snippet.Path + ":" + fmt.Sprint(snippet.StartLine) + ":" + fmt.Sprint(snippet.EndLine)
+		receipt, ok := byKey[key]
+		if !ok {
+			receipt = receiptForSnippet(idx+1, snippet, 0.45, []string{"included in final context pack"}, nil)
+		}
+		receipt.Rank = idx + 1
+		aligned = append(aligned, receipt)
+	}
+	return aligned
+}
+
+func receiptForSnippet(rank int, snippet Snippet, confidence float64, reasons []string, evidence []string) ContextReceipt {
+	return ContextReceipt{
+		Rank:       rank,
+		Path:       snippet.Path,
+		StartLine:  snippet.StartLine,
+		EndLine:    snippet.EndLine,
+		Topic:      snippet.Topic,
+		Language:   snippet.Language,
+		Score:      snippet.Score,
+		Confidence: confidence,
+		Reasons:    uniqueStrings(reasons),
+		Evidence:   uniqueStrings(evidence),
+	}
+}
+
+func receiptLocation(receipt ContextReceipt) string {
+	if receipt.Path == "" {
+		if receipt.Topic != "" {
+			return receipt.Topic
+		}
+		return "unknown"
+	}
+	if receipt.StartLine > 0 && receipt.EndLine > 0 {
+		if receipt.StartLine == receipt.EndLine {
+			return fmt.Sprintf("%s:%d", receipt.Path, receipt.StartLine)
+		}
+		return fmt.Sprintf("%s:%d-%d", receipt.Path, receipt.StartLine, receipt.EndLine)
+	}
+	return receipt.Path
 }
 
 func truncateText(value string, maxBytes int) string {
