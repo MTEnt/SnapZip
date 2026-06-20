@@ -42,6 +42,8 @@ jobs:
           python3 -m py_compile \
             examples/draft_cache.py \
             examples/context_code/cache_reference.py \
+            examples/review_demo/app/cache.py \
+            examples/review_demo/tests/test_cache.py \
             benchmarks/run.py \
             benchmarks/stress_rbt.py \
             benchmarks/suites/algorithm_20/*.py

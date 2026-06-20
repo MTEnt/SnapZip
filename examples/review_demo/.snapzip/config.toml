@@ -1,0 +1,5 @@
+[validation]
+command = "python -m pytest tests"
+
+[validation.commands]
+py = "python -m pytest tests"

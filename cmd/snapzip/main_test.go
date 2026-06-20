@@ -378,6 +378,20 @@ func TestIndexChangedIncludesUntrackedFiles(t *testing.T) {
 		t.Fatalf("git init failed: %v\n%s", err, string(output))
 	}
 	writeCLIFile(t, fixture, "pkg/new_cache.go", "package cache\n\nfunc NewUntrackedCache() {}\n")
+	writeCLIFile(t, fixture, "memory.db", "local generated db")
+	writeCLIFile(t, fixture, ".snapzip-ci/memory.db", "local generated db")
+
+	changedFiles, err := gitChangedFiles(fixture, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedList := "\n" + strings.Join(changedFiles, "\n") + "\n"
+	if !strings.Contains(changedList, "\npkg/new_cache.go\n") {
+		t.Fatalf("changed files missing untracked source: %+v", changedFiles)
+	}
+	if strings.Contains(changedList, "\nmemory.db\n") || strings.Contains(changedList, "\n.snapzip-ci/memory.db\n") {
+		t.Fatalf("changed files included generated SnapZip DB: %+v", changedFiles)
+	}
 
 	dbDir := t.TempDir()
 	runSnapZip(t, repoRoot,
@@ -442,6 +456,58 @@ func TestRepositoryGitHubActionArtifacts(t *testing.T) {
 		if !strings.Contains(readme, want) {
 			t.Fatalf("README missing GitHub Action guidance %q", want)
 		}
+	}
+}
+
+func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	releaseWorkflow := readRepoFile(t, repoRoot, ".github/workflows/release.yml")
+	if !strings.Contains(releaseWorkflow, "sha256sum * > checksums.txt") {
+		t.Fatalf("release workflow does not generate checksums:\n%s", releaseWorkflow)
+	}
+	gitignore := readRepoFile(t, repoRoot, ".gitignore")
+	for _, want := range []string{"memory.db-*", ".snapzip-ci/", ".snapzip-pr-context.*"} {
+		if !strings.Contains(gitignore, want) {
+			t.Fatalf(".gitignore missing generated artifact pattern %q:\n%s", want, gitignore)
+		}
+	}
+
+	formula := readRepoFile(t, repoRoot, "packaging/homebrew/snapzip.rb")
+	for _, want := range []string{
+		"class Snapzip < Formula",
+		"head \"https://github.com/MTEnt/SnapZip.git\"",
+		"depends_on \"go\" => :build",
+		"system \"go\", \"build\"",
+		"assert_match \"knowledge rows: 1\"",
+	} {
+		if !strings.Contains(formula, want) {
+			t.Fatalf("Homebrew formula missing %q:\n%s", want, formula)
+		}
+	}
+
+	packagingReadme := readRepoFile(t, repoRoot, "packaging/homebrew/README.md")
+	if !strings.Contains(packagingReadme, "brew install --HEAD") || !strings.Contains(packagingReadme, "checksums.txt") {
+		t.Fatalf("Homebrew packaging README missing install or checksum guidance:\n%s", packagingReadme)
+	}
+
+	demoReadme := readRepoFile(t, repoRoot, "examples/review_demo/README.md")
+	for _, want := range []string{"snapzip pr --db-dir", "--changed", "--mode review"} {
+		if !strings.Contains(demoReadme, want) {
+			t.Fatalf("review demo README missing %q:\n%s", want, demoReadme)
+		}
+	}
+	demoConfig := readRepoFile(t, repoRoot, "examples/review_demo/.snapzip/config.toml")
+	if !strings.Contains(demoConfig, "python -m pytest tests") {
+		t.Fatalf("review demo config missing pytest validation command:\n%s", demoConfig)
+	}
+
+	ciWorkflow := readRepoFile(t, repoRoot, ".github/workflows/ci.yml")
+	if !strings.Contains(ciWorkflow, "examples/review_demo/app/cache.py") || !strings.Contains(ciWorkflow, "examples/review_demo/tests/test_cache.py") {
+		t.Fatalf("CI workflow does not compile review demo files:\n%s", ciWorkflow)
 	}
 }
 

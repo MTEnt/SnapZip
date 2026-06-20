@@ -113,7 +113,7 @@ func gitChangedFiles(root, since string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		return splitGitFileList(output), nil
+		return filterGeneratedChangedFiles(splitGitFileList(output)), nil
 	}
 
 	var files []string
@@ -137,7 +137,7 @@ func gitChangedFiles(root, since string) ([]string, error) {
 		return nil, err
 	}
 	files = append(files, splitGitFileList(untracked)...)
-	return uniqueTerms(files), nil
+	return filterGeneratedChangedFiles(files), nil
 }
 
 func splitGitFileList(output []byte) []string {
@@ -163,6 +163,20 @@ func uniqueTerms(values []string) []string {
 		result = append(result, value)
 	}
 	return result
+}
+
+func filterGeneratedChangedFiles(files []string) []string {
+	var filtered []string
+	for _, file := range uniqueTerms(files) {
+		normalized := filepath.ToSlash(strings.TrimSpace(file))
+		base := strings.ToLower(filepath.Base(normalized))
+		switch base {
+		case "memory.db", "memory.db-shm", "memory.db-wal", ".snapzip-pr-context.md", ".snapzip-pr-context.json":
+			continue
+		}
+		filtered = append(filtered, normalized)
+	}
+	return filtered
 }
 
 func handleMap() {

@@ -9,6 +9,9 @@ optimized_*.py
 # Database files
 *.db
 memory.db
+memory.db-*
+.snapzip-ci/
+.snapzip-pr-context.*
 
 # OS files
 .DS_Store

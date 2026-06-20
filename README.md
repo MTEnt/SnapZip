@@ -78,7 +78,8 @@ snapzip/
 |-- cmd/snapzip/        # CLI interface parsing and command routing
 |-- benchmarks/         # Reproducible raw vs SnapZip benchmark harnesses
 |-- assets/             # Branding logo and graphics
-`-- examples/           # Developer templates and benchmarks
+|-- examples/           # Developer templates, demos, and benchmarks
+`-- packaging/          # Homebrew and release packaging scaffolds
 ```
 
 ---
@@ -102,6 +103,14 @@ git clone https://github.com/MTEnt/SnapZip.git
 cd SnapZip
 go build -o snapzip ./cmd/snapzip
 ```
+
+The repository also includes a head-only Homebrew formula scaffold:
+
+```bash
+brew install --HEAD ./packaging/homebrew/snapzip.rb
+```
+
+Use the formula in `packaging/homebrew/` as the starting point for a dedicated tap after the first tagged release.
 
 ### 3. Initialize the Database
 If you installed with `go install`, run the CLI as `snapzip`. If you built locally with `go build -o snapzip`, run it as `./snapzip`.
@@ -416,6 +425,21 @@ jobs:
 ```
 
 Use `MTEnt/SnapZip@main` for the current development action, then pin to a release tag after publishing a tagged release.
+
+### Public Review Demo
+Use the checked-in public fixture to try review context without pointing SnapZip at a private project:
+
+```bash
+cd examples/review_demo
+git init
+git add .
+git commit -m "baseline review demo"
+printf '\n# temporary review change\n' >> app/cache.py
+
+snapzip index --reset --db-dir /tmp/snapzip-review-demo --langs python --crawl .
+snapzip pr --db-dir /tmp/snapzip-review-demo --changed --dir . --limit 5 --budget 8000
+snapzip pack --db-dir /tmp/snapzip-review-demo --query "CacheStore review risk tests" --mode review --limit 5 --budget 8000
+```
 
 ---
 
