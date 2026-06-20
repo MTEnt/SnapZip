@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"database/sql"
 	"flag"
@@ -150,6 +149,20 @@ func splitGitFileList(output []byte) []string {
 		}
 	}
 	return files
+}
+
+func uniqueTerms(values []string) []string {
+	seen := map[string]bool{}
+	var result []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
 }
 
 func handleMap() {
@@ -469,8 +482,6 @@ func handleFailurePack(defaultMode string) {
 		fmt.Printf("Error reading failure output: %v\n", err)
 		os.Exit(1)
 	}
-	failureQuery := failureQueryFromOutput(string(content), *query)
-
 	db, err := openDBOrExit(*dbDir)
 	if err != nil {
 		os.Exit(1)
@@ -481,7 +492,7 @@ func handleFailurePack(defaultMode string) {
 		fmt.Printf("Error initializing compressor: %v\n", err)
 		os.Exit(1)
 	}
-	pack, err := core.BuildContextPackWithMode(db, comp, failureQuery, *mode, *limit, *budget, 5)
+	pack, err := core.BuildRepairContextPack(db, comp, string(content), *query, *mode, *limit, *budget, 5)
 	if err != nil {
 		fmt.Printf("Failure context failed: %v\n", err)
 		os.Exit(1)
@@ -491,53 +502,6 @@ func handleFailurePack(defaultMode string) {
 		return
 	}
 	fmt.Print(core.RenderContextPack(pack))
-}
-
-func failureQueryFromOutput(output, extra string) string {
-	var terms []string
-	if strings.TrimSpace(extra) != "" {
-		terms = append(terms, strings.TrimSpace(extra))
-	}
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	pathPattern := regexp.MustCompile(`[A-Za-z0-9_./\\-]+\.(go|py|js|jsx|ts|tsx|rb|java|rs|php|swift|kt|c|cc|cpp|h|hpp|md|yaml|yml|json)`)
-	wordPattern := regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]{2,}`)
-	for scanner.Scan() && len(terms) < 40 {
-		line := scanner.Text()
-		terms = append(terms, pathPattern.FindAllString(line, -1)...)
-		for _, word := range wordPattern.FindAllString(line, -1) {
-			lower := strings.ToLower(word)
-			if len(lower) > 2 && !commonFailureWord(lower) {
-				terms = append(terms, word)
-			}
-			if len(terms) >= 40 {
-				break
-			}
-		}
-	}
-	return strings.Join(uniqueTerms(terms), " ")
-}
-
-func commonFailureWord(word string) bool {
-	switch word {
-	case "error", "failed", "failure", "expected", "actual", "panic", "traceback", "file", "line", "test", "tests", "exit", "status":
-		return true
-	default:
-		return false
-	}
-}
-
-func uniqueTerms(values []string) []string {
-	seen := map[string]bool{}
-	var result []string
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			continue
-		}
-		seen[value] = true
-		result = append(result, value)
-	}
-	return result
 }
 
 func openDBOrExit(dbDir string) (*sql.DB, error) {

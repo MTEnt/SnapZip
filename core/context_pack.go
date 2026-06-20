@@ -76,6 +76,10 @@ func BuildContextPackWithMode(db *sql.DB, comp Compressor, query, mode string, l
 		return ContextPack{}, err
 	}
 
+	return buildContextPackFromResult(query, mode, budgetBytes, result), nil
+}
+
+func buildContextPackFromResult(query, mode string, budgetBytes int, result SearchResult) ContextPack {
 	pack := ContextPack{
 		Query:         query,
 		ExpandedQuery: result.ExpandedQuery,
@@ -115,7 +119,7 @@ func BuildContextPackWithMode(db *sql.DB, comp Compressor, query, mode string, l
 		pack.Truncated = true
 	}
 	pack.UsedBytes = len([]byte(RenderContextPack(pack)))
-	return pack, nil
+	return pack
 }
 
 func RenderSearchResult(result SearchResult) string {
