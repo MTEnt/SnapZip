@@ -33,6 +33,7 @@ When `snapzip` is available in the workspace or on `PATH`:
    snapzip symbols --query "<symbol>" --limit 10
    snapzip symbol-context --query "<symbol>" --limit 10
    snapzip imports --query "<module>" --limit 10
+   snapzip graph --path <file> --limit 10
    snapzip related --path <file> --limit 10
    ```
    Prefer resolved local import targets when present; unresolved imports are usually external packages or aliases SnapZip cannot map safely.
@@ -74,7 +75,7 @@ When `snapzip` is available in the workspace or on `PATH`:
 ## Editor Rule Template
 
 ```text
-Use SnapZip when available. Run `snapzip stats --db-dir .` to check whether local context exists. Before implementing non-trivial changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context, receipts, quality warnings, and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, `snapzip symbol-context --query "<symbol>"`, `snapzip imports --query "<module>"`, `snapzip related --path <file>`, and `snapzip affected --path <file>` for structural and test context. Use `snapzip validate --path <file>` to plan validation, or `snapzip validate --changed --cmd "<test command>"` to run validation before finishing. If `.snapzip/config.toml` defines a command and configured validation is appropriate, use `snapzip validate --changed --run-config`. After failing tests, run `snapzip repair-pack --error-file <test-output>` or `snapzip diagnose --cmd "<test command>"`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` before saving final code when practical.
+Use SnapZip when available. Run `snapzip stats --db-dir .` to check whether local context exists. Before implementing non-trivial changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context, receipts, quality warnings, and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, `snapzip symbol-context --query "<symbol>"`, `snapzip imports --query "<module>"`, `snapzip graph --path <file>`, `snapzip related --path <file>`, and `snapzip affected --path <file>` for structural and test context. Use `snapzip validate --path <file>` to plan validation, or `snapzip validate --changed --cmd "<test command>"` to run validation before finishing. If `.snapzip/config.toml` defines a command and configured validation is appropriate, use `snapzip validate --changed --run-config`. After failing tests, run `snapzip repair-pack --error-file <test-output>` or `snapzip diagnose --cmd "<test command>"`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` before saving final code when practical.
 ```
 
 ## Notes
@@ -87,4 +88,4 @@ For MCP-compatible clients, run SnapZip as a local stdio server:
 snapzip mcp --db-dir .
 ```
 
-The MCP server exposes read-only `search`, `context_pack`, `repair_pack`, `affected_tests`, `validation_plan`, `map`, `symbols`, `symbol_context`, `imports`, `related`, `get_feedback`, and `stats` tools.
+The MCP server exposes read-only `search`, `context_pack`, `repair_pack`, `affected_tests`, `validation_plan`, `map`, `symbols`, `symbol_context`, `imports`, `graph`, `related`, `get_feedback`, and `stats` tools.

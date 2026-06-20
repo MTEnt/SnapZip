@@ -30,7 +30,7 @@ It combines SQLite FTS5 search, path-aware relevance, compression-distance re-ra
 
 *   **Local code search**: SQLite FTS5 keyword search with path-aware lexical weighting and Query-Normalized Distance (QND) compression re-ranking.
 *   **Language-aware indexing**: Index popular source formats by default, or pass explicit extensions such as `html,css,rb,py,go,rs,zig`.
-*   **Repo maps, symbols, references, and imports**: Stores file paths, line ranges, content hashes, indexed functions/classes/types, lightweight call/reference sites, and import/dependency references. Local imports are resolved to indexed target files when SnapZip can map them safely.
+*   **Repo maps, symbols, references, imports, and dependency graphs**: Stores file paths, line ranges, content hashes, indexed functions/classes/types, lightweight call/reference sites, and import/dependency references. Local imports are resolved to indexed target files when SnapZip can map them safely.
 *   **Task-specific context packs**: Build bounded packs for debug, refactor, test, and docs workflows.
 *   **Context quality scoring**: Every pack reports receipt coverage, evidence density, definition/reference/test coverage, uniqueness, budget use, and warnings.
 *   **Validation planning**: Finds likely affected tests, suggests validation commands, and can run a supplied command with repair context on failure.
@@ -202,7 +202,7 @@ Use JSON output when the caller wants structured snippets, receipts, and quality
 snapzip pack --query "python lru cache" --limit 5 --budget 12000 --json
 ```
 
-### D. Repo Map and Symbols
+### D. Repo Map, Symbols, and Graph
 Inspect indexed structure:
 
 ```bash
@@ -210,10 +210,11 @@ snapzip map --db-dir . --limit 50
 snapzip symbols --db-dir . --query "CacheStore" --limit 10
 snapzip symbol-context --db-dir . --query "CacheStore" --limit 10
 snapzip imports --db-dir . --query "app.cache" --limit 10
+snapzip graph --db-dir . --path app/cache.py --limit 10
 snapzip related --db-dir . --path core/database.go --limit 10
 ```
 
-Use these commands when an agent needs structural context before editing a file. `symbol-context` returns matching definitions plus indexed call/reference sites. `imports` returns matching module, package, dependency, and linked-asset references.
+Use these commands when an agent needs structural context before editing a file. `symbol-context` returns matching definitions plus indexed call/reference sites. `imports` returns matching module, package, dependency, and linked-asset references. `graph` shows both outgoing imports from a file and incoming indexed files that import it.
 
 When an import resolves locally, `imports` shows the edge:
 
@@ -303,7 +304,7 @@ Run SnapZip as a local read-only MCP stdio server:
 snapzip mcp --db-dir .
 ```
 
-The MCP server exposes read-only `search`, `context_pack`, `repair_pack`, `affected_tests`, `validation_plan`, `map`, `symbols`, `symbol_context`, `imports`, `related`, `get_feedback`, and `stats` tools. It writes protocol messages to stdout and logs only to stderr, so it can be launched by MCP-compatible clients.
+The MCP server exposes read-only `search`, `context_pack`, `repair_pack`, `affected_tests`, `validation_plan`, `map`, `symbols`, `symbol_context`, `imports`, `graph`, `related`, `get_feedback`, and `stats` tools. It writes protocol messages to stdout and logs only to stderr, so it can be launched by MCP-compatible clients.
 
 Example client configuration shape:
 
@@ -361,7 +362,7 @@ SnapZip does not log search queries into feedback memory. Feedback is only store
 Add a project or global agent rule that calls SnapZip when the binary is available:
 
 ```text
-Use SnapZip when available. Before non-trivial code changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context, receipts, and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, `snapzip imports --query "<module>"`, `snapzip related --path <file>`, and `snapzip affected --path <file>` for structural and test context. After failing tests, run `snapzip repair-pack --error-file <test-output>` or `snapzip diagnose --cmd "<test command>"`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` when practical.
+Use SnapZip when available. Before non-trivial code changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context, receipts, and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, `snapzip symbol-context --query "<symbol>"`, `snapzip imports --query "<module>"`, `snapzip graph --path <file>`, `snapzip related --path <file>`, and `snapzip affected --path <file>` for structural and test context. After failing tests, run `snapzip repair-pack --error-file <test-output>` or `snapzip diagnose --cmd "<test command>"`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` when practical.
 ```
 
 Use [LLM_INSTRUCTIONS.md](LLM_INSTRUCTIONS.md) as a portable rule template for other agents and editor integrations.

@@ -162,7 +162,8 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"affected_tests","arguments":{"path":"lib/cache.rb","limit":5}}}`,
 		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"symbol_context","arguments":{"query":"build_cache","limit":5}}}`,
 		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"imports","arguments":{"query":"helper","limit":5}}}`,
-		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"validation_plan","arguments":{"path":"lib/cache.rb","limit":5}}}`,
+		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"graph","arguments":{"path":"lib/helper.rb","limit":5}}}`,
+		`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"validation_plan","arguments":{"path":"lib/cache.rb","limit":5}}}`,
 	}, "\n") + "\n"
 
 	var output bytes.Buffer
@@ -171,10 +172,10 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 9 {
-		t.Fatalf("got %d MCP responses, want 9:\n%s", len(lines), output.String())
+	if len(lines) != 10 {
+		t.Fatalf("got %d MCP responses, want 10:\n%s", len(lines), output.String())
 	}
-	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) || !strings.Contains(lines[1], `"symbol_context"`) || !strings.Contains(lines[1], `"imports"`) || !strings.Contains(lines[1], `"validation_plan"`) {
+	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) || !strings.Contains(lines[1], `"symbol_context"`) || !strings.Contains(lines[1], `"imports"`) || !strings.Contains(lines[1], `"graph"`) || !strings.Contains(lines[1], `"validation_plan"`) {
 		t.Fatalf("tools/list did not expose expected tools:\n%s", lines[1])
 	}
 	if !strings.Contains(lines[2], "CacheStore") {
@@ -195,8 +196,11 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	if !strings.Contains(lines[7], "SnapZip Import Context") || !strings.Contains(lines[7], "lib/cache.rb") || !strings.Contains(lines[7], "lib/helper.rb") {
 		t.Fatalf("imports tool response missing import context:\n%s", lines[7])
 	}
-	if !strings.Contains(lines[8], "SnapZip Validation Plan") || !strings.Contains(lines[8], "bundle exec rake test") {
-		t.Fatalf("validation_plan tool response missing suggested validation:\n%s", lines[8])
+	if !strings.Contains(lines[8], "SnapZip Dependency Graph") || !strings.Contains(lines[8], "Imported By") || !strings.Contains(lines[8], "lib/cache.rb") {
+		t.Fatalf("graph tool response missing dependency context:\n%s", lines[8])
+	}
+	if !strings.Contains(lines[9], "SnapZip Validation Plan") || !strings.Contains(lines[9], "bundle exec rake test") {
+		t.Fatalf("validation_plan tool response missing suggested validation:\n%s", lines[9])
 	}
 }
 
@@ -239,6 +243,19 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 	importsOutput := runSnapZip(t, repoRoot, "imports", "--db-dir", dbDir, "--query", "pkg/store", "--limit", "5")
 	if !strings.Contains(importsOutput, "SnapZip Import Context") || !strings.Contains(importsOutput, "pkg/cache.go") || !strings.Contains(importsOutput, "pkg/store/store.go") {
 		t.Fatalf("imports output missing resolved Go package import:\n%s", importsOutput)
+	}
+
+	graphOutput := runSnapZip(t, repoRoot, "graph", "--db-dir", dbDir, "--path", "pkg/store/store.go", "--limit", "5")
+	if !strings.Contains(graphOutput, "SnapZip Dependency Graph") || !strings.Contains(graphOutput, "Imported By") || !strings.Contains(graphOutput, "pkg/cache.go") {
+		t.Fatalf("graph output missing incoming Go package import:\n%s", graphOutput)
+	}
+	graphJSON := runSnapZip(t, repoRoot, "graph", "--db-dir", dbDir, "--path", "pkg/store/store.go", "--limit", "5", "--json")
+	var graphPayload core.DependencyGraph
+	if err := json.Unmarshal([]byte(graphJSON), &graphPayload); err != nil {
+		t.Fatalf("graph --json returned invalid JSON: %v\n%s", err, graphJSON)
+	}
+	if len(graphPayload.ImportedBy) == 0 || graphPayload.ImportedBy[0].Path != "pkg/cache.go" {
+		t.Fatalf("graph --json missing incoming Go package import: %+v", graphPayload)
 	}
 
 	relatedOutput := runSnapZip(t, repoRoot, "related", "--db-dir", dbDir, "--path", "pkg/cache.go", "--limit", "5")

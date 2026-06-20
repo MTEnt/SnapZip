@@ -280,6 +280,37 @@ func handleImports() {
 	fmt.Print(core.RenderImportContext(context))
 }
 
+func handleGraph() {
+	fs := flag.NewFlagSet("graph", flag.ExitOnError)
+	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
+	path := fs.String("path", "", "Indexed source path")
+	limit := fs.Int("limit", 20, "Maximum outgoing and incoming imports to return")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
+	_ = fs.Parse(os.Args[2:])
+	if strings.TrimSpace(*path) == "" {
+		fmt.Println("Error: --path is required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	db, err := openDBOrExit(*dbDir)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	graph, err := core.BuildDependencyGraph(db, *path, *limit)
+	if err != nil {
+		fmt.Printf("Graph lookup failed: %v\n", err)
+		os.Exit(1)
+	}
+	if *jsonOutput {
+		writeJSON(graph)
+		return
+	}
+	fmt.Print(core.RenderDependencyGraph(graph))
+}
+
 func handleRelated() {
 	fs := flag.NewFlagSet("related", flag.ExitOnError)
 	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
@@ -687,7 +718,7 @@ func runAudit(dbDir string) auditReport {
 	report.Checks = append(report.Checks, auditSecrets(dbDir))
 	report.Checks = append(report.Checks,
 		auditCheck{Name: "dependency dirs skipped", Passed: true, Details: "indexer skips .git, node_modules, vendor, dist, build, target, venv, .venv, and common generated directories"},
-		auditCheck{Name: "mcp write surface", Passed: true, Details: "MCP server exposes read-only search, context_pack, repair_pack, affected_tests, validation_plan, get_feedback, stats, map, symbols, symbol_context, imports, and related tools"},
+		auditCheck{Name: "mcp write surface", Passed: true, Details: "MCP server exposes read-only search, context_pack, repair_pack, affected_tests, validation_plan, get_feedback, stats, map, symbols, symbol_context, imports, graph, and related tools"},
 	)
 	return report
 }
@@ -877,7 +908,7 @@ func agentRuleText() string {
 
 Use SnapZip when available. Run ` + "`snapzip stats --db-dir .`" + ` to check whether local context exists.
 Before non-trivial code changes, run ` + "`snapzip pack --query \"<topic>\" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>`" + ` for targeted local context, receipts, quality warnings, and feedback memory.
-Use ` + "`snapzip symbol-context --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip symbols --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip imports --query \"<module>\" --limit 10`" + `, or ` + "`snapzip map --limit 50`" + ` for structural context.
+Use ` + "`snapzip symbol-context --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip symbols --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip imports --query \"<module>\" --limit 10`" + `, ` + "`snapzip graph --path <file> --limit 10`" + `, or ` + "`snapzip map --limit 50`" + ` for structural context.
 Prefer resolved local import targets when present; unresolved imports are usually external packages or aliases SnapZip cannot map safely.
 Use ` + "`snapzip related --path <file>`" + ` and ` + "`snapzip affected --path <file>`" + ` to find related files and likely tests.
 Use ` + "`snapzip validate --path <file>`" + ` to plan validation, or ` + "`snapzip validate --changed --cmd \"<test command>\"`" + ` to run validation and get failure context.

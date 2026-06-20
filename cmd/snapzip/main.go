@@ -37,6 +37,8 @@ func main() {
 		handleSymbolContext()
 	case "imports":
 		handleImports()
+	case "graph":
+		handleGraph()
 	case "related":
 		handleRelated()
 	case "affected":
@@ -85,6 +87,7 @@ func printUsage() {
 	fmt.Println("  symbols        Search indexed symbols")
 	fmt.Println("  symbol-context Show matching definitions and call/reference sites")
 	fmt.Println("  imports        Search indexed imports and dependency references")
+	fmt.Println("  graph          Show resolved import graph for an indexed file")
 	fmt.Println("  related        Find files related to an indexed path")
 	fmt.Println("  affected       Find tests likely affected by changed or named files")
 	fmt.Println("  diagnose       Run a command and build a repair pack from failures")

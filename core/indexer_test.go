@@ -331,6 +331,28 @@ func TestImportsConnectSourceAndTests(t *testing.T) {
 		t.Fatalf("reverse related files = %+v, want app/cache.py", reverseRelated)
 	}
 
+	graph, err := BuildDependencyGraph(db, "app/cache.py", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Path != "app/cache.py" || graph.Language != "py" {
+		t.Fatalf("graph identity = %+v, want app/cache.py [py]", graph)
+	}
+	if len(graph.ImportedBy) == 0 || graph.ImportedBy[0].Path != "tests/test_cache.py" {
+		t.Fatalf("graph imported_by = %+v, want tests/test_cache.py", graph.ImportedBy)
+	}
+	if !strings.Contains(RenderDependencyGraph(graph), "Imported By") {
+		t.Fatalf("rendered graph missing incoming section:\n%s", RenderDependencyGraph(graph))
+	}
+
+	testGraph, err := BuildDependencyGraph(db, "tests/test_cache.py", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(testGraph.Imports) == 0 || testGraph.Imports[0].TargetPath != "app/cache.py" {
+		t.Fatalf("test graph imports = %+v, want resolved app/cache.py", testGraph.Imports)
+	}
+
 	pack, err := BuildContextPack(db, mustTestCompressor(t), "build_cache", 5, 4096, 0)
 	if err != nil {
 		t.Fatal(err)

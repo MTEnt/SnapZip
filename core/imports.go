@@ -25,6 +25,13 @@ type ImportContext struct {
 	Imports []ImportReference `json:"imports"`
 }
 
+type DependencyGraph struct {
+	Path       string            `json:"path"`
+	Language   string            `json:"language,omitempty"`
+	Imports    []ImportReference `json:"imports,omitempty"`
+	ImportedBy []ImportReference `json:"imported_by,omitempty"`
+}
+
 type indexedImportFile struct {
 	Path     string
 	Language string
@@ -208,6 +215,36 @@ func BuildImportContext(db *sql.DB, query string, limit int) (ImportContext, err
 	}, nil
 }
 
+func BuildDependencyGraph(db *sql.DB, path string, limit int) (DependencyGraph, error) {
+	path = normalizeIndexedPath(path)
+	limit = normalizeResultLimit(limit, 20)
+
+	languageByPath, err := indexedPathLanguages(db)
+	if err != nil {
+		return DependencyGraph{}, err
+	}
+	language := languageByPath[path]
+	if language == "" {
+		language = LanguageFromPath(path)
+	}
+
+	outgoing, err := importsForPath(db, path)
+	if err != nil {
+		return DependencyGraph{}, err
+	}
+	incoming, err := importsTargetingPath(db, path)
+	if err != nil {
+		return DependencyGraph{}, err
+	}
+
+	return DependencyGraph{
+		Path:       path,
+		Language:   language,
+		Imports:    limitImportReferences(outgoing, limit),
+		ImportedBy: limitImportReferences(incoming, limit),
+	}, nil
+}
+
 func RenderImportContext(context ImportContext) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "# SnapZip Import Context\n\nQuery: %s\n", context.Query)
@@ -231,6 +268,62 @@ func RenderImportContext(context ImportContext) string {
 		builder.WriteByte('\n')
 	}
 	return builder.String()
+}
+
+func RenderDependencyGraph(graph DependencyGraph) string {
+	var builder strings.Builder
+	builder.WriteString("# SnapZip Dependency Graph\n\n")
+	fmt.Fprintf(&builder, "Path: %s", graph.Path)
+	if graph.Language != "" {
+		fmt.Fprintf(&builder, " [%s]", graph.Language)
+	}
+	builder.WriteByte('\n')
+
+	builder.WriteString("\n## Imports\n")
+	if len(graph.Imports) == 0 {
+		builder.WriteString("\nNo indexed outgoing imports found.\n")
+	} else {
+		for _, ref := range graph.Imports {
+			renderGraphImport(&builder, ref, false)
+		}
+	}
+
+	builder.WriteString("\n## Imported By\n")
+	if len(graph.ImportedBy) == 0 {
+		builder.WriteString("\nNo indexed incoming local imports found.\n")
+	} else {
+		for _, ref := range graph.ImportedBy {
+			renderGraphImport(&builder, ref, true)
+		}
+	}
+	return builder.String()
+}
+
+func renderGraphImport(builder *strings.Builder, ref ImportReference, includeSource bool) {
+	if includeSource {
+		fmt.Fprintf(builder, "- %s:%d [%s] %s", ref.Path, ref.Line, ref.Language, ref.ImportPath)
+	} else {
+		fmt.Fprintf(builder, "- L%d [%s] %s", ref.Line, ref.Language, ref.ImportPath)
+	}
+	if ref.Alias != "" {
+		fmt.Fprintf(builder, " as %s", ref.Alias)
+	}
+	if ref.TargetPath != "" {
+		fmt.Fprintf(builder, " -> %s", ref.TargetPath)
+	} else {
+		builder.WriteString(" (unresolved)")
+	}
+	if ref.Context != "" {
+		fmt.Fprintf(builder, " | %s", ref.Context)
+	}
+	builder.WriteByte('\n')
+}
+
+func limitImportReferences(refs []ImportReference, limit int) []ImportReference {
+	if len(refs) > limit {
+		return refs[:limit]
+	}
+	return refs
 }
 
 func scoreImportRelatedFiles(db *sql.DB, sourcePath string, scoreByPath map[string]int, languageByPath map[string]string) error {

@@ -164,7 +164,7 @@ func (s mcpServer) initializeResult(params json.RawMessage) map[string]any {
 			"version":     "0.1.0",
 			"description": "Local codebase memory and context packs for AI coding agents.",
 		},
-		"instructions": "Use SnapZip tools to search indexed local code, build bounded context and repair packs, inspect repo maps, symbols, symbol references, imports, likely affected tests, validation plans, feedback memory, and index stats. Tools are read-only.",
+		"instructions": "Use SnapZip tools to search indexed local code, build bounded context and repair packs, inspect repo maps, symbols, symbol references, imports, dependency graphs, likely affected tests, validation plans, feedback memory, and index stats. Tools are read-only.",
 	}
 }
 
@@ -295,6 +295,19 @@ func (s mcpServer) tools() []mcpTool {
 			),
 		},
 		{
+			Name:        "graph",
+			Title:       "Show SnapZip dependency graph",
+			Description: "Return outgoing imports and incoming importers for an indexed file using resolved local import edges when available.",
+			InputSchema: objectSchema(
+				[]string{"path"},
+				map[string]any{
+					"path":   stringSchema("Indexed source path, such as core/database.go."),
+					"db_dir": stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
+					"limit":  integerSchema("Maximum outgoing and incoming imports to return.", 1, 100),
+				},
+			),
+		},
+		{
 			Name:        "related",
 			Title:       "Find related files",
 			Description: "Find files related to an indexed source path using shared indexed symbols, call/reference sites, and resolved local import edges.",
@@ -364,6 +377,8 @@ func (s mcpServer) callTool(params json.RawMessage) (mcpToolResult, *rpcError) {
 		return s.callSymbolContext(call.Arguments), nil
 	case "imports":
 		return s.callImports(call.Arguments), nil
+	case "graph":
+		return s.callGraph(call.Arguments), nil
 	case "related":
 		return s.callRelated(call.Arguments), nil
 	case "get_feedback":
@@ -600,6 +615,24 @@ func (s mcpServer) callImports(args map[string]any) mcpToolResult {
 		return toolError(err.Error())
 	}
 	return toolSuccess(core.RenderImportContext(context), context)
+}
+
+func (s mcpServer) callGraph(args map[string]any) mcpToolResult {
+	path := strings.TrimSpace(stringArg(args, "path", ""))
+	if path == "" {
+		return toolError("path is required")
+	}
+	db, done, err := s.openDB(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	defer done()
+
+	graph, err := core.BuildDependencyGraph(db, path, intArg(args, "limit", 20))
+	if err != nil {
+		return toolError(err.Error())
+	}
+	return toolSuccess(core.RenderDependencyGraph(graph), graph)
 }
 
 func (s mcpServer) callRelated(args map[string]any) mcpToolResult {
