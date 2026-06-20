@@ -75,7 +75,7 @@ func SearchMemoryWithMode(db *sql.DB, comp Compressor, query, mode string, limit
 		ExpandedQuery: expandedQuery,
 		Mode:          mode,
 		Snippets:      snippets,
-		Receipts:      genericReceiptsForSnippets(snippets, mode),
+		Receipts:      genericReceiptsForSnippets(db, snippets, mode),
 		Feedback:      feedback,
 	}, nil
 }
@@ -361,14 +361,22 @@ func normalizePackMode(mode string) string {
 	}
 }
 
-func genericReceiptsForSnippets(snippets []Snippet, mode string) []ContextReceipt {
+func genericReceiptsForSnippets(db *sql.DB, snippets []Snippet, mode string) []ContextReceipt {
 	receipts := make([]ContextReceipt, 0, len(snippets))
 	for idx, snippet := range snippets {
 		reasons := []string{"retrieved by hybrid FTS5/QND ranking"}
 		if mode != "" {
 			reasons = append(reasons, "query expanded for "+mode+" mode")
 		}
-		receipts = append(receipts, receiptForSnippet(idx+1, snippet, 0.55, reasons, nil))
+		evidence := []string(nil)
+		confidence := 0.55
+		importReasons, importEvidence := importReceiptDetails(db, snippet.Path)
+		if len(importReasons) > 0 {
+			reasons = append(reasons, importReasons...)
+			evidence = append(evidence, importEvidence...)
+			confidence = maxFloat(confidence, 0.62)
+		}
+		receipts = append(receipts, receiptForSnippet(idx+1, snippet, confidence, reasons, evidence))
 	}
 	return receipts
 }

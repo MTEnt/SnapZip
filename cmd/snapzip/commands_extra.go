@@ -878,6 +878,7 @@ func agentRuleText() string {
 Use SnapZip when available. Run ` + "`snapzip stats --db-dir .`" + ` to check whether local context exists.
 Before non-trivial code changes, run ` + "`snapzip pack --query \"<topic>\" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>`" + ` for targeted local context, receipts, quality warnings, and feedback memory.
 Use ` + "`snapzip symbol-context --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip symbols --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip imports --query \"<module>\" --limit 10`" + `, or ` + "`snapzip map --limit 50`" + ` for structural context.
+Prefer resolved local import targets when present; unresolved imports are usually external packages or aliases SnapZip cannot map safely.
 Use ` + "`snapzip related --path <file>`" + ` and ` + "`snapzip affected --path <file>`" + ` to find related files and likely tests.
 Use ` + "`snapzip validate --path <file>`" + ` to plan validation, or ` + "`snapzip validate --changed --cmd \"<test command>\"`" + ` to run validation and get failure context.
 If ` + "`.snapzip/config.toml`" + ` defines validation, use ` + "`snapzip validate --changed --run-config`" + ` when explicitly running the configured project command.

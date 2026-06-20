@@ -284,7 +284,7 @@ func (s mcpServer) tools() []mcpTool {
 		{
 			Name:        "imports",
 			Title:       "Search SnapZip imports",
-			Description: "Search indexed import paths, modules, packages, dependencies, and asset references.",
+			Description: "Search indexed import paths, modules, packages, dependencies, and asset references. Local imports include target_path when resolved to an indexed file.",
 			InputSchema: objectSchema(
 				[]string{"query"},
 				map[string]any{
@@ -297,7 +297,7 @@ func (s mcpServer) tools() []mcpTool {
 		{
 			Name:        "related",
 			Title:       "Find related files",
-			Description: "Find files related to an indexed source path using shared indexed symbols, call/reference sites, and imports.",
+			Description: "Find files related to an indexed source path using shared indexed symbols, call/reference sites, and resolved local import edges.",
 			InputSchema: objectSchema(
 				[]string{"path"},
 				map[string]any{

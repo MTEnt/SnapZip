@@ -311,6 +311,9 @@ func TestImportsConnectSourceAndTests(t *testing.T) {
 	if len(imports) == 0 || imports[0].Path != "tests/test_cache.py" {
 		t.Fatalf("imports = %+v, want tests/test_cache.py", imports)
 	}
+	if imports[0].TargetPath != "app/cache.py" {
+		t.Fatalf("resolved import target = %q, want app/cache.py", imports[0].TargetPath)
+	}
 
 	related, err := RelatedFiles(db, "app/cache.py", 10)
 	if err != nil {
@@ -318,6 +321,60 @@ func TestImportsConnectSourceAndTests(t *testing.T) {
 	}
 	if len(related) == 0 || related[0].Path != "tests/test_cache.py" {
 		t.Fatalf("related files = %+v, want tests/test_cache.py", related)
+	}
+
+	reverseRelated, err := RelatedFiles(db, "tests/test_cache.py", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reverseRelated) == 0 || reverseRelated[0].Path != "app/cache.py" {
+		t.Fatalf("reverse related files = %+v, want app/cache.py", reverseRelated)
+	}
+
+	pack, err := BuildContextPack(db, mustTestCompressor(t), "build_cache", 5, 4096, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !receiptEvidenceContains(pack.Receipts, "imports app.cache") {
+		t.Fatalf("context receipts missing resolved import evidence: %+v", pack.Receipts)
+	}
+}
+
+func TestResolvedImportsHandleRelativeTypeScript(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "src/cache.ts", "export function buildCache() { return new Map<string, string>() }\n")
+	writeTestFile(t, root, "tests/cache.test.ts", "import { buildCache } from \"../src/cache\"\n\ntest(\"cache\", () => buildCache())\n")
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := IndexDirectory(db, root, NewLanguageFilter("typescript")); err != nil {
+		t.Fatal(err)
+	}
+
+	imports, err := SearchImports(db, "../src/cache", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imports) == 0 || imports[0].TargetPath != "src/cache.ts" {
+		t.Fatalf("imports = %+v, want resolved src/cache.ts", imports)
+	}
+	targetImports, err := SearchImports(db, "src/cache.ts", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targetImports) == 0 || targetImports[0].Path != "tests/cache.test.ts" {
+		t.Fatalf("target path import lookup = %+v, want tests/cache.test.ts", targetImports)
+	}
+	related, err := RelatedFiles(db, "src/cache.ts", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(related) == 0 || related[0].Path != "tests/cache.test.ts" {
+		t.Fatalf("related files = %+v, want tests/cache.test.ts", related)
 	}
 }
 
@@ -347,4 +404,15 @@ func writeTestFile(t *testing.T, root, name, content string) {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func receiptEvidenceContains(receipts []ContextReceipt, needle string) bool {
+	for _, receipt := range receipts {
+		for _, evidence := range receipt.Evidence {
+			if strings.Contains(evidence, needle) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -30,7 +30,7 @@ It combines SQLite FTS5 search, path-aware relevance, compression-distance re-ra
 
 *   **Local code search**: SQLite FTS5 keyword search with path-aware lexical weighting and Query-Normalized Distance (QND) compression re-ranking.
 *   **Language-aware indexing**: Index popular source formats by default, or pass explicit extensions such as `html,css,rb,py,go,rs,zig`.
-*   **Repo maps, symbols, references, and imports**: Stores file paths, line ranges, content hashes, indexed functions/classes/types, lightweight call/reference sites, and import/dependency references for structural lookup.
+*   **Repo maps, symbols, references, and imports**: Stores file paths, line ranges, content hashes, indexed functions/classes/types, lightweight call/reference sites, and import/dependency references. Local imports are resolved to indexed target files when SnapZip can map them safely.
 *   **Task-specific context packs**: Build bounded packs for debug, refactor, test, and docs workflows.
 *   **Context quality scoring**: Every pack reports receipt coverage, evidence density, definition/reference/test coverage, uniqueness, budget use, and warnings.
 *   **Validation planning**: Finds likely affected tests, suggests validation commands, and can run a supplied command with repair context on failure.
@@ -60,10 +60,10 @@ SnapZip is primarily a retrieval and local-memory tool. It ranks indexed snippet
 *   source path and file-type relevance
 *   lexical overlap with the query
 *   Query-Normalized Distance (QND) compression scoring
-*   indexed definitions, lightweight call/reference-site matches, and import/dependency references
+*   indexed definitions, lightweight call/reference-site matches, and resolved local import/dependency edges
 *   repair-specific stack, symbol, identifier, and file/line signals when using failure workflows
 
-Every context pack includes context receipts when budget allows. Receipts explain why each snippet was included, such as a matched stack frame, matched symbol, related test, or fallback retrieval match. Packs also include a context quality score with measurable coverage and warning signals. This makes the context auditable for humans and machine-readable for agents.
+Every context pack includes context receipts when budget allows. Receipts explain why each snippet was included, such as a matched stack frame, matched symbol, resolved local import edge, related test, or fallback retrieval match. Packs also include a context quality score with measurable coverage and warning signals. This makes the context auditable for humans and machine-readable for agents.
 
 The optional optimizer is conservative. It uses local code context and Zstandard dictionary scoring, but only mutates files when a local syntax checker is available for that language. Invalid proposals are rejected, and unsupported languages return the seed draft unchanged.
 
@@ -155,7 +155,7 @@ private/
 scratch/
 ```
 
-Indexed snippets include source path, line range, content hash, and source modification time. Supported source files also populate local symbol, reference, and import tables used by repo maps and related-file lookup.
+Indexed snippets include source path, line range, content hash, and source modification time. Supported source files also populate local symbol, reference, and import tables used by repo maps and related-file lookup. External packages are indexed as import references, but only imports that map to indexed local files receive a resolved target path.
 
 Common default formats include:
 
@@ -214,6 +214,12 @@ snapzip related --db-dir . --path core/database.go --limit 10
 ```
 
 Use these commands when an agent needs structural context before editing a file. `symbol-context` returns matching definitions plus indexed call/reference sites. `imports` returns matching module, package, dependency, and linked-asset references.
+
+When an import resolves locally, `imports` shows the edge:
+
+```text
+tests/test_cache.py:1 [py] app.cache -> app/cache.py | from app.cache import build_cache
+```
 
 ### E. Failure Context
 Build a context pack from failing test/build output:

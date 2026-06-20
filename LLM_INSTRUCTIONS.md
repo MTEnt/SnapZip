@@ -34,6 +34,7 @@ When `snapzip` is available in the workspace or on `PATH`:
    snapzip imports --query "<module>" --limit 10
    snapzip related --path <file> --limit 10
    ```
+   Prefer resolved local import targets when present; unresolved imports are usually external packages or aliases SnapZip cannot map safely.
 
 5. Use structured search output when the caller needs raw snippets.
    ```bash

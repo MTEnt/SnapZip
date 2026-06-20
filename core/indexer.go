@@ -94,7 +94,13 @@ func IndexDirectoryWithOptions(db *sql.DB, root string, filter LanguageFilter, o
 		indexed += chunks
 		return nil
 	})
-	return indexed, err
+	if err != nil {
+		return indexed, err
+	}
+	if err := ResolveImportTargets(db); err != nil {
+		return indexed, err
+	}
+	return indexed, nil
 }
 
 func IndexFilesWithOptions(db *sql.DB, root string, paths []string, filter LanguageFilter, options IndexOptions) (int, error) {
@@ -113,6 +119,9 @@ func IndexFilesWithOptions(db *sql.DB, root string, paths []string, filter Langu
 			return indexed, err
 		}
 		indexed += chunks
+	}
+	if err := ResolveImportTargets(db); err != nil {
+		return indexed, err
 	}
 	return indexed, nil
 }

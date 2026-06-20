@@ -136,7 +136,8 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 
 func TestMCPServerExposesSearchTool(t *testing.T) {
 	fixture := t.TempDir()
-	writeCLIFile(t, fixture, "lib/cache.rb", "require \"json\"\n\nclass CacheStore\nend\n\ndef build_cache\n  CacheStore.new\nend\n")
+	writeCLIFile(t, fixture, "lib/helper.rb", "module CacheHelper\nend\n")
+	writeCLIFile(t, fixture, "lib/cache.rb", "require \"json\"\nrequire_relative \"helper\"\n\nclass CacheStore\nend\n\ndef build_cache\n  CacheStore.new\nend\n")
 	writeCLIFile(t, fixture, "test/cache_test.rb", "def test_cache\n  build_cache()\nend\n")
 
 	dbDir := t.TempDir()
@@ -160,7 +161,7 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"repair_pack","arguments":{"error_output":"lib/cache.rb:1: uninitialized constant CacheStore","limit":2,"budget":4096}}}`,
 		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"affected_tests","arguments":{"path":"lib/cache.rb","limit":5}}}`,
 		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"symbol_context","arguments":{"query":"build_cache","limit":5}}}`,
-		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"imports","arguments":{"query":"json","limit":5}}}`,
+		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"imports","arguments":{"query":"helper","limit":5}}}`,
 		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"validation_plan","arguments":{"path":"lib/cache.rb","limit":5}}}`,
 	}, "\n") + "\n"
 
@@ -191,7 +192,7 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	if !strings.Contains(lines[6], "SnapZip Symbol Context") || !strings.Contains(lines[6], "test/cache_test.rb") {
 		t.Fatalf("symbol_context tool response missing reference context:\n%s", lines[6])
 	}
-	if !strings.Contains(lines[7], "SnapZip Import Context") || !strings.Contains(lines[7], "lib/cache.rb") {
+	if !strings.Contains(lines[7], "SnapZip Import Context") || !strings.Contains(lines[7], "lib/cache.rb") || !strings.Contains(lines[7], "lib/helper.rb") {
 		t.Fatalf("imports tool response missing import context:\n%s", lines[7])
 	}
 	if !strings.Contains(lines[8], "SnapZip Validation Plan") || !strings.Contains(lines[8], "bundle exec rake test") {
@@ -208,7 +209,8 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 	fixture := t.TempDir()
 	writeCLIFile(t, fixture, "go.mod", "module snapzipfixture\n\ngo 1.25\n")
 	writeCLIFile(t, fixture, ".snapzip/config.toml", "[validation]\ncommand = \"go test ./...\"\n\n[validation.commands]\ngo = \"go test ./pkg\"\n")
-	writeCLIFile(t, fixture, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
+	writeCLIFile(t, fixture, "pkg/store/store.go", "package store\n\ntype Store struct{}\n")
+	writeCLIFile(t, fixture, "pkg/cache.go", "package cache\n\nimport \"snapzipfixture/pkg/store\"\n\ntype CacheStore struct{ Store store.Store }\n\nfunc NewCacheStore() CacheStore { return CacheStore{Store: store.Store{}} }\n")
 	writeCLIFile(t, fixture, "pkg/cache_test.go", "package cache\n\nimport \"testing\"\n\nfunc TestConstructor(t *testing.T) { _ = NewCacheStore() }\n")
 
 	dbDir := t.TempDir()
@@ -234,9 +236,9 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 		t.Fatalf("symbol-context output missing definition/reference context:\n%s", symbolContextOutput)
 	}
 
-	importsOutput := runSnapZip(t, repoRoot, "imports", "--db-dir", dbDir, "--query", "testing", "--limit", "5")
-	if !strings.Contains(importsOutput, "SnapZip Import Context") || !strings.Contains(importsOutput, "pkg/cache_test.go") {
-		t.Fatalf("imports output missing Go test import:\n%s", importsOutput)
+	importsOutput := runSnapZip(t, repoRoot, "imports", "--db-dir", dbDir, "--query", "pkg/store", "--limit", "5")
+	if !strings.Contains(importsOutput, "SnapZip Import Context") || !strings.Contains(importsOutput, "pkg/cache.go") || !strings.Contains(importsOutput, "pkg/store/store.go") {
+		t.Fatalf("imports output missing resolved Go package import:\n%s", importsOutput)
 	}
 
 	relatedOutput := runSnapZip(t, repoRoot, "related", "--db-dir", dbDir, "--path", "pkg/cache.go", "--limit", "5")

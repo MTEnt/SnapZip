@@ -15,6 +15,7 @@ type ImportReference struct {
 	Alias      string `json:"alias,omitempty"`
 	Language   string `json:"language"`
 	Path       string `json:"path"`
+	TargetPath string `json:"target_path,omitempty"`
 	Line       int    `json:"line"`
 	Context    string `json:"context,omitempty"`
 }
@@ -24,12 +25,23 @@ type ImportContext struct {
 	Imports []ImportReference `json:"imports"`
 }
 
+type indexedImportFile struct {
+	Path     string
+	Language string
+}
+
+type importResolutionIndex struct {
+	Files  []indexedImportFile
+	ByPath map[string]indexedImportFile
+	ByDir  map[string][]indexedImportFile
+}
+
 var (
 	goSingleImportPattern  = regexp.MustCompile("^\\s*import\\s+(?:([A-Za-z_][A-Za-z0-9_]*|\\.|_)\\s+)?[\"`]([^\"`]+)[\"`]")
 	goBlockImportPattern   = regexp.MustCompile("^\\s*(?:([A-Za-z_][A-Za-z0-9_]*|\\.|_)\\s+)?[\"`]([^\"`]+)[\"`]")
 	pythonImportPattern    = regexp.MustCompile(`^\s*import\s+(.+)`)
 	pythonFromPattern      = regexp.MustCompile(`^\s*from\s+([.]*[A-Za-z_][A-Za-z0-9_\.]*)\s+import\s+(.+)`)
-	rubyRequirePattern     = regexp.MustCompile(`^\s*(?:require|require_relative|load)\s+["']([^"']+)["']`)
+	rubyRequirePattern     = regexp.MustCompile(`^\s*(require|require_relative|load)\s+["']([^"']+)["']`)
 	jsImportPattern        = regexp.MustCompile(`^\s*import\s+(?:(.*?)\s+from\s+)?["']([^"']+)["']`)
 	jsRequirePattern       = regexp.MustCompile(`(?:const|let|var)?\s*([^=;\n]*)=?\s*require\(\s*["']([^"']+)["']\s*\)`)
 	jsExportFromPattern    = regexp.MustCompile(`^\s*export\s+.*\s+from\s+["']([^"']+)["']`)
@@ -62,17 +74,19 @@ func ReplaceImportsForFile(db *sql.DB, language, path string, content []byte) er
 	}
 	for _, ref := range refs {
 		_, err := tx.Exec(`
-			INSERT INTO import_refs (import_path, alias, language, path, line, context)
-			VALUES (?, ?, ?, ?, ?, ?)
+			INSERT INTO import_refs (import_path, alias, language, path, target_path, line, context)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(path, import_path, line) DO UPDATE SET
 				alias = excluded.alias,
 				language = excluded.language,
+				target_path = excluded.target_path,
 				context = excluded.context,
 				created_at = CURRENT_TIMESTAMP`,
 			ref.ImportPath,
 			ref.Alias,
 			ref.Language,
 			ref.Path,
+			ref.TargetPath,
 			ref.Line,
 			ref.Context,
 		)
@@ -122,7 +136,7 @@ func ExtractImports(language, path, content string) []ImportReference {
 		case "py":
 			appendPythonImports(&refs, seen, language, path, lineNumber, context, trimmed)
 		case "rb":
-			appendImportMatch(&refs, seen, language, path, lineNumber, context, rubyRequirePattern.FindStringSubmatch(trimmed), 1, 0)
+			appendRubyImport(&refs, seen, language, path, lineNumber, context, trimmed)
 		case "js", "jsx", "ts", "tsx", "mjs", "cjs":
 			appendJSImport(&refs, seen, language, path, lineNumber, context, trimmed)
 		case "java", "kt", "kts":
@@ -152,7 +166,7 @@ func SearchImports(db *sql.DB, query string, limit int) ([]ImportReference, erro
 	limit = normalizeResultLimit(limit, 20)
 	tokens := searchTokens(query)
 	rows, err := db.Query(`
-		SELECT id, import_path, alias, language, path, line, context
+		SELECT id, import_path, alias, language, path, target_path, line, context
 		FROM import_refs
 		ORDER BY path ASC, line ASC`)
 	if err != nil {
@@ -208,6 +222,9 @@ func RenderImportContext(context ImportContext) string {
 			alias = " as " + ref.Alias
 		}
 		fmt.Fprintf(&builder, "- %s:%d [%s] %s%s", ref.Path, ref.Line, ref.Language, ref.ImportPath, alias)
+		if ref.TargetPath != "" {
+			fmt.Fprintf(&builder, " -> %s", ref.TargetPath)
+		}
 		if ref.Context != "" {
 			fmt.Fprintf(&builder, " | %s", ref.Context)
 		}
@@ -217,6 +234,10 @@ func RenderImportContext(context ImportContext) string {
 }
 
 func scoreImportRelatedFiles(db *sql.DB, sourcePath string, scoreByPath map[string]int, languageByPath map[string]string) error {
+	if err := scoreResolvedImportRelatedFiles(db, sourcePath, scoreByPath, languageByPath); err != nil {
+		return err
+	}
+
 	for _, query := range importQueriesForPath(sourcePath) {
 		refs, err := SearchImports(db, query, 100)
 		if err != nil {
@@ -262,7 +283,7 @@ func scoreImportRelatedFiles(db *sql.DB, sourcePath string, scoreByPath map[stri
 
 func importsForPath(db *sql.DB, path string) ([]ImportReference, error) {
 	rows, err := db.Query(`
-		SELECT id, import_path, alias, language, path, line, context
+		SELECT id, import_path, alias, language, path, target_path, line, context
 		FROM import_refs
 		WHERE path = ?
 		ORDER BY line ASC`, path)
@@ -280,6 +301,94 @@ func importsForPath(db *sql.DB, path string) ([]ImportReference, error) {
 		refs = append(refs, ref)
 	}
 	return refs, rows.Err()
+}
+
+func importsTargetingPath(db *sql.DB, path string) ([]ImportReference, error) {
+	rows, err := db.Query(`
+		SELECT id, import_path, alias, language, path, target_path, line, context
+		FROM import_refs
+		WHERE target_path = ?
+		ORDER BY path ASC, line ASC`, path)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var refs []ImportReference
+	for rows.Next() {
+		ref, err := scanImportReference(rows)
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+func scoreResolvedImportRelatedFiles(db *sql.DB, sourcePath string, scoreByPath map[string]int, languageByPath map[string]string) error {
+	indexed, err := indexedPathLanguages(db)
+	if err != nil {
+		return err
+	}
+	outgoing, err := importsForPath(db, sourcePath)
+	if err != nil {
+		return err
+	}
+	for _, ref := range outgoing {
+		if ref.TargetPath == "" || ref.TargetPath == sourcePath {
+			continue
+		}
+		scoreByPath[ref.TargetPath] += 9
+		languageByPath[ref.TargetPath] = indexed[ref.TargetPath]
+	}
+
+	incoming, err := importsTargetingPath(db, sourcePath)
+	if err != nil {
+		return err
+	}
+	for _, ref := range incoming {
+		if ref.Path == "" || ref.Path == sourcePath {
+			continue
+		}
+		scoreByPath[ref.Path] += 10
+		languageByPath[ref.Path] = ref.Language
+	}
+	return nil
+}
+
+func importReceiptDetails(db *sql.DB, path string) ([]string, []string) {
+	path = strings.TrimSpace(path)
+	if db == nil || path == "" {
+		return nil, nil
+	}
+	var reasons []string
+	var evidence []string
+
+	if outgoing, err := importsForPath(db, path); err == nil {
+		for _, ref := range outgoing {
+			if ref.TargetPath == "" {
+				continue
+			}
+			reasons = append(reasons, "has resolved local import/dependency edges")
+			evidence = append(evidence, fmt.Sprintf("imports %s -> %s", ref.ImportPath, ref.TargetPath))
+			if len(evidence) >= 3 {
+				return uniqueStrings(reasons), uniqueStrings(evidence)
+			}
+		}
+	}
+	if incoming, err := importsTargetingPath(db, path); err == nil {
+		for _, ref := range incoming {
+			if ref.Path == "" {
+				continue
+			}
+			reasons = append(reasons, "is targeted by resolved local imports")
+			evidence = append(evidence, fmt.Sprintf("%s imports %s", ref.Path, ref.ImportPath))
+			if len(evidence) >= 3 {
+				return uniqueStrings(reasons), uniqueStrings(evidence)
+			}
+		}
+	}
+	return uniqueStrings(reasons), uniqueStrings(evidence)
 }
 
 func appendPythonImports(refs *[]ImportReference, seen map[string]bool, language, path string, line int, context, trimmed string) {
@@ -309,6 +418,18 @@ func appendJSImport(refs *[]ImportReference, seen map[string]bool, language, pat
 	if match := jsRequirePattern.FindStringSubmatch(trimmed); len(match) > 2 {
 		appendImport(refs, seen, language, path, line, context, match[2], cleanImportAlias(match[1]))
 	}
+}
+
+func appendRubyImport(refs *[]ImportReference, seen map[string]bool, language, path string, line int, context, trimmed string) {
+	match := rubyRequirePattern.FindStringSubmatch(trimmed)
+	if len(match) < 3 {
+		return
+	}
+	importPath := match[2]
+	if match[1] == "require_relative" && !strings.HasPrefix(importPath, ".") {
+		importPath = "./" + importPath
+	}
+	appendImport(refs, seen, language, path, line, context, importPath, "")
 }
 
 func appendImportMatch(refs *[]ImportReference, seen map[string]bool, language, path string, line int, context string, match []string, importIndex, aliasIndex int) {
@@ -347,8 +468,48 @@ func scanImportReference(rows interface {
 	Scan(dest ...any) error
 }) (ImportReference, error) {
 	var ref ImportReference
-	err := rows.Scan(&ref.ID, &ref.ImportPath, &ref.Alias, &ref.Language, &ref.Path, &ref.Line, &ref.Context)
+	err := rows.Scan(&ref.ID, &ref.ImportPath, &ref.Alias, &ref.Language, &ref.Path, &ref.TargetPath, &ref.Line, &ref.Context)
 	return ref, err
+}
+
+func ResolveImportTargets(db *sql.DB) error {
+	index, err := buildImportResolutionIndex(db)
+	if err != nil {
+		return err
+	}
+	rows, err := db.Query(`
+		SELECT id, import_path, alias, language, path, target_path, line, context
+		FROM import_refs
+		ORDER BY path ASC, line ASC`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var refs []ImportReference
+	for rows.Next() {
+		ref, err := scanImportReference(rows)
+		if err != nil {
+			return err
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, ref := range refs {
+		target := resolveImportTarget(ref, index)
+		if _, err := tx.Exec("UPDATE import_refs SET target_path = ? WHERE id = ?", target, ref.ID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func supportsImportReferences(language string) bool {
@@ -364,7 +525,7 @@ func importReferenceMatches(ref ImportReference, tokens []string) bool {
 	if len(tokens) == 0 {
 		return true
 	}
-	haystack := strings.ToLower(ref.ImportPath + " " + ref.Alias + " " + ref.Language + " " + ref.Path + " " + ref.Context)
+	haystack := strings.ToLower(ref.ImportPath + " " + ref.Alias + " " + ref.Language + " " + ref.Path + " " + ref.TargetPath + " " + ref.Context)
 	for _, token := range tokens {
 		if strings.Contains(haystack, token) {
 			return true
@@ -378,6 +539,7 @@ func importReferenceScore(ref ImportReference, tokens []string) int {
 	lowerImport := strings.ToLower(ref.ImportPath)
 	lowerAlias := strings.ToLower(ref.Alias)
 	lowerPath := strings.ToLower(ref.Path)
+	lowerTargetPath := strings.ToLower(ref.TargetPath)
 	lowerContext := strings.ToLower(ref.Context)
 	for _, token := range tokens {
 		switch {
@@ -390,6 +552,10 @@ func importReferenceScore(ref ImportReference, tokens []string) int {
 		case lowerAlias == token:
 			score += 6
 		case strings.Contains(lowerAlias, token):
+			score += 4
+		case lowerTargetPath == token:
+			score += 7
+		case strings.Contains(lowerTargetPath, token):
 			score += 4
 		case strings.Contains(lowerPath, token):
 			score += 3
@@ -532,4 +698,303 @@ func normalizeImportSeparators(value, separator string) string {
 	value = strings.Trim(value, "./\\")
 	replacer := strings.NewReplacer("::", separator, "\\", separator, "/", separator, ".", separator)
 	return replacer.Replace(value)
+}
+
+func buildImportResolutionIndex(db *sql.DB) (importResolutionIndex, error) {
+	rows, err := db.Query(`
+		SELECT path, language
+		FROM knowledge
+		WHERE path != ''
+		GROUP BY path, language
+		ORDER BY path ASC`)
+	if err != nil {
+		return importResolutionIndex{}, err
+	}
+	defer rows.Close()
+
+	index := importResolutionIndex{
+		ByPath: map[string]indexedImportFile{},
+		ByDir:  map[string][]indexedImportFile{},
+	}
+	for rows.Next() {
+		var file indexedImportFile
+		if err := rows.Scan(&file.Path, &file.Language); err != nil {
+			return importResolutionIndex{}, err
+		}
+		file.Path = normalizeIndexedPath(file.Path)
+		file.Language = NormalizeLanguage(file.Language)
+		if file.Path == "" {
+			continue
+		}
+		index.Files = append(index.Files, file)
+		index.ByPath[file.Path] = file
+		dir := normalizeIndexedPath(filepath.Dir(file.Path))
+		index.ByDir[dir] = append(index.ByDir[dir], file)
+	}
+	if err := rows.Err(); err != nil {
+		return importResolutionIndex{}, err
+	}
+	for dir := range index.ByDir {
+		sort.SliceStable(index.ByDir[dir], func(i, j int) bool {
+			return importTargetLess(index.ByDir[dir][i], index.ByDir[dir][j])
+		})
+	}
+	return index, nil
+}
+
+func resolveImportTarget(ref ImportReference, index importResolutionIndex) string {
+	if !shouldResolveImport(ref) {
+		return ""
+	}
+	for _, candidate := range importTargetCandidates(ref) {
+		if target := selectImportTarget(ref, candidate, index); target != "" {
+			return target
+		}
+	}
+	return ""
+}
+
+func selectImportTarget(ref ImportReference, candidate string, index importResolutionIndex) string {
+	candidate = normalizeIndexedPath(candidate)
+	if candidate == "" {
+		return ""
+	}
+	if file, ok := index.ByPath[candidate]; ok && file.Path != ref.Path {
+		return file.Path
+	}
+	if target := selectImportTargetFromFiles(ref.Path, index.ByDir[candidate]); target != "" {
+		return target
+	}
+
+	var exactMatches []indexedImportFile
+	var dirMatches []indexedImportFile
+	for _, file := range index.Files {
+		if file.Path == ref.Path {
+			continue
+		}
+		if pathSuffixMatch(file.Path, candidate) {
+			exactMatches = append(exactMatches, file)
+			continue
+		}
+		dir := normalizeIndexedPath(filepath.Dir(file.Path))
+		if dir == candidate || strings.HasSuffix(dir, "/"+candidate) {
+			dirMatches = append(dirMatches, file)
+		}
+	}
+	if target := selectImportTargetFromFiles(ref.Path, exactMatches); target != "" {
+		return target
+	}
+	return selectImportTargetFromFiles(ref.Path, dirMatches)
+}
+
+func selectImportTargetFromFiles(sourcePath string, files []indexedImportFile) string {
+	if len(files) == 0 {
+		return ""
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		return importTargetLess(files[i], files[j])
+	})
+	for _, file := range files {
+		if file.Path != sourcePath {
+			return file.Path
+		}
+	}
+	return ""
+}
+
+func importTargetLess(left, right indexedImportFile) bool {
+	leftTest := isTestPath(left.Path)
+	rightTest := isTestPath(right.Path)
+	if leftTest != rightTest {
+		return !leftTest
+	}
+	if len(left.Path) != len(right.Path) {
+		return len(left.Path) < len(right.Path)
+	}
+	return left.Path < right.Path
+}
+
+func importTargetCandidates(ref ImportReference) []string {
+	language := NormalizeLanguage(ref.Language)
+	importPath := strings.TrimSpace(ref.ImportPath)
+	if importPath == "" {
+		return nil
+	}
+
+	var candidates []string
+	addBase := func(base string, extensions []string, indexNames []string) {
+		base = normalizeIndexedPath(base)
+		if base == "" {
+			return
+		}
+		candidates = append(candidates, base)
+		if filepath.Ext(base) == "" {
+			for _, ext := range extensions {
+				candidates = append(candidates, base+ext)
+			}
+			for _, indexName := range indexNames {
+				candidates = append(candidates, filepath.ToSlash(filepath.Join(base, indexName)))
+			}
+		}
+	}
+	relativeBase := func() string {
+		return normalizeIndexedPath(filepath.Join(filepath.Dir(ref.Path), importPath))
+	}
+
+	switch language {
+	case "py":
+		if strings.HasPrefix(importPath, ".") {
+			addBase(pythonRelativeImportBase(ref.Path, importPath), []string{".py"}, []string{"__init__.py"})
+		} else {
+			addBase(strings.ReplaceAll(importPath, ".", "/"), []string{".py"}, []string{"__init__.py"})
+			addBase(filepath.Join(filepath.Dir(ref.Path), strings.ReplaceAll(importPath, ".", "/")), []string{".py"}, []string{"__init__.py"})
+		}
+	case "js", "jsx", "ts", "tsx", "mjs", "cjs":
+		if strings.HasPrefix(importPath, "@/") {
+			addBase(strings.TrimPrefix(importPath, "@/"), jsLikeTargetExtensions(), jsLikeIndexFiles())
+		}
+		if strings.HasPrefix(importPath, ".") {
+			addBase(relativeBase(), jsLikeTargetExtensions(), jsLikeIndexFiles())
+		}
+	case "css", "scss", "sass", "less", "html", "vue", "svelte", "astro":
+		if strings.HasPrefix(importPath, ".") || strings.HasPrefix(importPath, "/") {
+			addBase(relativeBase(), webAssetTargetExtensions(), nil)
+		} else if strings.Contains(importPath, "/") {
+			addBase(importPath, webAssetTargetExtensions(), nil)
+		}
+	case "rb":
+		if strings.HasPrefix(importPath, ".") {
+			addBase(relativeBase(), []string{".rb"}, nil)
+		} else if strings.Contains(importPath, "/") {
+			addBase(importPath, []string{".rb"}, nil)
+		}
+	case "php":
+		if strings.HasPrefix(importPath, ".") {
+			addBase(relativeBase(), []string{".php"}, nil)
+		} else if strings.Contains(importPath, "/") || strings.Contains(importPath, "\\") {
+			addBase(strings.ReplaceAll(importPath, "\\", "/"), []string{".php"}, nil)
+		}
+	case "go":
+		if strings.Contains(importPath, "/") {
+			for _, suffix := range pathSuffixCandidates(importPath) {
+				addBase(suffix, nil, nil)
+			}
+		}
+	case "java", "kt", "kts":
+		if strings.Contains(importPath, ".") {
+			addBase(strings.ReplaceAll(importPath, ".", "/"), []string{".java", ".kt", ".kts"}, nil)
+		}
+	case "cs":
+		if strings.Contains(importPath, ".") {
+			addBase(strings.ReplaceAll(importPath, ".", "/"), []string{".cs"}, nil)
+		}
+	case "swift":
+		if strings.Contains(importPath, ".") || strings.Contains(importPath, "/") {
+			addBase(strings.ReplaceAll(importPath, ".", "/"), []string{".swift"}, nil)
+		}
+	case "rs":
+		base := rustImportBase(ref.Path, importPath)
+		if base != "" {
+			addBase(base, []string{".rs"}, []string{"mod.rs"})
+			addBase(filepath.Join("src", base), []string{".rs"}, []string{"mod.rs"})
+		}
+	default:
+		if strings.HasPrefix(importPath, ".") {
+			addBase(relativeBase(), nil, nil)
+		}
+	}
+	return uniqueStrings(candidates)
+}
+
+func shouldResolveImport(ref ImportReference) bool {
+	importPath := strings.TrimSpace(ref.ImportPath)
+	if importPath == "" {
+		return false
+	}
+	if strings.HasPrefix(importPath, ".") || strings.HasPrefix(importPath, "/") || strings.HasPrefix(importPath, "@/") {
+		return true
+	}
+	switch NormalizeLanguage(ref.Language) {
+	case "py":
+		return true
+	case "rb", "js", "jsx", "ts", "tsx", "mjs", "cjs", "css", "scss", "sass", "less", "html", "vue", "svelte", "astro", "php":
+		return strings.Contains(importPath, "/") || strings.Contains(importPath, "\\")
+	case "go":
+		return strings.Contains(importPath, "/")
+	case "java", "kt", "kts", "cs", "swift":
+		return strings.Contains(importPath, ".")
+	case "rs":
+		return strings.Contains(importPath, "::") || strings.HasPrefix(importPath, "crate") || strings.HasPrefix(importPath, "self") || strings.HasPrefix(importPath, "super")
+	default:
+		return strings.ContainsAny(importPath, "/\\.")
+	}
+}
+
+func pythonRelativeImportBase(sourcePath, importPath string) string {
+	dots := 0
+	for dots < len(importPath) && importPath[dots] == '.' {
+		dots++
+	}
+	remainder := strings.TrimPrefix(importPath[dots:], ".")
+	baseDir := filepath.Dir(sourcePath)
+	for range max(dots-1, 0) {
+		baseDir = filepath.Dir(baseDir)
+	}
+	if remainder == "" {
+		return baseDir
+	}
+	return filepath.Join(baseDir, strings.ReplaceAll(remainder, ".", "/"))
+}
+
+func rustImportBase(sourcePath, importPath string) string {
+	importPath = strings.TrimSpace(importPath)
+	importPath = strings.TrimPrefix(importPath, "crate::")
+	if strings.HasPrefix(importPath, "self::") {
+		importPath = strings.TrimPrefix(importPath, "self::")
+		return filepath.Join(filepath.Dir(sourcePath), strings.ReplaceAll(importPath, "::", "/"))
+	}
+	for strings.HasPrefix(importPath, "super::") {
+		importPath = strings.TrimPrefix(importPath, "super::")
+		sourcePath = filepath.Dir(sourcePath)
+	}
+	importPath = strings.TrimPrefix(importPath, "::")
+	return strings.ReplaceAll(importPath, "::", "/")
+}
+
+func pathSuffixCandidates(path string) []string {
+	path = normalizeIndexedPath(path)
+	parts := strings.Split(path, "/")
+	var candidates []string
+	for idx := 0; idx < len(parts); idx++ {
+		candidate := strings.Join(parts[idx:], "/")
+		if candidate != "" {
+			candidates = append(candidates, candidate)
+		}
+	}
+	return candidates
+}
+
+func jsLikeTargetExtensions() []string {
+	return []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json"}
+}
+
+func jsLikeIndexFiles() []string {
+	return []string{"index.ts", "index.tsx", "index.js", "index.jsx", "index.mjs", "index.cjs"}
+}
+
+func webAssetTargetExtensions() []string {
+	return []string{".css", ".scss", ".sass", ".less", ".js", ".ts", ".png", ".jpg", ".jpeg", ".svg", ".webp"}
+}
+
+func normalizeIndexedPath(path string) string {
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	path = strings.TrimPrefix(path, "./")
+	if path == "" || path == "." {
+		return ""
+	}
+	path = filepath.ToSlash(filepath.Clean(path))
+	if path == "." {
+		return ""
+	}
+	return path
 }

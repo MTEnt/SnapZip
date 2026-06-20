@@ -150,6 +150,7 @@ func InitDB(dir string) (*sql.DB, error) {
 		alias TEXT,
 		language TEXT,
 		path TEXT,
+		target_path TEXT DEFAULT '',
 		line INTEGER,
 		context TEXT,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -160,6 +161,9 @@ func InitDB(dir string) (*sql.DB, error) {
 	}
 
 	if err := migrateKnowledgeIndex(db); err != nil {
+		return nil, err
+	}
+	if err := migrateImportRefs(db); err != nil {
 		return nil, err
 	}
 
@@ -360,7 +364,15 @@ func migrateKnowledgeIndex(db *sql.DB) error {
 }
 
 func ensureKnowledgeColumn(db *sql.DB, name, definition string) error {
-	rows, err := db.Query("PRAGMA table_info(knowledge)")
+	return ensureTableColumn(db, "knowledge", name, definition)
+}
+
+func migrateImportRefs(db *sql.DB) error {
+	return ensureTableColumn(db, "import_refs", "target_path", "TEXT DEFAULT ''")
+}
+
+func ensureTableColumn(db *sql.DB, table, name, definition string) error {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
 		return err
 	}
@@ -381,7 +393,7 @@ func ensureKnowledgeColumn(db *sql.DB, name, definition string) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = db.Exec("ALTER TABLE knowledge ADD COLUMN " + name + " " + definition)
+	_, err = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + name + " " + definition)
 	return err
 }
 
