@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -24,6 +25,10 @@ func main() {
 		handleInitDB()
 	case "search":
 		handleSearch()
+	case "pack":
+		handlePack()
+	case "mcp":
+		handleMCP()
 	case "optimize":
 		handleOptimize()
 	case "stats":
@@ -44,7 +49,9 @@ func printUsage() {
 	fmt.Println("Subcommands:")
 	fmt.Println("  init-db        Initialize the local memory database and index project directories")
 	fmt.Println("  search         Search template database using Hybrid FTS5+QND ranking")
-	fmt.Println("  optimize       Refine code sketches using Bayesian Zstd MCMC")
+	fmt.Println("  pack           Build a bounded context pack for AI coding agents")
+	fmt.Println("  mcp            Run SnapZip as a read-only MCP stdio server")
+	fmt.Println("  optimize       Refine code sketches using the conservative local-context optimizer")
 	fmt.Println("  stats          Show indexed row counts and language breakdown")
 	fmt.Println("  log-feedback   Log negative user feedback to database")
 	fmt.Println("  get-feedback   Retrieve recent negative feedback entries to guide LLM")
@@ -129,6 +136,7 @@ func handleSearch() {
 	query := fs.String("query", "", "Search query string")
 	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
 	limit := fs.Int("limit", 3, "Number of snippets to return")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
 	_ = fs.Parse(os.Args[2:])
 
 	if *query == "" {
@@ -144,11 +152,26 @@ func handleSearch() {
 	}
 	defer db.Close()
 
-	// Retrieve and print past negative feedback to alert the user/agent.
-	feedbacks, err := core.RetrieveNegativeFeedback(db, 5)
-	if err == nil && len(feedbacks) > 0 {
+	comp, err := core.NewZstdCompressor(zstd.SpeedDefault)
+	if err != nil {
+		fmt.Printf("Error initializing compressor: %v\n", err)
+		os.Exit(1)
+	}
+
+	result, err := core.SearchMemory(db, comp, *query, *limit, 5)
+	if err != nil {
+		fmt.Printf("Search failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOutput {
+		writeJSON(result)
+		return
+	}
+
+	if len(result.Feedback) > 0 {
 		fmt.Fprintln(os.Stderr, "\n[SnapZip Memory Warning] Avoid repeating these past mistakes/failures:")
-		for _, f := range feedbacks {
+		for _, f := range result.Feedback {
 			if f.BotResponse != "" {
 				fmt.Fprintf(os.Stderr, "   - Problem: %q | Failed Output: %q\n", f.UserInput, f.BotResponse)
 			} else {
@@ -158,22 +181,50 @@ func handleSearch() {
 		fmt.Fprintln(os.Stderr)
 	}
 
+	result.Feedback = nil
+	fmt.Print(core.RenderSearchResult(result))
+}
+
+func handlePack() {
+	fs := flag.NewFlagSet("pack", flag.ExitOnError)
+	query := fs.String("query", "", "Search query string")
+	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
+	limit := fs.Int("limit", 5, "Maximum snippets to include")
+	budget := fs.Int("budget", core.DefaultContextPackBudgetBytes, "Approximate byte budget for rendered context")
+	feedbackLimit := fs.Int("feedback-limit", 5, "Maximum feedback entries to include")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
+	_ = fs.Parse(os.Args[2:])
+
+	if *query == "" {
+		fmt.Println("Error: --query is required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	db, err := core.InitDB(*dbDir)
+	if err != nil {
+		fmt.Printf("Error opening DB: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
 	comp, err := core.NewZstdCompressor(zstd.SpeedDefault)
 	if err != nil {
 		fmt.Printf("Error initializing compressor: %v\n", err)
 		os.Exit(1)
 	}
 
-	results, err := core.RetrieveSimilarSnippets(db, comp, *query, *limit)
+	pack, err := core.BuildContextPack(db, comp, *query, *limit, *budget, *feedbackLimit)
 	if err != nil {
-		fmt.Printf("Search failed: %v\n", err)
+		fmt.Printf("Pack failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Found %d matching snippets:\n", len(results))
-	for _, res := range results {
-		fmt.Printf("\n--- Topic: %s (Language: %s | Relevance Score: %.4f) ---\n%s\n", res.Topic, res.Language, res.Score, res.Content)
+	if *jsonOutput {
+		writeJSON(pack)
+		return
 	}
+	fmt.Print(core.RenderContextPack(pack))
 }
 
 func handleOptimize() {
@@ -257,6 +308,7 @@ func handleOptimize() {
 func handleStats() {
 	fs := flag.NewFlagSet("stats", flag.ExitOnError)
 	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
 	_ = fs.Parse(os.Args[2:])
 
 	db, err := core.InitDB(*dbDir)
@@ -270,6 +322,11 @@ func handleStats() {
 	if err != nil {
 		fmt.Printf("Error reading stats: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *jsonOutput {
+		writeJSON(stats)
+		return
 	}
 
 	fmt.Printf("knowledge rows: %d\n", stats.KnowledgeRows)
@@ -289,6 +346,7 @@ func handleLogFeedback() {
 	input := fs.String("input", "", "User's feedback/critique text")
 	botResponse := fs.String("bot-response", "", "The bot response that prompted negative feedback")
 	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
 	_ = fs.Parse(os.Args[2:])
 
 	if *input == "" {
@@ -308,6 +366,11 @@ func handleLogFeedback() {
 	if err != nil {
 		fmt.Printf("Error logging feedback: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *jsonOutput {
+		writeJSON(map[string]bool{"logged": logged})
+		return
 	}
 
 	if logged {
@@ -331,6 +394,7 @@ func handleGetFeedback() {
 	fs := flag.NewFlagSet("get-feedback", flag.ExitOnError)
 	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
 	limit := fs.Int("limit", 10, "Number of negative feedback entries to return")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
 	_ = fs.Parse(os.Args[2:])
 
 	db, err := core.InitDB(*dbDir)
@@ -346,8 +410,22 @@ func handleGetFeedback() {
 		os.Exit(1)
 	}
 
+	if *jsonOutput {
+		writeJSON(list)
+		return
+	}
+
 	fmt.Printf("Found %d negative feedback entries in memory.db:\n", len(list))
 	for _, entry := range list {
 		fmt.Printf("\n[%s] Sentiment: '%s'\n  User Feedback: \"%s\"\n  Bot Output: \"%s\"\n", entry.CreatedAt, entry.Sentiment, entry.UserInput, entry.BotResponse)
+	}
+}
+
+func writeJSON(value any) {
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(value); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing JSON: %v\n", err)
+		os.Exit(1)
 	}
 }

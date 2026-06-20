@@ -141,14 +141,14 @@ func AddKnowledge(db *sql.DB, language, topic, content string) error {
 }
 
 type DatabaseStats struct {
-	KnowledgeRows int
-	FeedbackRows  int
-	Languages     []LanguageStat
+	KnowledgeRows int            `json:"knowledge_rows"`
+	FeedbackRows  int            `json:"feedback_rows"`
+	Languages     []LanguageStat `json:"languages"`
 }
 
 type LanguageStat struct {
-	Language string
-	Count    int
+	Language string `json:"language"`
+	Count    int    `json:"count"`
 }
 
 func GetDatabaseStats(db *sql.DB) (DatabaseStats, error) {

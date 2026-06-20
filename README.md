@@ -32,7 +32,7 @@ It combines SQLite FTS5 search, path-aware relevance, compression-distance re-ra
 *   **Language-aware indexing**: Index popular source formats by default, or pass explicit extensions such as `html,css,rb,py,go,rs,zig`.
 *   **Syntax checks where available**: Uses local toolchains for Go, Python, JavaScript, Ruby, PHP, Perl, Lua, shell, C/C++, Swift, and TypeScript validation during optimization.
 *   **Private feedback memory**: Stores negative project feedback locally so agents can avoid repeating known mistakes.
-*   **Simple agent integration**: Works as a CLI that can be called from coding agents, editor rules, or shell scripts.
+*   **Simple agent integration**: Works as a CLI, JSON-output command, or read-only MCP stdio server for coding agents and editor integrations.
 
 ---
 
@@ -139,13 +139,58 @@ Search templates using keyword matching, source-path relevance, and parallel com
 snapzip search --query "python lru cache" --limit 3
 ```
 
-### C. Inspect Database Stats
+Use `--json` when calling SnapZip from scripts or agents:
+
+```bash
+snapzip search --query "python lru cache" --limit 3 --json
+```
+
+### C. Context Packs
+Build a bounded Markdown context pack with ranked snippets and relevant feedback memory:
+```bash
+snapzip pack --query "python lru cache" --limit 5 --budget 12000
+```
+
+Use JSON output when the caller wants structured snippets instead of Markdown:
+
+```bash
+snapzip pack --query "python lru cache" --limit 5 --budget 12000 --json
+```
+
+### D. MCP Server
+Run SnapZip as a local read-only MCP stdio server:
+```bash
+snapzip mcp --db-dir .
+```
+
+The MCP server exposes `search`, `context_pack`, `get_feedback`, and `stats` tools. It writes protocol messages to stdout and logs only to stderr, so it can be launched by MCP-compatible clients.
+
+Example client configuration shape:
+
+```json
+{
+  "mcpServers": {
+    "snapzip": {
+      "command": "snapzip",
+      "args": ["mcp", "--db-dir", "."]
+    }
+  }
+}
+```
+
+### E. Inspect Database Stats
 Show indexed row counts and language breakdown:
 ```bash
 snapzip stats --db-dir .
 ```
 
-### D. Optimize a Code Sketch
+Use `--json` for structured stats:
+
+```bash
+snapzip stats --db-dir . --json
+```
+
+### F. Optimize a Code Sketch
 Run the conservative optimizer over a draft using local codebase context:
 ```bash
 snapzip optimize \
@@ -158,7 +203,7 @@ snapzip optimize \
 
 Optimization is conservative: SnapZip only mutates files when a local syntax checker is available for that language, rejects syntactically invalid proposals, and otherwise returns the seed draft unchanged.
 
-### E. Log & Query Negative Feedback Memory
+### G. Log & Query Negative Feedback Memory
 SnapZip does not log search queries into feedback memory. Feedback is only stored when you explicitly call `log-feedback` with a clear negative critique:
 *   **Log feedback**:
     ```bash
@@ -176,7 +221,7 @@ SnapZip does not log search queries into feedback memory. Feedback is only store
 Add a project or global agent rule that calls SnapZip when the binary is available:
 
 ```text
-Use SnapZip when available. Before non-trivial code changes, run `snapzip get-feedback --limit 5`. Use `snapzip search --query "<topic>" --limit 3` for targeted local examples. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` when practical.
+Use SnapZip when available. Before non-trivial code changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000` for targeted local context and feedback memory. Use `snapzip search --query "<topic>" --limit 3 --json` when structured snippets are easier to consume. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` when practical.
 ```
 
 Use [LLM_INSTRUCTIONS.md](LLM_INSTRUCTIONS.md) as a portable rule template for other agents and editor integrations.
