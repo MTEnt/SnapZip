@@ -63,7 +63,7 @@ SnapZip is primarily a retrieval and local-memory tool. It ranks indexed snippet
 *   indexed definitions, lightweight call/reference-site matches, and resolved local import/dependency edges
 *   repair-specific stack, symbol, identifier, and file/line signals when using failure workflows
 
-Every context pack includes context receipts when budget allows. Receipts explain why each snippet was included, such as a matched stack frame, matched symbol, resolved local import edge, related test, or fallback retrieval match. Packs also include a context quality score with measurable coverage and warning signals. This makes the context auditable for humans and machine-readable for agents.
+Every context pack includes context receipts when budget allows. Receipts explain why each snippet was included, such as a matched stack frame, matched symbol, resolved local import edge, related test, or fallback retrieval match. When the snippet limit allows it, packs add resolved local import neighbors so agents see the source/test/dependency files that move together. Packs also include a context quality score with measurable coverage and warning signals. This makes the context auditable for humans and machine-readable for agents.
 
 The optional optimizer is conservative. It uses local code context and Zstandard dictionary scoring, but only mutates files when a local syntax checker is available for that language. Invalid proposals are rejected, and unsupported languages return the seed draft unchanged.
 
@@ -185,7 +185,7 @@ Build a bounded Markdown context pack with ranked snippets and relevant feedback
 snapzip pack --query "python lru cache" --limit 5 --budget 12000
 ```
 
-Every pack includes a context quality section. Treat it as an evidence checklist: it highlights receipt coverage, definition/reference/test coverage, evidence density, duplicate paths, dependency snippets, and truncation.
+Every pack includes a context quality section. Treat it as an evidence checklist: it highlights receipt coverage, definition/reference/test coverage, evidence density, duplicate paths, dependency snippets, and truncation. Packs can also include resolved local import neighbors, such as tests importing the source file or source files importing a local module.
 
 Use a mode when the task has a clear shape:
 

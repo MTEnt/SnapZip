@@ -21,6 +21,7 @@ When `snapzip` is available in the workspace or on `PATH`:
    snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>
    ```
    Review the context quality score and warnings before relying on the pack.
+   When the snippet limit allows it, context packs may include resolved local import neighbors that move with the retrieved source.
    Prefer JSON when the caller needs machine-readable snippets and context receipts.
    ```bash
    snapzip pack --query "<topic>" --limit 5 --budget 12000 --json

@@ -3,6 +3,7 @@ package core
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -87,11 +88,17 @@ func BuildContextPack(db *sql.DB, comp Compressor, query string, limit int, budg
 func BuildContextPackWithMode(db *sql.DB, comp Compressor, query, mode string, limit int, budgetBytes int, feedbackLimit int) (ContextPack, error) {
 	budgetBytes = normalizeContextPackBudget(budgetBytes)
 	mode = normalizePackMode(mode)
+	finalLimit := normalizeResultLimit(limit, 5)
+	searchLimit := finalLimit
+	if finalLimit > 1 {
+		searchLimit = min(finalLimit*2, 100)
+	}
 
-	result, err := SearchMemoryWithMode(db, comp, query, mode, limit, feedbackLimit)
+	result, err := SearchMemoryWithMode(db, comp, query, mode, searchLimit, feedbackLimit)
 	if err != nil {
 		return ContextPack{}, err
 	}
+	result = addGraphContextToSearchResult(db, result, finalLimit)
 
 	return buildContextPackFromResult(query, mode, budgetBytes, result), nil
 }
@@ -379,6 +386,223 @@ func genericReceiptsForSnippets(db *sql.DB, snippets []Snippet, mode string) []C
 		receipts = append(receipts, receiptForSnippet(idx+1, snippet, confidence, reasons, evidence))
 	}
 	return receipts
+}
+
+type graphContextCandidate struct {
+	snippet  Snippet
+	receipt  ContextReceipt
+	priority int
+}
+
+func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int) SearchResult {
+	limit = normalizeResultLimit(limit, 5)
+	if db == nil || limit <= 0 || len(result.Snippets) == 0 {
+		return result
+	}
+	if len(result.Snippets) == 1 && limit <= 1 {
+		return result
+	}
+
+	graphBudget := graphContextBudget(result.Mode, limit)
+	candidates := graphContextCandidates(db, result.Snippets, graphBudget)
+	if len(candidates) == 0 {
+		if len(result.Snippets) > limit {
+			result.Snippets = result.Snippets[:limit]
+			result.Receipts = alignReceiptsWithSnippets(result.Snippets, result.Receipts)
+		}
+		return result
+	}
+
+	receiptByKey := map[string]ContextReceipt{}
+	directSnippetByKey := map[string]Snippet{}
+	for _, receipt := range result.Receipts {
+		key := receipt.Path + ":" + fmt.Sprint(receipt.StartLine) + ":" + fmt.Sprint(receipt.EndLine)
+		receiptByKey[key] = receipt
+	}
+	for _, snippet := range result.Snippets {
+		directSnippetByKey[snippetDedupeKey(snippet)] = snippet
+	}
+
+	var merged []Snippet
+	var receipts []ContextReceipt
+	seen := map[string]bool{}
+	addSnippet := func(snippet Snippet, receipt ContextReceipt) bool {
+		if len(merged) >= limit {
+			return false
+		}
+		key := snippetDedupeKey(snippet)
+		if seen[key] {
+			return false
+		}
+		if directSnippet, ok := directSnippetByKey[key]; ok {
+			snippet = directSnippet
+		}
+		seen[key] = true
+		merged = append(merged, snippet)
+		receiptKey := snippet.Path + ":" + fmt.Sprint(snippet.StartLine) + ":" + fmt.Sprint(snippet.EndLine)
+		if directReceipt, ok := receiptByKey[receiptKey]; ok {
+			if receipt.Path == "" {
+				receipt = directReceipt
+			} else {
+				receipt.Reasons = uniqueStrings(append(directReceipt.Reasons, receipt.Reasons...))
+				receipt.Evidence = uniqueStrings(append(directReceipt.Evidence, receipt.Evidence...))
+				receipt.Confidence = maxFloat(directReceipt.Confidence, receipt.Confidence)
+				receipt.Score = directReceipt.Score
+			}
+		}
+		if receipt.Path == "" {
+			receipt = receiptForSnippet(len(merged), snippet, 0.45, []string{"included in final context pack"}, nil)
+		}
+		receipt.Rank = len(merged)
+		receipts = append(receipts, receipt)
+		return true
+	}
+
+	addSnippet(result.Snippets[0], ContextReceipt{})
+	graphAdded := 0
+	for _, candidate := range candidates {
+		if graphAdded >= graphBudget {
+			break
+		}
+		if addSnippet(candidate.snippet, candidate.receipt) {
+			graphAdded++
+		}
+	}
+	for _, snippet := range result.Snippets[1:] {
+		if len(merged) >= limit {
+			break
+		}
+		addSnippet(snippet, ContextReceipt{})
+	}
+	result.Snippets = merged
+	result.Receipts = receipts
+	return result
+}
+
+func graphContextBudget(mode string, limit int) int {
+	if limit <= 1 {
+		return 0
+	}
+	switch normalizePackMode(mode) {
+	case "debug", "refactor", "test":
+		return min(2, limit-1)
+	case "docs":
+		return 0
+	default:
+		return 1
+	}
+}
+
+func graphContextCandidates(db *sql.DB, seeds []Snippet, budget int) []graphContextCandidate {
+	if budget <= 0 {
+		return nil
+	}
+	var candidates []graphContextCandidate
+	seedLimit := min(len(seeds), 3)
+	for _, seed := range seeds[:seedLimit] {
+		if seed.Path == "" {
+			continue
+		}
+		candidates = append(candidates, outgoingGraphContextCandidates(db, seed)...)
+		candidates = append(candidates, incomingGraphContextCandidates(db, seed)...)
+	}
+	sortGraphContextCandidates(candidates)
+	return dedupeGraphContextCandidates(candidates)
+}
+
+func outgoingGraphContextCandidates(db *sql.DB, seed Snippet) []graphContextCandidate {
+	refs, err := importsForPath(db, seed.Path)
+	if err != nil {
+		return nil
+	}
+	var candidates []graphContextCandidate
+	for _, ref := range refs {
+		if ref.TargetPath == "" || ref.TargetPath == seed.Path {
+			continue
+		}
+		snippet, ok, err := indexedSnippetAtLine(db, ref.TargetPath, 0, 0)
+		if err != nil || !ok {
+			continue
+		}
+		snippet.Score = minFloat(snippet.Score, -0.65)
+		evidence := fmt.Sprintf("%s imports %s -> %s", seed.Path, ref.ImportPath, ref.TargetPath)
+		receipt := receiptForSnippet(0, snippet, 0.68, []string{
+			"included through resolved local import graph",
+			"targeted by a retrieved snippet's local import",
+		}, []string{evidence})
+		candidates = append(candidates, graphContextCandidate{
+			snippet:  snippet,
+			receipt:  receipt,
+			priority: graphContextPriority(snippet, "outgoing"),
+		})
+	}
+	return candidates
+}
+
+func incomingGraphContextCandidates(db *sql.DB, seed Snippet) []graphContextCandidate {
+	refs, err := importsTargetingPath(db, seed.Path)
+	if err != nil {
+		return nil
+	}
+	var candidates []graphContextCandidate
+	for _, ref := range refs {
+		if ref.Path == "" || ref.Path == seed.Path {
+			continue
+		}
+		snippet, ok, err := indexedSnippetAtLine(db, ref.Path, ref.Line, 32)
+		if err != nil || !ok {
+			continue
+		}
+		snippet.Score = minFloat(snippet.Score, -0.70)
+		evidence := fmt.Sprintf("%s imports %s -> %s", ref.Path, ref.ImportPath, seed.Path)
+		receipt := receiptForSnippet(0, snippet, 0.72, []string{
+			"included through resolved local import graph",
+			"imports a retrieved snippet",
+		}, []string{evidence})
+		candidates = append(candidates, graphContextCandidate{
+			snippet:  snippet,
+			receipt:  receipt,
+			priority: graphContextPriority(snippet, "incoming"),
+		})
+	}
+	return candidates
+}
+
+func graphContextPriority(snippet Snippet, direction string) int {
+	score := 50
+	if direction == "incoming" {
+		score += 15
+	}
+	if isTestPath(snippet.Path) {
+		score += 20
+	}
+	if isDependencyPath(snippet.Path) {
+		score -= 30
+	}
+	return score
+}
+
+func sortGraphContextCandidates(candidates []graphContextCandidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].priority == candidates[j].priority {
+			return candidates[i].snippet.Path < candidates[j].snippet.Path
+		}
+		return candidates[i].priority > candidates[j].priority
+	})
+}
+
+func dedupeGraphContextCandidates(candidates []graphContextCandidate) []graphContextCandidate {
+	seen := map[string]bool{}
+	result := make([]graphContextCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		key := snippetDedupeKey(candidate.snippet)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, candidate)
+	}
+	return result
 }
 
 func alignReceiptsWithSnippets(snippets []Snippet, receipts []ContextReceipt) []ContextReceipt {

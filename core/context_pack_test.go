@@ -71,6 +71,36 @@ func TestBuildContextPackBoundsLargeFeedback(t *testing.T) {
 	}
 }
 
+func TestBuildContextPackAddsResolvedImportNeighbors(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "app/cache.py", "class CacheStore:\n    pass\n\ndef build_cache():\n    return CacheStore()\n")
+	writeTestFile(t, root, "tests/test_cache.py", "from app.cache import build_cache\n\ndef test_build_cache():\n    assert build_cache()\n")
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := IndexDirectory(db, root, NewLanguageFilter("python")); err != nil {
+		t.Fatal(err)
+	}
+
+	pack, err := BuildContextPack(db, mustTestCompressor(t), "CacheStore", 2, 6000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !packHasPath(pack, "app/cache.py") || !packHasPath(pack, "tests/test_cache.py") {
+		t.Fatalf("graph-expanded pack missing source or test:\n%s", RenderContextPack(pack))
+	}
+	if !receiptHasReason(ContextReceipt{Reasons: pack.Receipts[1].Reasons}, "resolved local import graph") {
+		t.Fatalf("graph neighbor receipt missing import graph reason: %+v", pack.Receipts)
+	}
+	if !receiptHasEvidence(pack.Receipts[1], "tests/test_cache.py imports app.cache -> app/cache.py") {
+		t.Fatalf("graph neighbor receipt missing resolved edge evidence: %+v", pack.Receipts[1])
+	}
+}
+
 func TestBuildRepairContextPackPrefersSourceSymbolExcerpt(t *testing.T) {
 	db, err := InitDB(t.TempDir())
 	if err != nil {
@@ -149,6 +179,24 @@ func TestBuildRepairContextPackPrefersSourceSymbolExcerpt(t *testing.T) {
 func receiptHasReason(receipt ContextReceipt, want string) bool {
 	for _, reason := range receipt.Reasons {
 		if strings.Contains(reason, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func receiptHasEvidence(receipt ContextReceipt, want string) bool {
+	for _, evidence := range receipt.Evidence {
+		if strings.Contains(evidence, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func packHasPath(pack ContextPack, path string) bool {
+	for _, snippet := range pack.Snippets {
+		if snippet.Path == path {
 			return true
 		}
 	}
