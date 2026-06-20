@@ -18,6 +18,20 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	versionOutput := runSnapZip(t, repoRoot, "version")
+	if !strings.Contains(versionOutput, "snapzip dev") || !strings.Contains(versionOutput, "commit: unknown") {
+		t.Fatalf("version output missing default metadata:\n%s", versionOutput)
+	}
+
+	versionJSON := runSnapZip(t, repoRoot, "version", "--json")
+	var versionPayload versionInfo
+	if err := json.Unmarshal([]byte(versionJSON), &versionPayload); err != nil {
+		t.Fatalf("version --json returned invalid JSON: %v\n%s", err, versionJSON)
+	}
+	if versionPayload.Version != "dev" || versionPayload.Commit != "unknown" {
+		t.Fatalf("version --json returned wrong defaults: %+v", versionPayload)
+	}
+
 	fixture := t.TempDir()
 	writeCLIFile(t, fixture, "web/index.html", "<main>SnapZip HTML fixture</main>\n")
 	writeCLIFile(t, fixture, "web/site.css", ".snapzip { color: #123456; }\n")
@@ -134,6 +148,34 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 	}
 }
 
+func TestCLIVersionBuildMetadata(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(
+		"go",
+		"run",
+		"-ldflags",
+		"-X main.version=vtest -X main.commit=abc123 -X main.date=2026-06-20T00:00:00Z",
+		"./cmd/snapzip",
+		"version",
+		"--json",
+	)
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("snapzip version with ldflags failed: %v\n%s", err, string(output))
+	}
+	var payload versionInfo
+	if err := json.Unmarshal(output, &payload); err != nil {
+		t.Fatalf("version --json returned invalid JSON: %v\n%s", err, string(output))
+	}
+	if payload.Version != "vtest" || payload.Commit != "abc123" || payload.Date != "2026-06-20T00:00:00Z" {
+		t.Fatalf("version metadata not stamped from ldflags: %+v", payload)
+	}
+}
+
 func TestMCPServerExposesSearchTool(t *testing.T) {
 	fixture := t.TempDir()
 	writeCLIFile(t, fixture, "lib/helper.rb", "module CacheHelper\nend\n")
@@ -178,6 +220,9 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	}
 	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) || !strings.Contains(lines[1], `"symbol_context"`) || !strings.Contains(lines[1], `"imports"`) || !strings.Contains(lines[1], `"graph"`) || !strings.Contains(lines[1], `"validation_plan"`) || !strings.Contains(lines[1], `"pr_context"`) {
 		t.Fatalf("tools/list did not expose expected tools:\n%s", lines[1])
+	}
+	if !strings.Contains(lines[0], `"version":"dev"`) {
+		t.Fatalf("initialize response missing server version:\n%s", lines[0])
 	}
 	if !strings.Contains(lines[2], "CacheStore") {
 		t.Fatalf("search tool response did not include indexed content:\n%s", lines[2])
@@ -468,6 +513,9 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 	releaseWorkflow := readRepoFile(t, repoRoot, ".github/workflows/release.yml")
 	if !strings.Contains(releaseWorkflow, "sha256sum * > checksums.txt") {
 		t.Fatalf("release workflow does not generate checksums:\n%s", releaseWorkflow)
+	}
+	if !strings.Contains(releaseWorkflow, "-X main.version=${GITHUB_REF_NAME}") || !strings.Contains(releaseWorkflow, "-X main.commit=${GITHUB_SHA}") {
+		t.Fatalf("release workflow does not stamp version metadata:\n%s", releaseWorkflow)
 	}
 	gitignore := readRepoFile(t, repoRoot, ".gitignore")
 	for _, want := range []string{"memory.db-*", ".snapzip-ci/", ".snapzip-pr-context.*"} {

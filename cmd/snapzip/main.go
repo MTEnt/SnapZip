@@ -67,6 +67,8 @@ func main() {
 		handleOptimize()
 	case "stats":
 		handleStats()
+	case "version":
+		handleVersion()
 	case "log-feedback":
 		handleLogFeedback()
 	case "get-feedback":
@@ -104,6 +106,7 @@ func printUsage() {
 	fmt.Println("  mcp            Run SnapZip as a read-only MCP stdio server")
 	fmt.Println("  optimize       Refine code sketches using the conservative local-context optimizer")
 	fmt.Println("  stats          Show indexed row counts and language breakdown")
+	fmt.Println("  version        Show SnapZip version and build metadata")
 	fmt.Println("  log-feedback   Log negative user feedback to database")
 	fmt.Println("  get-feedback   Retrieve recent negative feedback entries to guide LLM")
 }

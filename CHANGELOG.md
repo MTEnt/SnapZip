@@ -4,9 +4,14 @@ All notable changes to SnapZip are documented here.
 
 ## Unreleased
 
+- Nothing yet.
+
+## 0.1.0 - 2026-06-20
+
 - Added broad default language support for common source, web, config, and systems formats.
 - Added deterministic indexing safeguards for dependency folders, generated output, oversized files, binary files, and duplicate rows.
 - Added CLI database reset and stats commands.
+- Added CLI version metadata for tagged release binaries.
 - Added reproducible raw versus SnapZip benchmark suites.
 - Added CI, release packaging, dependency updates, and project governance docs.
 - Added a composite GitHub Action and PR workflow for generating SnapZip review context reports.
@@ -17,7 +22,3 @@ All notable changes to SnapZip are documented here.
 - Improved search relevance by sanitizing FTS query tokens, removing hard language filtering, and preferring source paths unless queries ask for tests, docs, or workflows.
 - Removed the disconnected visual parser sidecar.
 - Raised the minimum Go version to 1.25.8 to avoid vulnerable standard-library versions in CI.
-
-## 0.1.0
-
-- Initial public release candidate.

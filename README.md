@@ -351,6 +351,13 @@ Use `--json` for structured stats:
 snapzip stats --db-dir . --json
 ```
 
+Show release/build metadata:
+
+```bash
+snapzip version
+snapzip version --json
+```
+
 ### I. Optimize a Code Sketch
 Run the conservative optimizer over a draft using local codebase context:
 ```bash

@@ -55,7 +55,9 @@ jobs:
           mkdir -p dist package
           name="snapzip_${GITHUB_REF_NAME}_${GOOS}_${GOARCH}"
           mkdir "package/${name}"
-          go build -trimpath -ldflags="-s -w" -o "package/${name}/snapzip${{ matrix.ext }}" ./cmd/snapzip
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ldflags="-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA} -X main.date=${build_date}"
+          go build -trimpath -ldflags="${ldflags}" -o "package/${name}/snapzip${{ matrix.ext }}" ./cmd/snapzip
           cp README.md LICENSE LLM_INSTRUCTIONS.md "package/${name}/"
           if [[ "${GOOS}" == "windows" ]]; then
             (cd package && zip -r "../dist/${name}.zip" "${name}")

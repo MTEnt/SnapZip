@@ -161,7 +161,7 @@ func (s mcpServer) initializeResult(params json.RawMessage) map[string]any {
 		"serverInfo": map[string]any{
 			"name":        "snapzip",
 			"title":       "SnapZip",
-			"version":     "0.1.0",
+			"version":     appVersion(),
 			"description": "Local codebase memory and context packs for AI coding agents.",
 		},
 		"instructions": "Use SnapZip tools to search indexed local code, build bounded context and repair packs, inspect repo maps, symbols, symbol references, imports, dependency graphs, likely affected tests, validation plans, PR review context, feedback memory, and index stats. Tools are read-only.",
