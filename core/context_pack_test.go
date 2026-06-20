@@ -30,8 +30,14 @@ func TestBuildContextPackRespectsBudget(t *testing.T) {
 	if pack.UsedBytes > pack.BudgetBytes {
 		t.Fatalf("pack used %d bytes, budget %d", pack.UsedBytes, pack.BudgetBytes)
 	}
+	if pack.Quality.Score <= 0 {
+		t.Fatalf("expected context quality score, got %+v", pack.Quality)
+	}
 	if !strings.Contains(RenderContextPack(pack), "CacheStore") {
 		t.Fatal("rendered pack did not include expected content")
+	}
+	if !strings.Contains(RenderContextPack(pack), "## Context Quality") {
+		t.Fatal("rendered pack did not include context quality section")
 	}
 }
 
@@ -53,12 +59,15 @@ func TestBuildContextPackBoundsLargeFeedback(t *testing.T) {
 		t.Fatal("expected feedback to be logged")
 	}
 
-	pack, err := BuildContextPack(db, mustTestCompressor(t), "go CacheStore", 1, 1200, 5)
+	pack, err := BuildContextPack(db, mustTestCompressor(t), "go CacheStore", 1, 2400, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pack.UsedBytes > pack.BudgetBytes {
 		t.Fatalf("pack used %d bytes, budget %d", pack.UsedBytes, pack.BudgetBytes)
+	}
+	if pack.Quality.Metrics.FeedbackCount == 0 {
+		t.Fatalf("context quality did not count feedback: %+v", pack.Quality)
 	}
 }
 
@@ -128,6 +137,12 @@ func TestBuildRepairContextPackPrefersSourceSymbolExcerpt(t *testing.T) {
 	}
 	if strings.Contains(pack.Snippets[0].Path, "bambuser") {
 		t.Fatalf("unrelated extractor ranked first:\n%s", RenderContextPack(pack))
+	}
+	if pack.Quality.Metrics.DefinitionCount == 0 || pack.Quality.Metrics.TestSnippetCount == 0 {
+		t.Fatalf("repair pack quality missed definition/test coverage: %+v", pack.Quality)
+	}
+	if !receiptHasReason(ContextReceipt{Reasons: pack.Quality.Strengths}, "test context") {
+		t.Fatalf("repair pack quality did not report test context: %+v", pack.Quality)
 	}
 }
 

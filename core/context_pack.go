@@ -28,6 +28,7 @@ type ContextPack struct {
 	BudgetBytes   int              `json:"budget_bytes"`
 	UsedBytes     int              `json:"used_bytes"`
 	Truncated     bool             `json:"truncated"`
+	Quality       ContextQuality   `json:"quality"`
 	Snippets      []Snippet        `json:"snippets"`
 	Receipts      []ContextReceipt `json:"receipts,omitempty"`
 	Feedback      []Feedback       `json:"feedback,omitempty"`
@@ -135,12 +136,7 @@ func buildContextPackFromResult(query, mode string, budgetBytes int, result Sear
 		pack.Truncated = true
 	}
 	pack.Receipts = alignReceiptsWithSnippets(pack.Snippets, result.Receipts)
-	for len(pack.Receipts) > 0 && len([]byte(RenderContextPack(pack))) > budgetBytes {
-		pack.Receipts = pack.Receipts[:len(pack.Receipts)-1]
-		pack.Truncated = true
-	}
-	pack.UsedBytes = len([]byte(RenderContextPack(pack)))
-	return pack
+	return fitContextPackToBudget(pack, budgetBytes)
 }
 
 func RenderSearchResult(result SearchResult) string {
@@ -199,6 +195,10 @@ func RenderContextPack(pack ContextPack) string {
 		}
 	}
 
+	if shouldRenderContextQuality(pack.Quality) {
+		renderContextQuality(&builder, pack.Quality)
+	}
+
 	builder.WriteString("\n## Retrieved Snippets\n")
 	if len(pack.Snippets) == 0 {
 		builder.WriteString("\nNo matching snippets found.\n")
@@ -228,6 +228,87 @@ func RenderContextPack(pack ContextPack) string {
 		fmt.Fprintf(&builder, "```%s\n%s\n```\n", codeFenceLanguage(snippet.Language), snippet.Content)
 	}
 	return builder.String()
+}
+
+func fitContextPackToBudget(pack ContextPack, budgetBytes int) ContextPack {
+	for {
+		pack.Quality = ScoreContextPack(pack)
+		usedBytes := len([]byte(RenderContextPack(pack)))
+		if usedBytes <= budgetBytes {
+			for range 4 {
+				pack.UsedBytes = usedBytes
+				pack.Quality = ScoreContextPack(pack)
+				nextBytes := len([]byte(RenderContextPack(pack)))
+				if nextBytes == usedBytes {
+					return pack
+				}
+				usedBytes = nextBytes
+				if usedBytes > budgetBytes {
+					break
+				}
+			}
+			if usedBytes > budgetBytes {
+				continue
+			}
+			pack.UsedBytes = usedBytes
+			pack.Quality = ScoreContextPack(pack)
+			return pack
+		}
+
+		pack.Truncated = true
+		switch {
+		case len(pack.Feedback) > 0:
+			pack.Feedback = pack.Feedback[:len(pack.Feedback)-1]
+		case shrinkLastContextSnippet(&pack, usedBytes-budgetBytes):
+			pack.Receipts = alignReceiptsWithSnippets(pack.Snippets, pack.Receipts)
+			continue
+		case len(pack.Receipts) > 1:
+			pack.Receipts = pack.Receipts[:len(pack.Receipts)-1]
+		case len(pack.Receipts) > 0:
+			pack.Receipts = nil
+		default:
+			pack.UsedBytes = usedBytes
+			pack.Quality = ScoreContextPack(pack)
+			return pack
+		}
+	}
+}
+
+func shrinkLastContextSnippet(pack *ContextPack, overage int) bool {
+	if len(pack.Snippets) == 0 {
+		return false
+	}
+	lastIdx := len(pack.Snippets) - 1
+	content := pack.Snippets[lastIdx].Content
+	if len(content) == 0 {
+		if len(pack.Snippets) > 1 {
+			pack.Snippets = pack.Snippets[:lastIdx]
+			return true
+		}
+		return false
+	}
+
+	targetBytes := len(content) - overage - 80
+	if targetBytes < 80 {
+		if len(pack.Snippets) > 1 {
+			pack.Snippets = pack.Snippets[:lastIdx]
+			return true
+		}
+		targetBytes = 80
+	}
+	if targetBytes >= len(content) {
+		targetBytes = len(content) - 1
+	}
+	if targetBytes <= 0 {
+		return false
+	}
+	next := truncateWithMarker(content, targetBytes)
+	if next == content {
+		return false
+	}
+	pack.Snippets[lastIdx].Content = next
+	pack.Snippets[lastIdx].ContentHash = contentHash([]byte(next))
+	return true
 }
 
 func normalizeResultLimit(value int, fallback int) int {

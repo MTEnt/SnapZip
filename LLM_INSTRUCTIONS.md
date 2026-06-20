@@ -20,6 +20,7 @@ When `snapzip` is available in the workspace or on `PATH`:
    ```bash
    snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>
    ```
+   Review the context quality score and warnings before relying on the pack.
    Prefer JSON when the caller needs machine-readable snippets and context receipts.
    ```bash
    snapzip pack --query "<topic>" --limit 5 --budget 12000 --json
@@ -70,7 +71,7 @@ When `snapzip` is available in the workspace or on `PATH`:
 ## Editor Rule Template
 
 ```text
-Use SnapZip when available. Run `snapzip stats --db-dir .` to check whether local context exists. Before implementing non-trivial changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context, receipts, and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, `snapzip symbol-context --query "<symbol>"`, `snapzip related --path <file>`, and `snapzip affected --path <file>` for structural and test context. Use `snapzip validate --path <file>` to plan validation, or `snapzip validate --changed --cmd "<test command>"` to run validation before finishing. If `.snapzip/config.toml` defines a command and configured validation is appropriate, use `snapzip validate --changed --run-config`. After failing tests, run `snapzip repair-pack --error-file <test-output>` or `snapzip diagnose --cmd "<test command>"`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` before saving final code when practical.
+Use SnapZip when available. Run `snapzip stats --db-dir .` to check whether local context exists. Before implementing non-trivial changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context, receipts, quality warnings, and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, `snapzip symbol-context --query "<symbol>"`, `snapzip related --path <file>`, and `snapzip affected --path <file>` for structural and test context. Use `snapzip validate --path <file>` to plan validation, or `snapzip validate --changed --cmd "<test command>"` to run validation before finishing. If `.snapzip/config.toml` defines a command and configured validation is appropriate, use `snapzip validate --changed --run-config`. After failing tests, run `snapzip repair-pack --error-file <test-output>` or `snapzip diagnose --cmd "<test command>"`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` before saving final code when practical.
 ```
 
 ## Notes

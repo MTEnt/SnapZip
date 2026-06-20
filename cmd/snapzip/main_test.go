@@ -67,7 +67,7 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 		"--limit", "1",
 		"--budget", "2048",
 	)
-	if !strings.Contains(packOutput, "# SnapZip Context Pack") || !strings.Contains(packOutput, "CacheStore") {
+	if !strings.Contains(packOutput, "# SnapZip Context Pack") || !strings.Contains(packOutput, "CacheStore") || !strings.Contains(packOutput, "## Context Quality") {
 		t.Fatalf("pack output did not include expected context:\n%s", packOutput)
 	}
 
@@ -254,6 +254,9 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 	if !strings.Contains(packOutput, "Mode: test") || !strings.Contains(packOutput, "pkg/cache_test.go") {
 		t.Fatalf("mode-specific pack output missing expected context:\n%s", packOutput)
 	}
+	if !strings.Contains(packOutput, "## Context Quality") {
+		t.Fatalf("mode-specific pack output missing context quality:\n%s", packOutput)
+	}
 
 	errorFile := filepath.Join(t.TempDir(), "failure.txt")
 	if err := os.WriteFile(errorFile, []byte("pkg/cache_test.go:3: undefined: CacheStore\n"), 0644); err != nil {
@@ -270,6 +273,9 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 	}
 	if len(repairPayload.Receipts) == 0 {
 		t.Fatalf("repair-pack --json missing receipts:\n%s", repairJSON)
+	}
+	if repairPayload.Quality.Score <= 0 {
+		t.Fatalf("repair-pack --json missing quality score:\n%s", repairJSON)
 	}
 
 	affectedOutput := runSnapZip(t, repoRoot, "affected", "--db-dir", dbDir, "--path", "pkg/cache.go")

@@ -32,6 +32,7 @@ It combines SQLite FTS5 search, path-aware relevance, compression-distance re-ra
 *   **Language-aware indexing**: Index popular source formats by default, or pass explicit extensions such as `html,css,rb,py,go,rs,zig`.
 *   **Repo maps, symbols, and references**: Stores file paths, line ranges, content hashes, indexed functions/classes/types, and lightweight call/reference sites for structural lookup.
 *   **Task-specific context packs**: Build bounded packs for debug, refactor, test, and docs workflows.
+*   **Context quality scoring**: Every pack reports receipt coverage, evidence density, definition/reference/test coverage, uniqueness, budget use, and warnings.
 *   **Validation planning**: Finds likely affected tests, suggests validation commands, and can run a supplied command with repair context on failure.
 *   **Project profiles**: Optional `.snapzip/config.toml` lets teams share validation commands without shipping any local memory.
 *   **Syntax checks where available**: Uses local toolchains for Go, Python, JavaScript, Ruby, PHP, Perl, Lua, shell, C/C++, Swift, and TypeScript validation during optimization.
@@ -62,7 +63,7 @@ SnapZip is primarily a retrieval and local-memory tool. It ranks indexed snippet
 *   indexed definitions and lightweight call/reference-site matches
 *   repair-specific stack, symbol, identifier, and file/line signals when using failure workflows
 
-Every context pack includes context receipts when budget allows. Receipts explain why each snippet was included, such as a matched stack frame, matched symbol, related test, or fallback retrieval match. This makes the context auditable for humans and machine-readable for agents.
+Every context pack includes context receipts when budget allows. Receipts explain why each snippet was included, such as a matched stack frame, matched symbol, related test, or fallback retrieval match. Packs also include a context quality score with measurable coverage and warning signals. This makes the context auditable for humans and machine-readable for agents.
 
 The optional optimizer is conservative. It uses local code context and Zstandard dictionary scoring, but only mutates files when a local syntax checker is available for that language. Invalid proposals are rejected, and unsupported languages return the seed draft unchanged.
 
@@ -184,6 +185,8 @@ Build a bounded Markdown context pack with ranked snippets and relevant feedback
 snapzip pack --query "python lru cache" --limit 5 --budget 12000
 ```
 
+Every pack includes a context quality section. Treat it as an evidence checklist: it highlights receipt coverage, definition/reference/test coverage, evidence density, duplicate paths, dependency snippets, and truncation.
+
 Use a mode when the task has a clear shape:
 
 ```bash
@@ -193,7 +196,7 @@ snapzip pack --query "cache behavior" --mode test --limit 5 --budget 12000
 snapzip pack --query "installation" --mode docs --limit 5 --budget 12000
 ```
 
-Use JSON output when the caller wants structured snippets instead of Markdown:
+Use JSON output when the caller wants structured snippets, receipts, and quality metrics instead of Markdown:
 
 ```bash
 snapzip pack --query "python lru cache" --limit 5 --budget 12000 --json

@@ -186,7 +186,7 @@ func (s mcpServer) tools() []mcpTool {
 		{
 			Name:        "context_pack",
 			Title:       "Build SnapZip context pack",
-			Description: "Build a bounded Markdown context pack with relevant snippets, receipts, and feedback memory.",
+			Description: "Build a bounded Markdown context pack with relevant snippets, quality metrics, receipts, and feedback memory.",
 			InputSchema: objectSchema(
 				[]string{"query"},
 				map[string]any{
@@ -202,7 +202,7 @@ func (s mcpServer) tools() []mcpTool {
 		{
 			Name:        "repair_pack",
 			Title:       "Build SnapZip repair pack",
-			Description: "Build a failure-aware context pack from test/build output using stack frames, symbols, identifiers, and context receipts.",
+			Description: "Build a failure-aware context pack from test/build output using stack frames, symbols, identifiers, quality metrics, and context receipts.",
 			InputSchema: objectSchema(
 				nil,
 				map[string]any{
