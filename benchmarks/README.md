@@ -31,6 +31,14 @@ The repair retrieval suite uses a public-safe synthetic failure that resembles a
 python3 benchmarks/run.py --suite repair-retrieval --snapzip-bin ./snapzip
 ```
 
+## Context Quality Benchmark
+
+The context quality suite uses a public-safe synthetic project with source, tests, and distracting cache-related noise. It checks whether `pack --json` emits quality metrics for receipts, definitions, references, and test coverage.
+
+```bash
+python3 benchmarks/run.py --suite context-quality --snapzip-bin ./snapzip
+```
+
 ## Full Algorithm Benchmark
 
 The 20-task suite covers common algorithm exercises such as LRU cache, trie wildcard search, graph shortest paths, dynamic programming, heapsort, A*, and Red-Black Tree insertion/deletion.

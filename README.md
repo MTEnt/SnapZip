@@ -381,6 +381,12 @@ Run the repair retrieval quality check:
 python3 benchmarks/run.py --suite repair-retrieval --snapzip-bin ./snapzip
 ```
 
+Run the context quality check:
+
+```bash
+python3 benchmarks/run.py --suite context-quality --snapzip-bin ./snapzip
+```
+
 Run the full 20-task algorithm suite:
 ```bash
 python3 benchmarks/run.py --suite algorithm-20 --snapzip-bin ./snapzip

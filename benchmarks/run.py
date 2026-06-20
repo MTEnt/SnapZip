@@ -297,6 +297,101 @@ def test_match_str():
     }
 
 
+def run_context_quality(parent, args, snapzip_bin):
+    work_dir = parent / "context_quality"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    write_file(
+        work_dir / "app" / "cache.py",
+        """
+class CacheStore:
+    def __init__(self):
+        self.values = {}
+
+    def put(self, key, value):
+        self.values[key] = value
+
+    def get(self, key):
+        return self.values.get(key)
+
+
+def build_cache(seed):
+    cache = CacheStore()
+    cache.put('seed', seed)
+    return cache
+""".strip()
+        + "\n",
+    )
+    write_file(
+        work_dir / "tests" / "test_cache.py",
+        """
+from app.cache import build_cache
+
+
+def test_build_cache_returns_seed():
+    cache = build_cache('ready')
+    assert cache.get('seed') == 'ready'
+""".strip()
+        + "\n",
+    )
+    write_file(
+        work_dir / "notes" / "cache_noise.py",
+        ("cache cache cache archive metadata seed ready\n" * 90),
+    )
+
+    query = "CacheStore build_cache seed test"
+    _, index_record = run_cmd(
+        [snapzip_bin, "index", "--reset", "--db-dir", str(work_dir), "--crawl", str(work_dir), "--langs", "python"],
+        work_dir,
+    )
+    raw_candidates = naive_file_rank(work_dir, query)
+    _, pack_record = run_cmd(
+        [
+            snapzip_bin,
+            "pack",
+            "--db-dir",
+            str(work_dir),
+            "--query",
+            query,
+            "--mode",
+            "test",
+            "--json",
+            "--limit",
+            "4",
+            "--budget",
+            "8000",
+        ],
+        work_dir,
+    )
+    pack = parse_json_stdout(pack_record)
+    quality = pack.get("quality") or {}
+    metrics = quality.get("metrics") or {}
+    passed = (
+        quality.get("score", 0) >= 0.55
+        and metrics.get("snippet_count", 0) > 0
+        and metrics.get("receipt_coverage", 0) > 0
+        and metrics.get("definition_count", 0) > 0
+        and metrics.get("reference_count", 0) > 0
+        and metrics.get("test_snippet_count", 0) > 0
+    )
+    return {
+        "name": "context_quality",
+        "passed": passed,
+        "raw": {
+            "ranking": raw_candidates[:5],
+            "top_path": raw_candidates[0]["path"] if raw_candidates else "",
+            "has_quality_metrics": False,
+        },
+        "snapzip": {
+            "quality": quality,
+            "paths": [snippet.get("path", "") for snippet in pack.get("snippets") or []],
+            "receipt_count": len(pack.get("receipts") or []),
+            "pack": pack,
+            "index": index_record,
+            "context_pack": pack_record,
+        },
+    }
+
+
 def snapzip_passed(result):
     if result["name"] == "algorithm_20":
         harness = result["snapzip"]["harness"]
@@ -305,12 +400,14 @@ def snapzip_passed(result):
         return bool(result["snapzip"]["stress"]["result"].get("passed"))
     if result["name"] == "repair_retrieval":
         return bool(result.get("passed"))
+    if result["name"] == "context_quality":
+        return bool(result.get("passed"))
     return False
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run reproducible SnapZip benchmark comparisons.")
-    parser.add_argument("--suite", choices=["smoke", "algorithm-20", "hard-rbt", "repair-retrieval", "all"], default="smoke")
+    parser.add_argument("--suite", choices=["smoke", "algorithm-20", "hard-rbt", "repair-retrieval", "context-quality", "all"], default="smoke")
     parser.add_argument("--snapzip-bin", default="", help="Path to a built snapzip binary")
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--json", default="", help="Optional path to write the JSON report")
@@ -339,6 +436,8 @@ def main():
             result["runs"].append(run_hard_rbt(work_parent, args, snapzip_bin))
         if args.suite in ("repair-retrieval", "all"):
             result["runs"].append(run_repair_retrieval(work_parent, args, snapzip_bin))
+        if args.suite in ("context-quality", "all"):
+            result["runs"].append(run_context_quality(work_parent, args, snapzip_bin))
         if args.suite in ("algorithm-20", "all"):
             result["runs"].append(run_algorithm_20(work_parent, args, snapzip_bin))
 

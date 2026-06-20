@@ -857,7 +857,7 @@ Do not assume SnapZip memory exists on fresh installs; index first with ` + "`sn
 
 func handleEval() {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
-	suite := fs.String("suite", "smoke", "Benchmark suite: smoke, algorithm-20, hard-rbt, repair-retrieval, all")
+	suite := fs.String("suite", "smoke", "Benchmark suite: smoke, algorithm-20, hard-rbt, repair-retrieval, context-quality, all")
 	snapzipBin := fs.String("snapzip-bin", "", "Path to built snapzip binary")
 	iterations := fs.Int("iterations", 100, "Optimizer iterations for benchmark harness")
 	jsonPath := fs.String("json", "", "Optional path to write JSON report")
