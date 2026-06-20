@@ -217,16 +217,14 @@ func DetectLanguage(prompt string) string {
 	return ""
 }
 
-// RetrieveSimilarSnippets executes FTS5 full-text lookup and then parallel QND compression re-ranking
+// RetrieveSimilarSnippets executes FTS5 full-text lookup and then parallel compression-aware re-ranking.
 func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit int) ([]Snippet, error) {
 	detectedLang := DetectLanguage(prompt)
 
-	// Tokenize prompt for FTS5 MATCH
-	words := strings.Fields(strings.ReplaceAll(strings.ReplaceAll(prompt, "'", " "), "\"", " "))
+	words := searchTokens(prompt)
 	var ftsTokens []string
 	for _, w := range words {
-		wLower := strings.ToLower(w)
-		if detectedLang != "" && isLanguageQueryToken(wLower) {
+		if detectedLang != "" && isLanguageQueryToken(w) {
 			continue
 		}
 		if len(w) > 1 {
@@ -247,31 +245,17 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 	var err error
 
 	if ftsQuery != "" {
-		if detectedLang != "" {
-			rows, err = db.Query(`
-				SELECT k.id, k.language, k.topic, k.content 
-				FROM knowledge k
-				JOIN knowledge_fts f ON k.id = f.rowid
-				WHERE knowledge_fts MATCH ? AND k.language = ?
-				ORDER BY f.rank
-				LIMIT ?`, ftsQuery, detectedLang, defaultSearchCandidateLimit)
-		} else {
-			rows, err = db.Query(`
-				SELECT k.id, k.language, k.topic, k.content 
-				FROM knowledge k
-				JOIN knowledge_fts f ON k.id = f.rowid
-				WHERE knowledge_fts MATCH ? 
-				ORDER BY f.rank
-				LIMIT ?`, ftsQuery, defaultSearchCandidateLimit)
-		}
+		rows, err = db.Query(`
+			SELECT k.id, k.language, k.topic, k.content
+			FROM knowledge k
+			JOIN knowledge_fts f ON k.id = f.rowid
+			WHERE knowledge_fts MATCH ?
+			ORDER BY f.rank
+			LIMIT ?`, ftsQuery, defaultSearchCandidateLimit)
 	}
 
 	if err != nil || rows == nil {
-		if detectedLang != "" {
-			rows, err = db.Query("SELECT id, language, topic, content FROM knowledge WHERE language = ? ORDER BY id DESC LIMIT ?", detectedLang, defaultSearchCandidateLimit)
-		} else {
-			rows, err = db.Query("SELECT id, language, topic, content FROM knowledge ORDER BY id DESC LIMIT ?", defaultSearchCandidateLimit)
-		}
+		rows, err = db.Query("SELECT id, language, topic, content FROM knowledge ORDER BY id DESC LIMIT ?", defaultSearchCandidateLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -293,6 +277,7 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 			numWorkers = 1
 		}
 		promptCompressedSize := comp.Compress([]byte(prompt))
+		uniqueTokens := uniqueStrings(words)
 		jobs := make(chan int, len(candidates))
 		var wg sync.WaitGroup
 
@@ -301,7 +286,8 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 			go func() {
 				defer wg.Done()
 				for idx := range jobs {
-					candidates[idx].Score = CalculateQNDWithPromptSize(comp, prompt, candidates[idx].Content, promptCompressedSize)
+					qnd := CalculateQNDWithPromptSize(comp, prompt, candidates[idx].Content, promptCompressedSize)
+					candidates[idx].Score = relevanceScore(qnd, uniqueTokens, candidates[idx], detectedLang)
 				}
 			}()
 		}
@@ -322,6 +308,126 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 		return candidates[:limit], nil
 	}
 	return candidates, nil
+}
+
+func searchTokens(input string) []string {
+	var tokens []string
+	for _, token := range strings.FieldsFunc(strings.ToLower(input), func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	}) {
+		if len(token) > 1 {
+			tokens = append(tokens, token)
+		}
+	}
+	return tokens
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		unique = append(unique, value)
+	}
+	return unique
+}
+
+func relevanceScore(qnd float64, queryTokens []string, snippet Snippet, detectedLang string) float64 {
+	boost := lexicalBoost(queryTokens, snippet)
+	if detectedLang != "" && NormalizeLanguage(snippet.Language) == detectedLang {
+		boost += 0.08
+	}
+	return qnd - boost + topicTypePenalty(queryTokens, snippet.Topic)
+}
+
+func lexicalBoost(queryTokens []string, snippet Snippet) float64 {
+	if len(queryTokens) == 0 {
+		return 0
+	}
+
+	topic := strings.ToLower(snippet.Topic)
+	content := strings.ToLower(snippet.Content)
+	topicHits := 0
+	contentHits := 0
+	for _, token := range queryTokens {
+		if strings.Contains(topic, token) {
+			topicHits++
+		}
+		if strings.Contains(content, token) {
+			contentHits++
+		}
+	}
+
+	boost := 0.12 * float64(topicHits)
+	boost += 0.035 * float64(contentHits)
+	boost += 0.20 * float64(topicHits+contentHits) / float64(len(queryTokens))
+	if boost > 0.85 {
+		return 0.85
+	}
+	return boost
+}
+
+func topicTypePenalty(queryTokens []string, topic string) float64 {
+	lowerTopic := strings.ToLower(topic)
+	penalty := 0.0
+
+	if isTestTopic(lowerTopic) && !queryWantsTests(queryTokens) {
+		penalty += 0.50
+	}
+	if isDocTopic(lowerTopic) && !queryWantsDocs(queryTokens) {
+		penalty += 0.35
+	}
+	if isWorkflowTopic(lowerTopic) && !queryWantsWorkflows(queryTokens) {
+		penalty += 0.08
+	}
+	return penalty
+}
+
+func isTestTopic(topic string) bool {
+	return strings.Contains(topic, "_test.") ||
+		strings.Contains(topic, "/test_") ||
+		strings.Contains(topic, "/tests/") ||
+		strings.Contains(topic, ".test.") ||
+		strings.Contains(topic, ".spec.")
+}
+
+func isDocTopic(topic string) bool {
+	return strings.HasSuffix(topic, ".md") ||
+		strings.Contains(topic, "readme") ||
+		strings.Contains(topic, "contributing") ||
+		strings.Contains(topic, "security") ||
+		strings.Contains(topic, "changelog")
+}
+
+func isWorkflowTopic(topic string) bool {
+	return strings.Contains(topic, ".github/workflows/") ||
+		strings.Contains(topic, ".yml") ||
+		strings.Contains(topic, ".yaml")
+}
+
+func queryWantsTests(tokens []string) bool {
+	return tokenSetContains(tokens, "test", "tests", "testing", "spec", "benchmark", "benchmarks")
+}
+
+func queryWantsDocs(tokens []string) bool {
+	return tokenSetContains(tokens, "readme", "docs", "doc", "documentation", "install", "setup", "contributing", "security", "changelog")
+}
+
+func queryWantsWorkflows(tokens []string) bool {
+	return tokenSetContains(tokens, "github", "actions", "workflow", "workflows", "ci", "release", "yaml", "yml")
+}
+
+func tokenSetContains(tokens []string, values ...string) bool {
+	wanted := stringSet(values...)
+	for _, token := range tokens {
+		if wanted[token] {
+			return true
+		}
+	}
+	return false
 }
 
 func isLanguageQueryToken(token string) bool {

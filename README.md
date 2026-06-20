@@ -28,7 +28,7 @@ It combines SQLite FTS5 search, compression-distance re-ranking, Zstandard dicti
 
 ## Key Features
 
-*   **Local code search**: SQLite FTS5 keyword search with Query-Normalized Distance (QND) compression re-ranking.
+*   **Local code search**: SQLite FTS5 keyword search with path-aware lexical weighting and Query-Normalized Distance (QND) compression re-ranking.
 *   **Language-aware indexing**: Index popular source formats by default, or pass explicit extensions such as `html,css,rb,py,go,rs,zig`.
 *   **Syntax checks where available**: Uses local toolchains for Go, Python, JavaScript, Ruby, PHP, Perl, Lua, shell, C/C++, Swift, and TypeScript validation during optimization.
 *   **Private feedback memory**: Stores negative project feedback locally so agents can avoid repeating known mistakes.
@@ -136,7 +136,7 @@ Elixir, Erlang, Clojure, F#, OCaml, Haskell, Julia, and common config files.
 ```
 
 ### B. Hybrid Context Search
-Search templates using keyword matching and parallel compression distance:
+Search templates using keyword matching, source-path relevance, and parallel compression distance:
 ```bash
 ./snapzip search --query "python lru cache" --limit 3
 ```

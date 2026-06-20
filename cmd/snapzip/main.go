@@ -172,7 +172,7 @@ func handleSearch() {
 
 	fmt.Printf("Found %d matching snippets:\n", len(results))
 	for _, res := range results {
-		fmt.Printf("\n--- Topic: %s (Language: %s | QND Score: %.4f) ---\n%s\n", res.Topic, res.Language, res.Score, res.Content)
+		fmt.Printf("\n--- Topic: %s (Language: %s | Relevance Score: %.4f) ---\n%s\n", res.Topic, res.Language, res.Score, res.Content)
 	}
 }
 

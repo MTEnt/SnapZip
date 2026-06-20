@@ -119,3 +119,82 @@ func TestRetrieveSimilarSnippetsMatchesPythonAlias(t *testing.T) {
 		t.Fatalf("got language %q, want py", results[0].Language)
 	}
 }
+
+func TestRetrieveSimilarSnippetsDoesNotHardFilterDetectedLanguage(t *testing.T) {
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := AddKnowledge(db, "go", "Source file: cmd/snapzip/main.go", "go command routing and cli flags\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddKnowledge(db, "md", "Source file: README.md", "Install SnapZip with go install and run setup commands\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := RetrieveSimilarSnippets(db, mustTestCompressor(t), "go install setup readme", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("got no results")
+	}
+	if results[0].Topic != "Source file: README.md" {
+		t.Fatalf("top result = %q, want README.md", results[0].Topic)
+	}
+}
+
+func TestRetrieveSimilarSnippetsSanitizesUnderscoreQueries(t *testing.T) {
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	content := "skip node_modules, binary files, generated output, and oversized source files during indexing\n"
+	if err := AddKnowledge(db, "go", "Source file: core/indexer.go", content); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := RetrieveSimilarSnippets(db, mustTestCompressor(t), "skip node_modules binary files indexer", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("got no results")
+	}
+	if results[0].Topic != "Source file: core/indexer.go" {
+		t.Fatalf("top result = %q, want indexer.go", results[0].Topic)
+	}
+}
+
+func TestRetrieveSimilarSnippetsUsesLexicalRelevance(t *testing.T) {
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := AddKnowledge(db, "go", "Source file: cmd/snapzip/main.go", "feedback command handler and search command wiring\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddKnowledge(db, "go", "Source file: core/feedback_test.go", "negative feedback sentiment detection test cases for incorrect broken generated code\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddKnowledge(db, "go", "Source file: core/feedback.go", "negative feedback sentiment detection for incorrect broken generated code\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := RetrieveSimilarSnippets(db, mustTestCompressor(t), "negative feedback sentiment error handling", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("got no results")
+	}
+	if results[0].Topic != "Source file: core/feedback.go" {
+		t.Fatalf("top result = %q, want feedback.go", results[0].Topic)
+	}
+}
