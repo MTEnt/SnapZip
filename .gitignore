@@ -1,0 +1,15 @@
+# Compiled binaries
+snapzip
+snapzip_temp_*
+sketch_*
+
+# Database files
+*.db
+memory.db
+
+# OS files
+.DS_Store
+
+# Python caches
+__pycache__/
+*.pyc
