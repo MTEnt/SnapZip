@@ -164,6 +164,7 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"imports","arguments":{"query":"helper","limit":5}}}`,
 		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"graph","arguments":{"path":"lib/helper.rb","limit":5}}}`,
 		`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"validation_plan","arguments":{"path":"lib/cache.rb","limit":5}}}`,
+		`{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"pr_context","arguments":{"path":"lib/cache.rb","limit":5,"budget":4096}}}`,
 	}, "\n") + "\n"
 
 	var output bytes.Buffer
@@ -172,10 +173,10 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 10 {
-		t.Fatalf("got %d MCP responses, want 10:\n%s", len(lines), output.String())
+	if len(lines) != 11 {
+		t.Fatalf("got %d MCP responses, want 11:\n%s", len(lines), output.String())
 	}
-	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) || !strings.Contains(lines[1], `"symbol_context"`) || !strings.Contains(lines[1], `"imports"`) || !strings.Contains(lines[1], `"graph"`) || !strings.Contains(lines[1], `"validation_plan"`) {
+	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) || !strings.Contains(lines[1], `"symbol_context"`) || !strings.Contains(lines[1], `"imports"`) || !strings.Contains(lines[1], `"graph"`) || !strings.Contains(lines[1], `"validation_plan"`) || !strings.Contains(lines[1], `"pr_context"`) {
 		t.Fatalf("tools/list did not expose expected tools:\n%s", lines[1])
 	}
 	if !strings.Contains(lines[2], "CacheStore") {
@@ -202,6 +203,9 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	if !strings.Contains(lines[9], "SnapZip Validation Plan") || !strings.Contains(lines[9], "bundle exec rake test") {
 		t.Fatalf("validation_plan tool response missing suggested validation:\n%s", lines[9])
 	}
+	if !strings.Contains(lines[10], "SnapZip PR Context") || !strings.Contains(lines[10], "Mode: review") || !strings.Contains(lines[10], "test/cache_test.rb") {
+		t.Fatalf("pr_context tool response missing review context:\n%s", lines[10])
+	}
 }
 
 func TestCLIAdvancedContextCommands(t *testing.T) {
@@ -216,6 +220,11 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 	writeCLIFile(t, fixture, "pkg/store/store.go", "package store\n\ntype Store struct{}\n")
 	writeCLIFile(t, fixture, "pkg/cache.go", "package cache\n\nimport \"snapzipfixture/pkg/store\"\n\ntype CacheStore struct{ Store store.Store }\n\nfunc NewCacheStore() CacheStore { return CacheStore{Store: store.Store{}} }\n")
 	writeCLIFile(t, fixture, "pkg/cache_test.go", "package cache\n\nimport \"testing\"\n\nfunc TestConstructor(t *testing.T) { _ = NewCacheStore() }\n")
+	gitInit := exec.Command("git", "init")
+	gitInit.Dir = fixture
+	if output, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, string(output))
+	}
 
 	dbDir := t.TempDir()
 	runSnapZip(t, repoRoot,
@@ -266,6 +275,23 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 	validatePlanOutput := runSnapZip(t, repoRoot, "validate", "--db-dir", dbDir, "--path", "pkg/cache.go", "--dir", fixture, "--limit", "5")
 	if !strings.Contains(validatePlanOutput, "# SnapZip Validate") || !strings.Contains(validatePlanOutput, "pkg/cache_test.go") || !strings.Contains(validatePlanOutput, "configured validation command for go") {
 		t.Fatalf("validate plan output missing affected test or command:\n%s", validatePlanOutput)
+	}
+
+	prOutput := runSnapZip(t, repoRoot, "pr", "--db-dir", dbDir, "--path", "pkg/cache.go", "--dir", fixture, "--limit", "5", "--budget", "4096")
+	if !strings.Contains(prOutput, "# SnapZip PR Context") || !strings.Contains(prOutput, "pkg/cache.go") || !strings.Contains(prOutput, "pkg/cache_test.go") || !strings.Contains(prOutput, "Mode: review") {
+		t.Fatalf("pr output missing review context:\n%s", prOutput)
+	}
+	prJSON := runSnapZip(t, repoRoot, "pr", "--db-dir", dbDir, "--path", "pkg/cache.go", "--dir", fixture, "--limit", "5", "--budget", "4096", "--json")
+	var prPayload prReport
+	if err := json.Unmarshal([]byte(prJSON), &prPayload); err != nil {
+		t.Fatalf("pr --json returned invalid JSON: %v\n%s", err, prJSON)
+	}
+	if len(prPayload.ChangedFiles) == 0 || prPayload.Pack == nil || prPayload.Pack.Mode != "review" {
+		t.Fatalf("pr --json missing changed files or review pack: %+v", prPayload)
+	}
+	prChangedOutput := runSnapZip(t, repoRoot, "pr", "--db-dir", dbDir, "--changed", "--dir", fixture, "--limit", "5", "--budget", "4096")
+	if !strings.Contains(prChangedOutput, "Base: `working tree`") || !strings.Contains(prChangedOutput, "pkg/cache.go") {
+		t.Fatalf("pr --changed output missing working tree diff context:\n%s", prChangedOutput)
 	}
 
 	validateRunOutput := runSnapZip(t, repoRoot, "validate", "--db-dir", dbDir, "--path", "pkg/cache.go", "--cmd", "go test ./...", "--dir", fixture, "--limit", "5")

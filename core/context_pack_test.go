@@ -216,4 +216,7 @@ func TestExpandQueryForPackMode(t *testing.T) {
 	if got := ExpandQueryForPackMode("cache", "docs"); !strings.Contains(got, "documentation") {
 		t.Fatalf("docs mode did not add documentation terms: %q", got)
 	}
+	if got := ExpandQueryForPackMode("cache", "review"); !strings.Contains(got, "regression") {
+		t.Fatalf("review mode did not add review terms: %q", got)
+	}
 }

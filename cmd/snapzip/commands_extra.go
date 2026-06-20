@@ -398,6 +398,14 @@ type validateReport struct {
 	Pack   *core.ContextPack      `json:"pack,omitempty"`
 }
 
+type prReport struct {
+	Base         string              `json:"base,omitempty"`
+	Dir          string              `json:"dir"`
+	ChangedFiles []string            `json:"changed_files"`
+	Plan         core.ValidationPlan `json:"plan"`
+	Pack         *core.ContextPack   `json:"pack,omitempty"`
+}
+
 func handleValidate() {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
 	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
@@ -494,6 +502,149 @@ func handleValidate() {
 	if report.Run != nil && report.Run.ExitCode != 0 {
 		os.Exit(report.Run.ExitCode)
 	}
+}
+
+func handlePR() {
+	fs := flag.NewFlagSet("pr", flag.ExitOnError)
+	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
+	dir := fs.String("dir", ".", "Git and config working directory")
+	pathInput := fs.String("path", "", "Comma-separated indexed source paths to review")
+	changed := fs.Bool("changed", false, "Use git working-tree changed files")
+	base := fs.String("base", "", "Git base ref for a PR diff, such as origin/main")
+	query := fs.String("query", "", "Additional review context query")
+	limit := fs.Int("limit", 10, "Maximum affected files and context snippets to include")
+	budget := fs.Int("budget", core.DefaultContextPackBudgetBytes, "Approximate byte budget for review context")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
+	_ = fs.Parse(os.Args[2:])
+
+	if strings.TrimSpace(*pathInput) == "" && !*changed && strings.TrimSpace(*base) == "" {
+		fmt.Println("Error: provide --path, --changed, or --base")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	db, err := openDBOrExit(*dbDir)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	report, err := buildPRReport(db, *dir, *pathInput, *changed, *base, *query, *limit, *budget)
+	if err != nil {
+		fmt.Printf("PR context failed: %v\n", err)
+		os.Exit(1)
+	}
+	if *jsonOutput {
+		writeJSON(report)
+		return
+	}
+	fmt.Print(renderPRReport(report))
+}
+
+func buildPRReport(db *sql.DB, dir, pathInput string, changed bool, base, query string, limit, budget int) (prReport, error) {
+	paths, err := resolveAffectedPaths(pathInput, changed, base, dir)
+	if err != nil {
+		return prReport{}, err
+	}
+	report := prReport{
+		Base:         strings.TrimSpace(base),
+		Dir:          dir,
+		ChangedFiles: paths,
+	}
+	if changed && report.Base == "" {
+		report.Base = "working tree"
+	}
+	if len(paths) == 0 {
+		return report, nil
+	}
+
+	plan, err := core.BuildValidationPlan(db, paths, limit)
+	if err != nil {
+		return prReport{}, err
+	}
+	config, err := core.LoadProjectConfig(dir)
+	if err != nil {
+		return prReport{}, err
+	}
+	plan.SuggestedCommands = core.MergeValidationCommands(core.ConfiguredValidationCommands(config, plan.Affected), plan.SuggestedCommands)
+	report.Plan = plan
+
+	comp, err := core.NewZstdCompressor(zstd.SpeedDefault)
+	if err != nil {
+		return prReport{}, err
+	}
+	packQuery := prContextQuery(query, paths, plan.Affected)
+	if strings.TrimSpace(packQuery) != "" {
+		pack, err := core.BuildContextPackWithMode(db, comp, packQuery, "review", limit, budget, 5)
+		if err != nil {
+			return prReport{}, err
+		}
+		report.Pack = &pack
+	}
+	return report, nil
+}
+
+func prContextQuery(query string, paths []string, affected core.AffectedReport) string {
+	terms := []string{strings.TrimSpace(query), "code review diff regression risk validation"}
+	addPathTerms := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		base := filepath.Base(path)
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		terms = append(terms, path, base, stem)
+	}
+	for _, path := range paths {
+		addPathTerms(path)
+	}
+	for _, test := range affected.Tests {
+		addPathTerms(test.Path)
+	}
+	for _, related := range affected.Related {
+		addPathTerms(related.Path)
+	}
+	return strings.Join(uniqueTerms(terms), " ")
+}
+
+func renderPRReport(report prReport) string {
+	var builder strings.Builder
+	builder.WriteString("# SnapZip PR Context\n\n")
+	if report.Base != "" {
+		fmt.Fprintf(&builder, "Base: `%s`\n", report.Base)
+	}
+	if report.Dir != "" {
+		fmt.Fprintf(&builder, "Directory: `%s`\n", report.Dir)
+	}
+
+	builder.WriteString("\n## Changed Files\n")
+	if len(report.ChangedFiles) == 0 {
+		builder.WriteString("\nNo changed files found.\n")
+		return builder.String()
+	}
+	for _, path := range report.ChangedFiles {
+		fmt.Fprintf(&builder, "- %s\n", path)
+	}
+
+	builder.WriteString("\n## Validation Plan\n")
+	renderAffectedReportBody(&builder, report.Plan.Affected)
+	builder.WriteString("\n## Suggested Commands\n")
+	if len(report.Plan.SuggestedCommands) == 0 {
+		builder.WriteString("\nNo validation command could be inferred from the current index.\n")
+	} else {
+		for _, command := range report.Plan.SuggestedCommands {
+			fmt.Fprintf(&builder, "\n- `%s` (confidence %.2f)\n", command.Command, command.Confidence)
+			if command.Reason != "" {
+				fmt.Fprintf(&builder, "  - %s\n", command.Reason)
+			}
+		}
+	}
+
+	if report.Pack != nil {
+		builder.WriteString("\n## Review Context\n\n")
+		builder.WriteString(core.RenderContextPack(*report.Pack))
+	}
+	return builder.String()
 }
 
 type diagnoseReport struct {
@@ -718,7 +869,7 @@ func runAudit(dbDir string) auditReport {
 	report.Checks = append(report.Checks, auditSecrets(dbDir))
 	report.Checks = append(report.Checks,
 		auditCheck{Name: "dependency dirs skipped", Passed: true, Details: "indexer skips .git, node_modules, vendor, dist, build, target, venv, .venv, and common generated directories"},
-		auditCheck{Name: "mcp write surface", Passed: true, Details: "MCP server exposes read-only search, context_pack, repair_pack, affected_tests, validation_plan, get_feedback, stats, map, symbols, symbol_context, imports, graph, and related tools"},
+		auditCheck{Name: "mcp write surface", Passed: true, Details: "MCP server exposes read-only search, context_pack, repair_pack, affected_tests, validation_plan, pr_context, get_feedback, stats, map, symbols, symbol_context, imports, graph, and related tools"},
 	)
 	return report
 }
@@ -907,10 +1058,11 @@ func agentRuleText() string {
 	return `# SnapZip Agent Integration
 
 Use SnapZip when available. Run ` + "`snapzip stats --db-dir .`" + ` to check whether local context exists.
-Before non-trivial code changes, run ` + "`snapzip pack --query \"<topic>\" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>`" + ` for targeted local context, receipts, quality warnings, and feedback memory.
+Before non-trivial code changes, run ` + "`snapzip pack --query \"<topic>\" --limit 5 --budget 12000 --mode <debug|refactor|test|docs|review>`" + ` for targeted local context, receipts, quality warnings, and feedback memory.
 Use ` + "`snapzip symbol-context --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip symbols --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip imports --query \"<module>\" --limit 10`" + `, ` + "`snapzip graph --path <file> --limit 10`" + `, or ` + "`snapzip map --limit 50`" + ` for structural context.
 Prefer resolved local import targets when present; unresolved imports are usually external packages or aliases SnapZip cannot map safely.
 Use ` + "`snapzip related --path <file>`" + ` and ` + "`snapzip affected --path <file>`" + ` to find related files and likely tests.
+Use ` + "`snapzip pr --changed`" + ` or ` + "`snapzip pr --base <ref>`" + ` for diff-aware review context before reviewing or finalizing a branch.
 Use ` + "`snapzip validate --path <file>`" + ` to plan validation, or ` + "`snapzip validate --changed --cmd \"<test command>\"`" + ` to run validation and get failure context.
 If ` + "`.snapzip/config.toml`" + ` defines validation, use ` + "`snapzip validate --changed --run-config`" + ` when explicitly running the configured project command.
 Use ` + "`snapzip repair-pack --error-file <test-output>`" + ` or ` + "`snapzip diagnose --cmd \"<test command>\"`" + ` after failing tests.

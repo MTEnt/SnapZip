@@ -164,7 +164,7 @@ func (s mcpServer) initializeResult(params json.RawMessage) map[string]any {
 			"version":     "0.1.0",
 			"description": "Local codebase memory and context packs for AI coding agents.",
 		},
-		"instructions": "Use SnapZip tools to search indexed local code, build bounded context and repair packs, inspect repo maps, symbols, symbol references, imports, dependency graphs, likely affected tests, validation plans, feedback memory, and index stats. Tools are read-only.",
+		"instructions": "Use SnapZip tools to search indexed local code, build bounded context and repair packs, inspect repo maps, symbols, symbol references, imports, dependency graphs, likely affected tests, validation plans, PR review context, feedback memory, and index stats. Tools are read-only.",
 	}
 }
 
@@ -195,7 +195,7 @@ func (s mcpServer) tools() []mcpTool {
 					"limit":          integerSchema("Maximum snippets to consider.", 1, 100),
 					"budget":         integerSchema("Approximate byte budget for rendered context.", core.MinContextPackBudgetBytes, core.MaxContextPackBudgetBytes),
 					"feedback_limit": integerSchema("Maximum feedback entries to include.", 0, 100),
-					"mode":           stringSchema("Optional pack mode: debug, refactor, test, or docs."),
+					"mode":           stringSchema("Optional pack mode: debug, refactor, test, docs, or review."),
 				},
 			),
 		},
@@ -240,6 +240,24 @@ func (s mcpServer) tools() []mcpTool {
 					"db_dir":     stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
 					"config_dir": stringSchema("Directory containing optional .snapzip/config.toml. Defaults to db_dir."),
 					"limit":      integerSchema("Maximum tests, related files, and commands to return.", 1, 100),
+				},
+			),
+		},
+		{
+			Name:        "pr_context",
+			Title:       "Build SnapZip PR review context",
+			Description: "Return changed files, likely affected tests, suggested validation commands, and a review-mode context pack for a diff or named paths.",
+			InputSchema: objectSchema(
+				nil,
+				map[string]any{
+					"path":    stringSchema("Comma-separated indexed source paths to review."),
+					"changed": booleanSchema("Use git working-tree changed files."),
+					"base":    stringSchema("Git base ref for a PR diff, such as origin/main."),
+					"dir":     stringSchema("Git and config working directory. Defaults to db_dir."),
+					"query":   stringSchema("Optional extra review query."),
+					"db_dir":  stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
+					"limit":   integerSchema("Maximum affected files and context snippets to include.", 1, 100),
+					"budget":  integerSchema("Approximate byte budget for rendered review context.", core.MinContextPackBudgetBytes, core.MaxContextPackBudgetBytes),
 				},
 			),
 		},
@@ -369,6 +387,8 @@ func (s mcpServer) callTool(params json.RawMessage) (mcpToolResult, *rpcError) {
 		return s.callAffectedTests(call.Arguments), nil
 	case "validation_plan":
 		return s.callValidationPlan(call.Arguments), nil
+	case "pr_context":
+		return s.callPRContext(call.Arguments), nil
 	case "map":
 		return s.callMap(call.Arguments), nil
 	case "symbols":
@@ -543,6 +563,38 @@ func (s mcpServer) callValidationPlan(args map[string]any) mcpToolResult {
 		}
 	}
 	return toolSuccess(builder.String(), plan)
+}
+
+func (s mcpServer) callPRContext(args map[string]any) mcpToolResult {
+	path := strings.TrimSpace(stringArg(args, "path", ""))
+	changed := boolArg(args, "changed", false)
+	base := strings.TrimSpace(stringArg(args, "base", ""))
+	if path == "" && !changed && base == "" {
+		return toolError("path, changed, or base is required")
+	}
+
+	db, done, err := s.openDB(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	defer done()
+
+	dbDir := stringArg(args, "db_dir", s.dbDir)
+	dir := strings.TrimSpace(stringArg(args, "dir", dbDir))
+	report, err := buildPRReport(
+		db,
+		dir,
+		path,
+		changed,
+		base,
+		stringArg(args, "query", ""),
+		intArg(args, "limit", 10),
+		intArg(args, "budget", core.DefaultContextPackBudgetBytes),
+	)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	return toolSuccess(renderPRReport(report), report)
 }
 
 func (s mcpServer) callMap(args map[string]any) mcpToolResult {
@@ -768,6 +820,13 @@ func integerSchema(description string, minimum int, maximum int) map[string]any 
 	}
 }
 
+func booleanSchema(description string) map[string]any {
+	return map[string]any{
+		"type":        "boolean",
+		"description": description,
+	}
+}
+
 func stringArg(args map[string]any, name string, fallback string) string {
 	value, ok := args[name]
 	if !ok || value == nil {
@@ -775,6 +834,17 @@ func stringArg(args map[string]any, name string, fallback string) string {
 	}
 	if text, ok := value.(string); ok {
 		return text
+	}
+	return fallback
+}
+
+func boolArg(args map[string]any, name string, fallback bool) bool {
+	value, ok := args[name]
+	if !ok || value == nil {
+		return fallback
+	}
+	if typed, ok := value.(bool); ok {
+		return typed
 	}
 	return fallback
 }

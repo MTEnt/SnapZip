@@ -352,6 +352,8 @@ func ExpandQueryForPackMode(query, mode string) string {
 		return strings.TrimSpace(query + " test spec fixture assertion mock benchmark")
 	case "docs":
 		return strings.TrimSpace(query + " readme docs documentation install setup config workflow")
+	case "review":
+		return strings.TrimSpace(query + " code review diff change regression risk caller dependency test validation")
 	default:
 		return query
 	}
@@ -361,7 +363,7 @@ func normalizePackMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "default", "general":
 		return ""
-	case "debug", "refactor", "test", "docs":
+	case "debug", "refactor", "test", "docs", "review":
 		return strings.ToLower(strings.TrimSpace(mode))
 	default:
 		return ""
@@ -484,7 +486,7 @@ func graphContextBudget(mode string, limit int) int {
 		return 0
 	}
 	switch normalizePackMode(mode) {
-	case "debug", "refactor", "test":
+	case "debug", "refactor", "test", "review":
 		return min(2, limit-1)
 	case "docs":
 		return 0

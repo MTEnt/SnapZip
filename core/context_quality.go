@@ -128,18 +128,18 @@ func contextQualityNotes(pack ContextPack, metrics ContextQualityMetrics) ([]str
 	}
 	if metrics.ReferenceCount > 0 {
 		strengths = append(strengths, "included snippets contain call/reference sites")
-	} else if pack.Mode == "refactor" {
-		warnings = append(warnings, "refactor mode did not include detected call/reference sites")
+	} else if pack.Mode == "refactor" || pack.Mode == "review" {
+		warnings = append(warnings, pack.Mode+" mode did not include detected call/reference sites")
 	}
 	if metrics.TestSnippetCount > 0 {
 		strengths = append(strengths, "test context is present")
-	} else if pack.Mode == "debug" || pack.Mode == "test" {
-		warnings = append(warnings, "debug/test context has no test snippet")
+	} else if pack.Mode == "debug" || pack.Mode == "test" || pack.Mode == "review" {
+		warnings = append(warnings, pack.Mode+" context has no test snippet")
 	}
 	if metrics.EvidenceDensity >= 1 {
 		strengths = append(strengths, "receipts include direct evidence")
-	} else if pack.Mode == "debug" {
-		warnings = append(warnings, "debug context has sparse receipt evidence")
+	} else if pack.Mode == "debug" || pack.Mode == "review" {
+		warnings = append(warnings, pack.Mode+" context has sparse receipt evidence")
 	}
 	if metrics.DuplicatePathCount > 0 {
 		warnings = append(warnings, "multiple snippets came from the same path")

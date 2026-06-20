@@ -43,6 +43,8 @@ func main() {
 		handleRelated()
 	case "affected":
 		handleAffected()
+	case "pr":
+		handlePR()
 	case "diagnose":
 		handleDiagnose()
 	case "validate":
@@ -90,6 +92,7 @@ func printUsage() {
 	fmt.Println("  graph          Show resolved import graph for an indexed file")
 	fmt.Println("  related        Find files related to an indexed path")
 	fmt.Println("  affected       Find tests likely affected by changed or named files")
+	fmt.Println("  pr             Build diff-aware review context for changed files")
 	fmt.Println("  diagnose       Run a command and build a repair pack from failures")
 	fmt.Println("  validate       Plan and optionally run validation for changed or named files")
 	fmt.Println("  audit          Check local privacy and index hygiene")
@@ -240,7 +243,7 @@ func handlePack() {
 	limit := fs.Int("limit", 5, "Maximum snippets to include")
 	budget := fs.Int("budget", core.DefaultContextPackBudgetBytes, "Approximate byte budget for rendered context")
 	feedbackLimit := fs.Int("feedback-limit", 5, "Maximum feedback entries to include")
-	mode := fs.String("mode", "", "Pack mode: debug, refactor, test, docs, or default")
+	mode := fs.String("mode", "", "Pack mode: debug, refactor, test, docs, review, or default")
 	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
 	_ = fs.Parse(os.Args[2:])
 
