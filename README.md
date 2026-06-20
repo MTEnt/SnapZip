@@ -29,8 +29,8 @@ It combines SQLite FTS5 search, compression-distance re-ranking, Zstandard dicti
 ## Key Features
 
 *   **Local code search**: SQLite FTS5 keyword search with Query-Normalized Distance (QND) compression re-ranking.
-*   **Language-aware indexing**: Index common source formats by default, or pass explicit extensions such as `py,go,rs,zig`.
-*   **Syntax checks where available**: Uses local toolchains for Go, Python, and JavaScript validation during optimization.
+*   **Language-aware indexing**: Index popular source formats by default, or pass explicit extensions such as `html,css,rb,py,go,rs,zig`.
+*   **Syntax checks where available**: Uses local toolchains for Go, Python, JavaScript, Ruby, PHP, Perl, Lua, shell, C/C++, Swift, and TypeScript validation during optimization.
 *   **Private feedback memory**: Stores negative project feedback locally so agents can avoid repeating known mistakes.
 *   **Simple agent integration**: Works as a CLI that can be called from coding agents, editor rules, or shell scripts.
 
@@ -112,10 +112,20 @@ Run the onboarding wizard to initialize a fresh local `memory.db` and index your
 ### A. Codebase Indexing
 Index codebase files under a target directory, filtering by language name or extension:
 ```bash
-./snapzip init-db --db-dir . --langs go,py,js --crawl /path/to/your/codebase
+./snapzip init-db --db-dir . --langs popular --crawl /path/to/your/codebase
 ```
 
-`--langs` accepts extensions (`py,js,rs,zig`) and language names (`python,javascript,rust`). Use `all` or `any` to index common source-code formats. Explicit extensions are accepted even when they are not part of the default common-language list.
+`--langs` accepts presets (`popular`, `web`, `frontend`, `backend`, `mobile`, `systems`, `config`), extensions (`html,css,rb,py,js,rs,zig`), and language names (`ruby,python,javascript,rust`). Use `all` or `any` to index the full default source-code set. Explicit extensions are accepted even when they are not part of the default common-language list.
+
+Common default formats include:
+
+```text
+Python, JavaScript, TypeScript, HTML, CSS, Ruby, PHP, Java, C#, C, C++, Go,
+Rust, SQL, Swift, Kotlin, Dart, Scala, Lua, Perl, R, Shell, PowerShell, Vue,
+Svelte, Astro, Markdown/MDX, JSON/JSONC/JSON5, YAML, TOML, XML, GraphQL,
+Dockerfile, Makefile, Terraform/HCL, Protocol Buffers, Solidity, Nix, Zig,
+Elixir, Erlang, Clojure, F#, OCaml, Haskell, Julia, and common config files.
+```
 
 ### B. Hybrid Context Search
 Search templates using keyword matching and parallel compression distance:

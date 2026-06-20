@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -22,6 +23,36 @@ type BCAOptimizer struct {
 	config     BCAConfig
 	encoder    *zstd.Encoder
 	vocabulary []string
+}
+
+type syntaxChecker struct {
+	executable string
+	args       func(path string) []string
+}
+
+var syntaxCheckers = map[string]syntaxChecker{
+	"c":     {"cc", func(path string) []string { return []string{"-fsyntax-only", path} }},
+	"cc":    {"c++", func(path string) []string { return []string{"-fsyntax-only", path} }},
+	"cpp":   {"c++", func(path string) []string { return []string{"-fsyntax-only", path} }},
+	"cxx":   {"c++", func(path string) []string { return []string{"-fsyntax-only", path} }},
+	"go":    {"go", func(path string) []string { return []string{"vet", path} }},
+	"js":    {"node", func(path string) []string { return []string{"--check", path} }},
+	"mjs":   {"node", func(path string) []string { return []string{"--check", path} }},
+	"cjs":   {"node", func(path string) []string { return []string{"--check", path} }},
+	"lua":   {"luac", func(path string) []string { return []string{"-p", path} }},
+	"perl":  {"perl", func(path string) []string { return []string{"-c", path} }},
+	"pl":    {"perl", func(path string) []string { return []string{"-c", path} }},
+	"pm":    {"perl", func(path string) []string { return []string{"-c", path} }},
+	"php":   {"php", func(path string) []string { return []string{"-l", path} }},
+	"py":    {"python3", func(path string) []string { return []string{"-m", "py_compile", path} }},
+	"rb":    {"ruby", func(path string) []string { return []string{"-c", path} }},
+	"sh":    {"sh", func(path string) []string { return []string{"-n", path} }},
+	"swift": {"swiftc", func(path string) []string { return []string{"-parse", path} }},
+	"ts":    {"tsc", func(path string) []string { return []string{"--noEmit", "--pretty", "false", path} }},
+	"tsx": {"tsc", func(path string) []string {
+		return []string{"--noEmit", "--pretty", "false", "--jsx", "preserve", path}
+	}},
+	"zsh": {"zsh", func(path string) []string { return []string{"-n", path} }},
 }
 
 func NewBCAOptimizer(cfg BCAConfig, dictBytes []byte, vocab []string) (*BCAOptimizer, error) {
@@ -84,8 +115,16 @@ func (o *BCAOptimizer) PriorScore(draft []byte) float64 {
 
 // VerifyCompilation runs the compiler/linter check on a temporary file
 func VerifyCompilation(code string, filename string) bool {
-	ext := filepath.Ext(filename)
-	temp, err := os.CreateTemp("", "snapzip-*"+ext)
+	language := LanguageFromPath(filename)
+	checker, ok := syntaxCheckerForLanguage(language)
+	if !ok {
+		return true
+	}
+	if _, err := exec.LookPath(checker.executable); err != nil {
+		return true
+	}
+
+	temp, err := os.CreateTemp("", "snapzip-*"+syntaxTempSuffix(language, filename))
 	if err != nil {
 		return false
 	}
@@ -100,20 +139,30 @@ func VerifyCompilation(code string, filename string) bool {
 		return false
 	}
 
-	var cmd *exec.Cmd
-	switch ext {
-	case ".go":
-		cmd = exec.Command("go", "vet", tempFile)
-	case ".py":
-		cmd = exec.Command("python3", "-m", "py_compile", tempFile)
-	case ".js":
-		cmd = exec.Command("node", "--check", tempFile)
-	default:
-		return true
-	}
+	cmd := exec.Command(checker.executable, checker.args(tempFile)...)
+	return cmd.Run() == nil
+}
 
-	err = cmd.Run()
-	return err == nil
+func syntaxCheckerForLanguage(language string) (syntaxChecker, bool) {
+	checker, ok := syntaxCheckers[NormalizeLanguage(language)]
+	return checker, ok
+}
+
+func syntaxTempSuffix(language, filename string) string {
+	if ext := filepath.Ext(filename); ext != "" {
+		return ext
+	}
+	lang := NormalizeLanguage(language)
+	switch {
+	case lang == "dockerfile" || lang == "makefile" || lang == "starlark":
+		return ".txt"
+	case lang == "":
+		return ".txt"
+	case strings.ContainsAny(lang, `/\`):
+		return ".txt"
+	default:
+		return "." + lang
+	}
 }
 
 // Mutate proposes a code transition X -> X' (swapping tokens or tweaking characters)

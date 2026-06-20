@@ -8,86 +8,179 @@ import (
 )
 
 var languageAliases = map[string]string{
-	"bash":       "sh",
-	"c++":        "cpp",
-	"cplusplus":  "cpp",
-	"csharp":     "cs",
-	"c#":         "cs",
-	"docker":     "dockerfile",
-	"golang":     "go",
-	"javascript": "js",
-	"jsx":        "js",
-	"node":       "js",
-	"nodejs":     "js",
-	"postgres":   "sql",
-	"postgresql": "sql",
-	"python":     "py",
-	"ruby":       "rb",
-	"rust":       "rs",
-	"shell":      "sh",
-	"sqlite":     "sql",
-	"typescript": "ts",
-	"tsx":        "ts",
+	"assembly":        "asm",
+	"bash":            "sh",
+	"c#":              "cs",
+	"c++":             "cpp",
+	"clojure":         "clj",
+	"cplusplus":       "cpp",
+	"csharp":          "cs",
+	"css3":            "css",
+	"docker":          "dockerfile",
+	"ecmascript":      "js",
+	"elixir":          "ex",
+	"erlang":          "erl",
+	"f#":              "fs",
+	"fsharp":          "fs",
+	"golang":          "go",
+	"graphqlschema":   "graphql",
+	"haskell":         "hs",
+	"html5":           "html",
+	"javascript":      "js",
+	"javascriptreact": "jsx",
+	"julia":           "jl",
+	"kotlin":          "kt",
+	"matlab":          "m",
+	"markdown":        "md",
+	"node":            "js",
+	"nodejs":          "js",
+	"objectivec":      "m",
+	"objectivecpp":    "mm",
+	"objc":            "m",
+	"objc++":          "mm",
+	"perl":            "pl",
+	"postgres":        "sql",
+	"postgresql":      "sql",
+	"protobuf":        "proto",
+	"protocolbuffers": "proto",
+	"python":          "py",
+	"powershell":      "ps1",
+	"rstats":          "r",
+	"ruby":            "rb",
+	"rust":            "rs",
+	"shell":           "sh",
+	"sqlite":          "sql",
+	"terraform":       "tf",
+	"typescript":      "ts",
+	"typescriptreact": "tsx",
+	"visualbasic":     "vb",
+	"vbnet":           "vb",
+	"yaml":            "yaml",
+	"yml":             "yaml",
 }
 
-var defaultCodeLanguages = map[string]bool{
-	"bash":       true,
-	"c":          true,
-	"clj":        true,
-	"cljs":       true,
-	"cpp":        true,
-	"cs":         true,
-	"css":        true,
-	"dart":       true,
-	"dockerfile": true,
-	"erl":        true,
-	"ex":         true,
-	"exs":        true,
-	"fish":       true,
-	"fs":         true,
-	"fsx":        true,
-	"go":         true,
-	"graphql":    true,
-	"h":          true,
-	"hpp":        true,
-	"hs":         true,
-	"html":       true,
-	"java":       true,
-	"js":         true,
-	"json":       true,
-	"kt":         true,
-	"kts":        true,
-	"lua":        true,
-	"m":          true,
-	"makefile":   true,
-	"md":         true,
-	"ml":         true,
-	"mli":        true,
-	"mm":         true,
-	"nim":        true,
-	"php":        true,
-	"proto":      true,
-	"ps1":        true,
-	"py":         true,
-	"r":          true,
-	"rb":         true,
-	"rs":         true,
-	"sass":       true,
-	"scala":      true,
-	"scss":       true,
-	"sh":         true,
-	"sql":        true,
-	"svelte":     true,
-	"swift":      true,
-	"tf":         true,
-	"toml":       true,
-	"ts":         true,
-	"vue":        true,
-	"xml":        true,
-	"yaml":       true,
-	"yml":        true,
-	"zig":        true,
-	"zsh":        true,
+var defaultCodeLanguages = stringSet(
+	"astro",
+	"asm",
+	"c",
+	"cc",
+	"cjs",
+	"clj",
+	"cljs",
+	"cmake",
+	"cpp",
+	"cs",
+	"css",
+	"cxx",
+	"dart",
+	"dockerfile",
+	"erl",
+	"ex",
+	"exs",
+	"fish",
+	"fs",
+	"fsx",
+	"go",
+	"gql",
+	"graphql",
+	"groovy",
+	"h",
+	"hcl",
+	"hh",
+	"hpp",
+	"hrl",
+	"hs",
+	"html",
+	"hxx",
+	"java",
+	"jl",
+	"js",
+	"json",
+	"json5",
+	"jsonc",
+	"jsx",
+	"kt",
+	"kts",
+	"less",
+	"lua",
+	"m",
+	"makefile",
+	"md",
+	"mdx",
+	"mjs",
+	"ml",
+	"mli",
+	"mm",
+	"nix",
+	"nim",
+	"perl",
+	"php",
+	"pl",
+	"pm",
+	"prisma",
+	"proto",
+	"ps1",
+	"py",
+	"r",
+	"rb",
+	"rkt",
+	"rs",
+	"sass",
+	"scala",
+	"sc",
+	"scss",
+	"sh",
+	"sol",
+	"sql",
+	"starlark",
+	"svelte",
+	"swift",
+	"tf",
+	"tfvars",
+	"toml",
+	"ts",
+	"tsx",
+	"vb",
+	"vue",
+	"xml",
+	"yaml",
+	"zig",
+	"zsh",
+	"bzl",
+)
+
+var languageGroups = map[string][]string{
+	"backend": {"go", "java", "js", "kt", "php", "py", "rb", "rs", "scala", "ts"},
+	"config":  {"dockerfile", "hcl", "json", "jsonc", "makefile", "tf", "toml", "yaml"},
+	"frontend": {
+		"astro", "css", "html", "js", "jsx", "less", "mdx", "sass", "scss", "svelte", "ts", "tsx", "vue",
+	},
+	"mobile": {"dart", "java", "kt", "swift"},
+	"popular": {
+		"c", "cpp", "cs", "css", "go", "html", "java", "js", "kt", "php", "py", "rb", "rs", "sql", "swift", "ts",
+	},
+	"systems": {"asm", "c", "cpp", "go", "rs", "zig"},
+	"web":     {"astro", "css", "html", "js", "jsx", "less", "php", "sass", "scss", "svelte", "ts", "tsx", "vue"},
+}
+
+var specialFilenames = map[string]string{
+	"build":           "starlark",
+	"build.bazel":     "starlark",
+	"cmakelists.txt":  "cmake",
+	"containerfile":   "dockerfile",
+	"dockerfile":      "dockerfile",
+	"gemfile":         "rb",
+	"gnumakefile":     "makefile",
+	"jenkinsfile":     "groovy",
+	"justfile":        "makefile",
+	"makefile":        "makefile",
+	"module.bazel":    "starlark",
+	"package.json":    "json",
+	"rakefile":        "rb",
+	"tiltfile":        "starlark",
+	"vagrantfile":     "rb",
+	"workspace":       "starlark",
+	"workspace.bazel": "starlark",
 }
 
 type LanguageFilter struct {
@@ -112,11 +205,8 @@ func NormalizeLanguage(value string) string {
 
 func LanguageFromPath(path string) string {
 	base := strings.ToLower(filepath.Base(path))
-	switch base {
-	case "dockerfile":
-		return "dockerfile"
-	case "makefile":
-		return "makefile"
+	if language, ok := specialFilenames[base]; ok {
+		return language
 	}
 	return NormalizeLanguage(filepath.Ext(path))
 }
@@ -130,6 +220,12 @@ func NewLanguageFilter(input string) LanguageFilter {
 	langs := make(map[string]bool)
 	for _, part := range strings.Split(trimmed, ",") {
 		lang := NormalizeLanguage(part)
+		if group, ok := languageGroups[lang]; ok {
+			for _, groupedLang := range group {
+				langs[groupedLang] = true
+			}
+			continue
+		}
 		if lang != "" {
 			langs[lang] = true
 		}
@@ -167,4 +263,12 @@ func languageTokens(input string) []string {
 	return strings.FieldsFunc(strings.ToLower(input), func(r rune) bool {
 		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '#' || r == '+')
 	})
+}
+
+func stringSet(values ...string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
 }

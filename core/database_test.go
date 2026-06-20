@@ -17,11 +17,17 @@ func mustTestCompressor(t *testing.T) *ZstdCompressor {
 
 func TestDetectLanguageUsesExactAliases(t *testing.T) {
 	cases := map[string]string{
-		"python lru cache":       "py",
+		"c# service":             "cs",
+		"c++ parser":             "cpp",
+		"css grid layout":        "css",
+		"html form":              "html",
 		"javascript react hook":  "js",
-		"typescript type guard":  "ts",
+		"python lru cache":       "py",
+		"ruby rake task":         "rb",
 		"rust ownership helper":  "rs",
 		"sqlite migration query": "sql",
+		"typescript type guard":  "ts",
+		"vue component":          "vue",
 		"algorithm search":       "",
 	}
 
@@ -33,8 +39,8 @@ func TestDetectLanguageUsesExactAliases(t *testing.T) {
 }
 
 func TestLanguageFilterAcceptsNamesAndExtensions(t *testing.T) {
-	filter := NewLanguageFilter("python, javascript, rust")
-	for _, lang := range []string{"py", "python", "js", "jsx", "rs", "rust"} {
+	filter := NewLanguageFilter("python, javascript, rust, ruby, html, css")
+	for _, lang := range []string{"css", "html", "py", "python", "js", "rs", "rust", "rb", "ruby"} {
 		if !filter.Matches(lang) {
 			t.Fatalf("expected filter to match %q", lang)
 		}
@@ -46,6 +52,48 @@ func TestLanguageFilterAcceptsNamesAndExtensions(t *testing.T) {
 	custom := NewLanguageFilter("bf")
 	if !custom.Matches("bf") {
 		t.Fatal("expected explicit custom extension bf to match")
+	}
+}
+
+func TestLanguageFilterGroups(t *testing.T) {
+	popular := NewLanguageFilter("popular")
+	for _, lang := range []string{"css", "html", "java", "js", "php", "py", "rb", "rs", "sql", "ts"} {
+		if !popular.Matches(lang) {
+			t.Fatalf("expected popular preset to match %q", lang)
+		}
+	}
+
+	web := NewLanguageFilter("web")
+	for _, lang := range []string{"astro", "css", "html", "jsx", "scss", "svelte", "tsx", "vue"} {
+		if !web.Matches(lang) {
+			t.Fatalf("expected web preset to match %q", lang)
+		}
+	}
+	if web.Matches("rb") {
+		t.Fatal("did not expect web preset to match ruby")
+	}
+}
+
+func TestLanguageFromPathHandlesPopularFiles(t *testing.T) {
+	cases := map[string]string{
+		"app/views/index.html":  "html",
+		"assets/site.css":       "css",
+		"components/Button.tsx": "tsx",
+		"Gemfile":               "rb",
+		"Rakefile":              "rb",
+		"Dockerfile":            "dockerfile",
+		"CMakeLists.txt":        "cmake",
+		"WORKSPACE.bazel":       "starlark",
+		"terraform/main.tfvars": "tfvars",
+		"config/settings.yml":   "yaml",
+		"scripts/deploy.bash":   "sh",
+		"server.cjs":            "cjs",
+	}
+
+	for path, want := range cases {
+		if got := LanguageFromPath(path); got != want {
+			t.Fatalf("LanguageFromPath(%q) = %q, want %q", path, got, want)
+		}
 	}
 }
 
