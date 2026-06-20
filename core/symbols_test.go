@@ -5,11 +5,13 @@ import "testing"
 func TestExtractSymbolReferencesFiltersNoiseAndDefinitions(t *testing.T) {
 	content := `package cache
 
+import "testing"
+
 type CacheStore struct{}
 
 func NewCacheStore() CacheStore { return CacheStore{} }
 
-func TestConstructor() {
+func TestConstructor(t *testing.T) {
 	_ = NewCacheStore()
 	println("ok")
 	len([]int{})

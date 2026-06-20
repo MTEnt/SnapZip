@@ -204,7 +204,7 @@ func TestIndexDirectoryChunksLargeFiles(t *testing.T) {
 func TestFindAffectedTestsUsesDirectAndRelatedSignals(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
-	writeTestFile(t, root, "pkg/cache_test.go", "package cache\n\nfunc TestConstructor(t *testing.T) { _ = NewCacheStore() }\n")
+	writeTestFile(t, root, "pkg/cache_test.go", "package cache\n\nimport \"testing\"\n\nfunc TestConstructor(t *testing.T) { _ = NewCacheStore() }\n")
 
 	db, err := InitDB(t.TempDir())
 	if err != nil {
@@ -227,7 +227,7 @@ func TestFindAffectedTestsUsesDirectAndRelatedSignals(t *testing.T) {
 func TestIndexDirectoryStoresSymbolsAndRepoMap(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
-	writeTestFile(t, root, "pkg/cache_test.go", "package cache\n\nfunc TestConstructor(t *testing.T) { _ = NewCacheStore() }\n")
+	writeTestFile(t, root, "pkg/cache_test.go", "package cache\n\nimport \"testing\"\n\nfunc TestConstructor(t *testing.T) { _ = NewCacheStore() }\n")
 
 	db, err := InitDB(t.TempDir())
 	if err != nil {
@@ -275,6 +275,14 @@ func TestIndexDirectoryStoresSymbolsAndRepoMap(t *testing.T) {
 	}
 	if len(related) == 0 || related[0].Path != "pkg/cache_test.go" {
 		t.Fatalf("related files = %+v, want cache_test.go", related)
+	}
+
+	plan, err := BuildValidationPlan(db, []string{"pkg/cache.go"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.SuggestedCommands) == 0 || !strings.Contains(plan.SuggestedCommands[0].Command, "go test ./pkg") {
+		t.Fatalf("validation plan missing Go test command: %+v", plan.SuggestedCommands)
 	}
 }
 

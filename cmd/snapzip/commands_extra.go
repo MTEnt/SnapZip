@@ -291,22 +291,10 @@ func handleAffected() {
 	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
 	_ = fs.Parse(os.Args[2:])
 
-	var paths []string
-	if strings.TrimSpace(*pathInput) != "" {
-		paths = append(paths, strings.Split(*pathInput, ",")...)
-	}
-	if *changed || strings.TrimSpace(*since) != "" {
-		root, err := filepath.Abs(*dir)
-		if err != nil {
-			fmt.Printf("Affected lookup failed: %v\n", err)
-			os.Exit(1)
-		}
-		changedFiles, err := gitChangedFiles(root, strings.TrimSpace(*since))
-		if err != nil {
-			fmt.Printf("Affected lookup failed: %v\n", err)
-			os.Exit(1)
-		}
-		paths = append(paths, changedFiles...)
+	paths, err := resolveAffectedPaths(*pathInput, *changed, *since, *dir)
+	if err != nil {
+		fmt.Printf("Affected lookup failed: %v\n", err)
+		os.Exit(1)
 	}
 	if len(paths) == 0 {
 		fmt.Println("Error: provide --path or --changed/--since")
@@ -330,6 +318,105 @@ func handleAffected() {
 		return
 	}
 	fmt.Print(renderAffectedReport(report))
+}
+
+type validateCommandResult struct {
+	Command  string `json:"command"`
+	Dir      string `json:"dir"`
+	ExitCode int    `json:"exit_code"`
+	Passed   bool   `json:"passed"`
+	Output   string `json:"output"`
+}
+
+type validateReport struct {
+	Status string                 `json:"status"`
+	Dir    string                 `json:"dir"`
+	Plan   core.ValidationPlan    `json:"plan"`
+	Run    *validateCommandResult `json:"run,omitempty"`
+	Pack   *core.ContextPack      `json:"pack,omitempty"`
+}
+
+func handleValidate() {
+	fs := flag.NewFlagSet("validate", flag.ExitOnError)
+	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
+	pathInput := fs.String("path", "", "Comma-separated indexed source paths")
+	changed := fs.Bool("changed", false, "Use git changed files")
+	since := fs.String("since", "", "Use files changed since a git ref")
+	dir := fs.String("dir", ".", "Git and command working directory")
+	commandText := fs.String("cmd", "", "Optional validation command to run, such as 'go test ./...'")
+	query := fs.String("query", "", "Additional repair-pack search query when validation fails")
+	limit := fs.Int("limit", 10, "Maximum tests and related files to include")
+	budget := fs.Int("budget", core.DefaultContextPackBudgetBytes, "Approximate repair-pack byte budget")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
+	_ = fs.Parse(os.Args[2:])
+	if strings.TrimSpace(*commandText) == "" && fs.NArg() > 0 {
+		*commandText = strings.Join(fs.Args(), " ")
+	}
+
+	paths, err := resolveAffectedPaths(*pathInput, *changed, *since, *dir)
+	if err != nil {
+		fmt.Printf("Validate failed: %v\n", err)
+		os.Exit(1)
+	}
+	if len(paths) == 0 && strings.TrimSpace(*commandText) == "" {
+		fmt.Println("Error: provide --path, --changed/--since, or --cmd")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	db, err := openDBOrExit(*dbDir)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	plan, err := core.BuildValidationPlan(db, paths, *limit)
+	if err != nil {
+		fmt.Printf("Validate failed: %v\n", err)
+		os.Exit(1)
+	}
+	report := validateReport{
+		Status: "planned",
+		Dir:    *dir,
+		Plan:   plan,
+	}
+
+	if strings.TrimSpace(*commandText) != "" {
+		output, exitCode := runDiagnoseCommand(*commandText, *dir)
+		report.Run = &validateCommandResult{
+			Command:  *commandText,
+			Dir:      *dir,
+			ExitCode: exitCode,
+			Passed:   exitCode == 0,
+			Output:   output,
+		}
+		if exitCode == 0 {
+			report.Status = "passed"
+		} else {
+			report.Status = "failed"
+			comp, err := core.NewZstdCompressor(zstd.SpeedDefault)
+			if err != nil {
+				fmt.Printf("Error initializing compressor: %v\n", err)
+				os.Exit(1)
+			}
+			extraQuery := strings.TrimSpace(strings.Join(append([]string{*query}, plan.InputPaths...), " "))
+			pack, err := core.BuildRepairContextPack(db, comp, output, extraQuery, "debug", *limit, *budget, 5)
+			if err != nil {
+				fmt.Printf("Validate failed: %v\n", err)
+				os.Exit(1)
+			}
+			report.Pack = &pack
+		}
+	}
+
+	if *jsonOutput {
+		writeJSON(report)
+	} else {
+		fmt.Print(renderValidateReport(report))
+	}
+	if report.Run != nil && report.Run.ExitCode != 0 {
+		os.Exit(report.Run.ExitCode)
+	}
 }
 
 type diagnoseReport struct {
@@ -430,10 +517,15 @@ func handleAudit() {
 func renderAffectedReport(report core.AffectedReport) string {
 	var builder strings.Builder
 	builder.WriteString("# SnapZip Affected Tests\n\n")
+	renderAffectedReportBody(&builder, report)
+	return builder.String()
+}
+
+func renderAffectedReportBody(builder *strings.Builder, report core.AffectedReport) {
 	if len(report.InputPaths) > 0 {
 		builder.WriteString("Input paths:\n")
 		for _, path := range report.InputPaths {
-			fmt.Fprintf(&builder, "- %s\n", path)
+			fmt.Fprintf(builder, "- %s\n", path)
 		}
 	}
 	builder.WriteString("\n## Likely Tests\n")
@@ -441,30 +533,87 @@ func renderAffectedReport(report core.AffectedReport) string {
 		builder.WriteString("\nNo likely tests found in the current index.\n")
 	} else {
 		for _, test := range report.Tests {
-			fmt.Fprintf(&builder, "\n- %s", test.Path)
+			fmt.Fprintf(builder, "\n- %s", test.Path)
 			if test.Confidence > 0 {
-				fmt.Fprintf(&builder, " (confidence %.2f)", test.Confidence)
+				fmt.Fprintf(builder, " (confidence %.2f)", test.Confidence)
 			}
 			builder.WriteByte('\n')
 			for _, reason := range test.Reasons {
-				fmt.Fprintf(&builder, "  - %s\n", reason)
+				fmt.Fprintf(builder, "  - %s\n", reason)
 			}
 		}
 	}
 	if len(report.Related) > 0 {
 		builder.WriteString("\n## Related Files\n")
 		for _, file := range report.Related {
-			fmt.Fprintf(&builder, "\n- %s", file.Path)
+			fmt.Fprintf(builder, "\n- %s", file.Path)
 			if file.Confidence > 0 {
-				fmt.Fprintf(&builder, " (confidence %.2f)", file.Confidence)
+				fmt.Fprintf(builder, " (confidence %.2f)", file.Confidence)
 			}
 			builder.WriteByte('\n')
 			for _, reason := range file.Reasons {
-				fmt.Fprintf(&builder, "  - %s\n", reason)
+				fmt.Fprintf(builder, "  - %s\n", reason)
 			}
 		}
 	}
+}
+
+func renderValidateReport(report validateReport) string {
+	var builder strings.Builder
+	builder.WriteString("# SnapZip Validate\n\n")
+	fmt.Fprintf(&builder, "Status: %s\n", report.Status)
+	if report.Dir != "" {
+		fmt.Fprintf(&builder, "Directory: `%s`\n", report.Dir)
+	}
+
+	builder.WriteString("\n## Validation Plan\n")
+	renderAffectedReportBody(&builder, report.Plan.Affected)
+	builder.WriteString("\n## Suggested Commands\n")
+	if len(report.Plan.SuggestedCommands) == 0 {
+		builder.WriteString("\nNo validation command could be inferred from the current index.\n")
+	} else {
+		for _, command := range report.Plan.SuggestedCommands {
+			fmt.Fprintf(&builder, "\n- `%s` (confidence %.2f)\n", command.Command, command.Confidence)
+			if command.Reason != "" {
+				fmt.Fprintf(&builder, "  - %s\n", command.Reason)
+			}
+		}
+	}
+
+	if report.Run != nil {
+		builder.WriteString("\n## Command Result\n\n")
+		fmt.Fprintf(&builder, "Command: `%s`\n", report.Run.Command)
+		fmt.Fprintf(&builder, "Exit code: %d\n", report.Run.ExitCode)
+		if report.Run.Passed {
+			builder.WriteString("Status: passed\n")
+		} else {
+			builder.WriteString("Status: failed\n")
+		}
+	}
+	if report.Pack != nil {
+		builder.WriteString("\n## Repair Context\n\n")
+		builder.WriteString(core.RenderContextPack(*report.Pack))
+	}
 	return builder.String()
+}
+
+func resolveAffectedPaths(pathInput string, changed bool, since, dir string) ([]string, error) {
+	var paths []string
+	if strings.TrimSpace(pathInput) != "" {
+		paths = append(paths, strings.Split(pathInput, ",")...)
+	}
+	if changed || strings.TrimSpace(since) != "" {
+		root, err := filepath.Abs(dir)
+		if err != nil {
+			return nil, err
+		}
+		changedFiles, err := gitChangedFiles(root, strings.TrimSpace(since))
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, changedFiles...)
+	}
+	return uniqueTerms(paths), nil
 }
 
 func runDiagnoseCommand(commandText, dir string) (string, int) {
@@ -491,7 +640,7 @@ func runAudit(dbDir string) auditReport {
 	report.Checks = append(report.Checks, auditSecrets(dbDir))
 	report.Checks = append(report.Checks,
 		auditCheck{Name: "dependency dirs skipped", Passed: true, Details: "indexer skips .git, node_modules, vendor, dist, build, target, venv, .venv, and common generated directories"},
-		auditCheck{Name: "mcp write surface", Passed: true, Details: "MCP server exposes read-only search, context_pack, repair_pack, affected_tests, get_feedback, stats, map, symbols, symbol_context, and related tools"},
+		auditCheck{Name: "mcp write surface", Passed: true, Details: "MCP server exposes read-only search, context_pack, repair_pack, affected_tests, validation_plan, get_feedback, stats, map, symbols, symbol_context, and related tools"},
 	)
 	return report
 }
@@ -646,6 +795,7 @@ Use SnapZip when available. Run ` + "`snapzip stats --db-dir .`" + ` to check wh
 Before non-trivial code changes, run ` + "`snapzip pack --query \"<topic>\" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>`" + ` for targeted local context, receipts, and feedback memory.
 Use ` + "`snapzip symbol-context --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip symbols --query \"<symbol>\" --limit 10`" + `, or ` + "`snapzip map --limit 50`" + ` for structural context.
 Use ` + "`snapzip related --path <file>`" + ` and ` + "`snapzip affected --path <file>`" + ` to find related files and likely tests.
+Use ` + "`snapzip validate --path <file>`" + ` to plan validation, or ` + "`snapzip validate --changed --cmd \"<test command>\"`" + ` to run validation and get failure context.
 Use ` + "`snapzip repair-pack --error-file <test-output>`" + ` or ` + "`snapzip diagnose --cmd \"<test command>\"`" + ` after failing tests.
 Do not assume SnapZip memory exists on fresh installs; index first with ` + "`snapzip index --langs all --crawl .`" + ` when appropriate.
 `

@@ -164,7 +164,7 @@ func (s mcpServer) initializeResult(params json.RawMessage) map[string]any {
 			"version":     "0.1.0",
 			"description": "Local codebase memory and context packs for AI coding agents.",
 		},
-		"instructions": "Use SnapZip tools to search indexed local code, build bounded context and repair packs, inspect repo maps, symbols, symbol references, likely affected tests, feedback memory, and index stats. Tools are read-only.",
+		"instructions": "Use SnapZip tools to search indexed local code, build bounded context and repair packs, inspect repo maps, symbols, symbol references, likely affected tests, validation plans, feedback memory, and index stats. Tools are read-only.",
 	}
 }
 
@@ -226,6 +226,19 @@ func (s mcpServer) tools() []mcpTool {
 					"path":   stringSchema("Comma-separated indexed source paths, such as core/database.go."),
 					"db_dir": stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
 					"limit":  integerSchema("Maximum tests and related files to return.", 1, 100),
+				},
+			),
+		},
+		{
+			Name:        "validation_plan",
+			Title:       "Plan validation",
+			Description: "Return likely affected tests and suggested validation commands for named indexed source files without running commands.",
+			InputSchema: objectSchema(
+				[]string{"path"},
+				map[string]any{
+					"path":   stringSchema("Comma-separated indexed source paths, such as core/database.go."),
+					"db_dir": stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
+					"limit":  integerSchema("Maximum tests, related files, and commands to return.", 1, 100),
 				},
 			),
 		},
@@ -327,6 +340,8 @@ func (s mcpServer) callTool(params json.RawMessage) (mcpToolResult, *rpcError) {
 		return s.callRepairPack(call.Arguments), nil
 	case "affected_tests":
 		return s.callAffectedTests(call.Arguments), nil
+	case "validation_plan":
+		return s.callValidationPlan(call.Arguments), nil
 	case "map":
 		return s.callMap(call.Arguments), nil
 	case "symbols":
@@ -458,6 +473,39 @@ func (s mcpServer) callAffectedTests(args map[string]any) mcpToolResult {
 		return toolError(err.Error())
 	}
 	return toolSuccess(renderAffectedReport(report), report)
+}
+
+func (s mcpServer) callValidationPlan(args map[string]any) mcpToolResult {
+	path := strings.TrimSpace(stringArg(args, "path", ""))
+	if path == "" {
+		return toolError("path is required")
+	}
+	db, done, err := s.openDB(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	defer done()
+
+	plan, err := core.BuildValidationPlan(db, strings.Split(path, ","), intArg(args, "limit", 10))
+	if err != nil {
+		return toolError(err.Error())
+	}
+
+	var builder strings.Builder
+	builder.WriteString("# SnapZip Validation Plan\n\n")
+	renderAffectedReportBody(&builder, plan.Affected)
+	builder.WriteString("\n## Suggested Commands\n")
+	if len(plan.SuggestedCommands) == 0 {
+		builder.WriteString("\nNo validation command could be inferred from the current index.\n")
+	} else {
+		for _, command := range plan.SuggestedCommands {
+			fmt.Fprintf(&builder, "\n- `%s` (confidence %.2f)\n", command.Command, command.Confidence)
+			if command.Reason != "" {
+				fmt.Fprintf(&builder, "  - %s\n", command.Reason)
+			}
+		}
+	}
+	return toolSuccess(builder.String(), plan)
 }
 
 func (s mcpServer) callMap(args map[string]any) mcpToolResult {

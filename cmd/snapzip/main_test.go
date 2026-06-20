@@ -150,6 +150,7 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"repair_pack","arguments":{"error_output":"lib/cache.rb:1: uninitialized constant CacheStore","limit":2,"budget":4096}}}`,
 		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"affected_tests","arguments":{"path":"lib/cache.rb","limit":5}}}`,
 		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"symbol_context","arguments":{"query":"build_cache","limit":5}}}`,
+		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"validation_plan","arguments":{"path":"lib/cache.rb","limit":5}}}`,
 	}, "\n") + "\n"
 
 	var output bytes.Buffer
@@ -158,10 +159,10 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 7 {
-		t.Fatalf("got %d MCP responses, want 7:\n%s", len(lines), output.String())
+	if len(lines) != 8 {
+		t.Fatalf("got %d MCP responses, want 8:\n%s", len(lines), output.String())
 	}
-	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) || !strings.Contains(lines[1], `"symbol_context"`) {
+	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) || !strings.Contains(lines[1], `"symbol_context"`) || !strings.Contains(lines[1], `"validation_plan"`) {
 		t.Fatalf("tools/list did not expose expected tools:\n%s", lines[1])
 	}
 	if !strings.Contains(lines[2], "CacheStore") {
@@ -179,6 +180,9 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	if !strings.Contains(lines[6], "SnapZip Symbol Context") || !strings.Contains(lines[6], "test/cache_test.rb") {
 		t.Fatalf("symbol_context tool response missing reference context:\n%s", lines[6])
 	}
+	if !strings.Contains(lines[7], "SnapZip Validation Plan") || !strings.Contains(lines[7], "bundle exec rake test") {
+		t.Fatalf("validation_plan tool response missing suggested validation:\n%s", lines[7])
+	}
 }
 
 func TestCLIAdvancedContextCommands(t *testing.T) {
@@ -188,8 +192,9 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 	}
 
 	fixture := t.TempDir()
+	writeCLIFile(t, fixture, "go.mod", "module snapzipfixture\n\ngo 1.25\n")
 	writeCLIFile(t, fixture, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
-	writeCLIFile(t, fixture, "pkg/cache_test.go", "package cache\n\nfunc TestConstructor() { _ = NewCacheStore() }\n")
+	writeCLIFile(t, fixture, "pkg/cache_test.go", "package cache\n\nimport \"testing\"\n\nfunc TestConstructor(t *testing.T) { _ = NewCacheStore() }\n")
 
 	dbDir := t.TempDir()
 	runSnapZip(t, repoRoot,
@@ -217,6 +222,16 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 	relatedOutput := runSnapZip(t, repoRoot, "related", "--db-dir", dbDir, "--path", "pkg/cache.go", "--limit", "5")
 	if !strings.Contains(relatedOutput, "pkg/cache_test.go") {
 		t.Fatalf("related output missing test file:\n%s", relatedOutput)
+	}
+
+	validatePlanOutput := runSnapZip(t, repoRoot, "validate", "--db-dir", dbDir, "--path", "pkg/cache.go", "--limit", "5")
+	if !strings.Contains(validatePlanOutput, "# SnapZip Validate") || !strings.Contains(validatePlanOutput, "pkg/cache_test.go") || !strings.Contains(validatePlanOutput, "go test ./pkg") {
+		t.Fatalf("validate plan output missing affected test or command:\n%s", validatePlanOutput)
+	}
+
+	validateRunOutput := runSnapZip(t, repoRoot, "validate", "--db-dir", dbDir, "--path", "pkg/cache.go", "--cmd", "go test ./...", "--dir", fixture, "--limit", "5")
+	if !strings.Contains(validateRunOutput, "Status: passed") || !strings.Contains(validateRunOutput, "Exit code: 0") {
+		t.Fatalf("validate run output missing passing command result:\n%s", validateRunOutput)
 	}
 
 	packOutput := runSnapZip(t, repoRoot, "pack", "--db-dir", dbDir, "--query", "CacheStore", "--mode", "test", "--limit", "3", "--budget", "4096")
