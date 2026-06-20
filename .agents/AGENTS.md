@@ -3,7 +3,7 @@
 ## Memory & Negative Feedback Invariant
 Whenever you start a task in this workspace, you MUST run the following command to retrieve recent user frustrations, failures, and negative feedback from the database:
 ```bash
-/Users/MTEnt/Documents/snapzip/snapzip get-feedback --limit 10
+./snapzip get-feedback --limit 10
 ```
 
 ### Guidance:

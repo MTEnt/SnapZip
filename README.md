@@ -153,7 +153,7 @@ To configure your development tools to use SnapZip automatically when you prompt
 *   **Configuration**:
     ```json
     {
-      "customRules": "Use SnapZip (/Users/MTEnt/Documents/snapzip/snapzip) as your local codebase co-processor. When asked to write or search code, run local search and MCMC compiler check subcommands by default."
+      "customRules": "Use SnapZip (./snapzip) as your local codebase co-processor. When asked to write or search code, run local search and MCMC compiler check subcommands by default."
     }
     ```
 
@@ -163,8 +163,8 @@ To configure your development tools to use SnapZip automatically when you prompt
     ```markdown
     # SnapZip Coprocessor Rule
     Whenever you search the codebase, write algorithms, or perform compile checks:
-    1. Retrieve reference code templates using: `/Users/MTEnt/Documents/snapzip/snapzip search --query "<keyword>"`
-    2. Optimize and verify syntax using: `/Users/MTEnt/Documents/snapzip/snapzip optimize --sketch <draft> --context <context> --output <final>`
+    1. Retrieve reference code templates using: `./snapzip search --query "<keyword>"`
+    2. Optimize and verify syntax using: `./snapzip optimize --sketch <draft> --context <context> --output <final>`
     ```
 
 ### 4. Aider CLI
@@ -172,20 +172,20 @@ To configure your development tools to use SnapZip automatically when you prompt
 *   **Configuration**:
     ```markdown
     # SnapZip Integration
-    - Run `/Users/MTEnt/Documents/snapzip/snapzip search` to retrieve codebase context rather than scanning whole files.
-    - Prior to writing files, run `/Users/MTEnt/Documents/snapzip/snapzip optimize` to verify local compile correctness.
+    - Run `./snapzip search` to retrieve codebase context rather than scanning whole files.
+    - Prior to writing files, run `./snapzip optimize` to verify local compile correctness.
     ```
 
 ### 5. Open Interpreter
 *   **Integration**: Launch with custom system instructions:
     ```bash
-    interpreter --system_message "Use SnapZip (/Users/MTEnt/Documents/snapzip/snapzip) as your local codebase co-processor. Query context using the search subcommand, and optimize syntax drafts locally before saving."
+    interpreter --system_message "Use SnapZip (./snapzip) as your local codebase co-processor. Query context using the search subcommand, and optimize syntax drafts locally before saving."
     ```
 
 ### 6. SWE-agent
 *   **Integration**: Append the SnapZip rule to your custom system instruction text profile (`config/default_sys_instructions.txt`):
     ```text
-    - Always use the SnapZip binary at `/Users/MTEnt/Documents/snapzip/snapzip` to search internal files and verify syntax correctness during repository execution tasks.
+    - Always use the SnapZip binary at `./snapzip` to search internal files and verify syntax correctness during repository execution tasks.
     ```
 
 ---
@@ -207,7 +207,7 @@ On a **MacBook M5 Max (18 Physical Cores)**:
 
 ## 📈 20-Task Suite Benchmark Case Study
 
-We evaluated SnapZip against a raw zero-shot AI solver on a suite of **20 challenging Python algorithms** (including dynamic programming, graph search, self-balancing data structures, custom parsers, and pathfinders) in the [snapzip_benchmark/](file:///Users/MTEnt/Documents/snapzip_benchmark) sandbox.
+We evaluated SnapZip against a raw zero-shot AI solver on a suite of **20 challenging Python algorithms** (including dynamic programming, graph search, self-balancing data structures, custom parsers, and pathfinders) in the [snapzip_benchmark/](../snapzip_benchmark/) sandbox.
 
 ### Results
 *   **Raw AI Solver (Zero-shot)**: **19 / 20 (95.0%)** pass rate. Wrote standard code but failed Task 7 (Red-Black Tree) by omitting balancing rotations and color rules, causing structural invariant assertions to fail. It also used standard libraries (like generic JSON dumping) instead of codebase-native serialization conventions.

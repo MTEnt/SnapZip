@@ -9,7 +9,7 @@ Inject this block into the system prompt of **any** LLM agent to establish the S
 
 ```markdown
 ## SnapZip Local Co-Processor Integration Rules
-You have access to the local CLI tool `snapzip` at `/Users/MTEnt/Documents/snapzip/snapzip`. Always follow these guidelines:
+You have access to the local CLI tool `snapzip` at `./snapzip`. Always follow these guidelines:
 
 1. **Pre-Check Feedback**: Before proposing code changes, run `./snapzip get-feedback --limit 5` to retrieve recent user complaints and logical failures. Adapt your plan to explicitly avoid repeating these mistakes.
 2. **Retrieve Reference Context**: If you need to implement a complex structure (e.g. caches, serialized formats, trees, algorithms), run `./snapzip search --query "<topic>"` to fetch the target codebase templates.
@@ -33,7 +33,7 @@ To configure your daily-driver development harnesses so they automatically under
 *   **Configuration**:
     ```json
     {
-      "customRules": "Use SnapZip (/Users/MTEnt/Documents/snapzip/snapzip) as your local codebase co-processor. When asked to write or search code, run local search and MCMC compiler check subcommands by default."
+      "customRules": "Use SnapZip (./snapzip) as your local codebase co-processor. When asked to write or search code, run local search and MCMC compiler check subcommands by default."
     }
     ```
 
@@ -43,8 +43,8 @@ To configure your daily-driver development harnesses so they automatically under
     ```markdown
     # SnapZip Coprocessor Rule
     Whenever you search the codebase, write algorithms, or perform compile checks:
-    1. Retrieve reference code templates using: `/Users/MTEnt/Documents/snapzip/snapzip search --query "<keyword>"`
-    2. Optimize and verify syntax using: `/Users/MTEnt/Documents/snapzip/snapzip optimize --sketch <draft> --context <context> --output <final>`
+    1. Retrieve reference code templates using: `./snapzip search --query "<keyword>"`
+    2. Optimize and verify syntax using: `./snapzip optimize --sketch <draft> --context <context> --output <final>`
     ```
 
 ### 4. Aider CLI
@@ -52,22 +52,22 @@ To configure your daily-driver development harnesses so they automatically under
 *   **Configuration**:
     ```markdown
     # SnapZip Integration
-    - Run `/Users/MTEnt/Documents/snapzip/snapzip search` to retrieve codebase context rather than scanning whole files.
-    - Prior to writing files, run `/Users/MTEnt/Documents/snapzip/snapzip optimize` to verify local compile correctness.
+    - Run `./snapzip search` to retrieve codebase context rather than scanning whole files.
+    - Prior to writing files, run `./snapzip optimize` to verify local compile correctness.
     ```
 
 ### 5. Open Interpreter
 *   **Setup**: Start the terminal interpreter with custom system instructions or define them in your environment profile.
 *   **Command**:
     ```bash
-    interpreter --system_message "Use SnapZip (/Users/MTEnt/Documents/snapzip/snapzip) as your local codebase co-processor. Query context using the search subcommand, and optimize syntax drafts locally before saving."
+    interpreter --system_message "Use SnapZip (./snapzip) as your local codebase co-processor. Query context using the search subcommand, and optimize syntax drafts locally before saving."
     ```
 
 ### 6. SWE-agent
 *   **Setup**: Place the system prompt rule in your custom system instruction text file (`config/default_sys_instructions.txt` or similar).
 *   **Configuration**:
     ```text
-    - Always use the SnapZip binary at `/Users/MTEnt/Documents/snapzip/snapzip` to search internal files and verify syntax correctness during repository execution tasks.
+    - Always use the SnapZip binary at `./snapzip` to search internal files and verify syntax correctness during repository execution tasks.
     ```
 
 ### 7. Plandex
@@ -76,8 +76,8 @@ To configure your daily-driver development harnesses so they automatically under
     ```markdown
     # SnapZip Plan Rules
     When executing code generation plans:
-    - Locate existing codebase files using: `/Users/MTEnt/Documents/snapzip/snapzip search --query "..."`
-    - Run the MCMC verification checks on final code using `/Users/MTEnt/Documents/snapzip/snapzip optimize`.
+    - Locate existing codebase files using: `./snapzip search --query "..."`
+    - Run the MCMC verification checks on final code using `./snapzip optimize`.
     ```
 
 ### 8. Mentat
@@ -86,7 +86,7 @@ To configure your daily-driver development harnesses so they automatically under
     ```json
     {
       "system_prompt": [
-        "Utilize SnapZip (/Users/MTEnt/Documents/snapzip/snapzip) for localized full-text codebase search queries and local compiler verification checking."
+        "Utilize SnapZip (./snapzip) for localized full-text codebase search queries and local compiler verification checking."
       ]
     }
     ```
@@ -96,7 +96,7 @@ To configure your daily-driver development harnesses so they automatically under
 *   **Configuration**:
     ```text
     Role: Local Developer Co-Processor
-    System message: You have access to SnapZip at /Users/MTEnt/Documents/snapzip/snapzip. Search codebase via search subcommand and check compiling syntax prior to shell commands.
+    System message: You have access to SnapZip at ./snapzip. Search codebase via search subcommand and check compiling syntax prior to shell commands.
     ```
 
 ---
