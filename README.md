@@ -378,6 +378,45 @@ Use SnapZip when available. Before non-trivial code changes, run `snapzip pack -
 
 Use [LLM_INSTRUCTIONS.md](LLM_INSTRUCTIONS.md) as a portable rule template for other agents and editor integrations.
 
+### GitHub Action
+SnapZip also ships a composite GitHub Action that builds the CLI from this repository, indexes the checked-out project, runs `snapzip pr`, writes Markdown and JSON reports, and appends the Markdown report to the workflow summary. The action itself uses shell and Go rather than a Node runtime.
+
+```yaml
+name: SnapZip PR Context
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  snapzip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - id: snapzip
+        uses: MTEnt/SnapZip@main
+        with:
+          base: ${{ github.event.pull_request.base.sha }}
+          langs: all
+          limit: "10"
+          budget: "16000"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: snapzip-pr-context
+          path: |
+            ${{ steps.snapzip.outputs.report_path }}
+            ${{ steps.snapzip.outputs.json_path }}
+```
+
+Use `MTEnt/SnapZip@main` for the current development action, then pin to a release tag after publishing a tagged release.
+
 ---
 
 ## Benchmarking Performance

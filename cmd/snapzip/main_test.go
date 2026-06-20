@@ -394,6 +394,57 @@ func TestIndexChangedIncludesUntrackedFiles(t *testing.T) {
 	}
 }
 
+func TestRepositoryGitHubActionArtifacts(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	action := readRepoFile(t, repoRoot, "action.yml")
+	for _, want := range []string{
+		"using: composite",
+		"cd \"${GITHUB_ACTION_PATH}\"",
+		"go build -o",
+		"snapzip index --reset",
+		"pr_args=(pr",
+		"report_path=",
+		"json_path=",
+	} {
+		if !strings.Contains(action, want) {
+			t.Fatalf("action.yml missing %q:\n%s", want, action)
+		}
+	}
+
+	workflow := readRepoFile(t, repoRoot, ".github/workflows/snapzip-pr-context.yml")
+	for _, want := range []string{
+		"actions/checkout@v7",
+		"actions/setup-go@v6",
+		"uses: ./",
+		"actions/upload-artifact@v7",
+		"steps.snapzip.outputs.report_path",
+		"steps.snapzip.outputs.json_path",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Fatalf("snapzip-pr-context workflow missing %q:\n%s", want, workflow)
+		}
+	}
+	if strings.Contains(workflow, "outputs.report-path") || strings.Contains(workflow, "node20") {
+		t.Fatalf("snapzip-pr-context workflow contains stale output or runtime reference:\n%s", workflow)
+	}
+
+	readme := readRepoFile(t, repoRoot, "README.md")
+	for _, want := range []string{
+		"### GitHub Action",
+		"MTEnt/SnapZip@main",
+		"steps.snapzip.outputs.report_path",
+		"steps.snapzip.outputs.json_path",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing GitHub Action guidance %q", want)
+		}
+	}
+}
+
 func runSnapZip(t *testing.T, repoRoot string, args ...string) string {
 	t.Helper()
 	cmdArgs := append([]string{"run", "./cmd/snapzip"}, args...)
@@ -404,6 +455,15 @@ func runSnapZip(t *testing.T, repoRoot string, args ...string) string {
 		t.Fatalf("snapzip %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
 	}
 	return string(output)
+}
+
+func readRepoFile(t *testing.T, repoRoot, name string) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(repoRoot, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
 }
 
 func writeCLIFile(t *testing.T, root, name, content string) {

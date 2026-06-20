@@ -1,0 +1,44 @@
+name: SnapZip PR Context
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  review-context:
+    name: Build review context
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build SnapZip PR context
+        id: snapzip
+        uses: ./
+        with:
+          db-dir: .snapzip-ci
+          langs: all
+          base: ${{ github.event.pull_request.base.sha }}
+          limit: "10"
+          budget: "16000"
+
+      - name: Upload SnapZip reports
+        uses: actions/upload-artifact@v7
+        with:
+          name: snapzip-pr-context
+          path: |
+            ${{ steps.snapzip.outputs.report_path }}
+            ${{ steps.snapzip.outputs.json_path }}
+          if-no-files-found: error

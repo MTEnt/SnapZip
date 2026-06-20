@@ -1,0 +1,121 @@
+name: SnapZip PR Context
+description: Build local SnapZip review context for changed files in GitHub Actions.
+author: MTEnt
+
+inputs:
+  db-dir:
+    description: Directory for the temporary SnapZip memory database.
+    required: false
+    default: .snapzip-ci
+  langs:
+    description: Language filter passed to snapzip index.
+    required: false
+    default: all
+  crawl:
+    description: Directory to index, relative to the checked-out workspace.
+    required: false
+    default: .
+  base:
+    description: Git base ref or SHA for snapzip pr --base. Defaults to the pull request base branch when available.
+    required: false
+    default: ""
+  changed:
+    description: Use snapzip pr --changed instead of --base.
+    required: false
+    default: "false"
+  query:
+    description: Optional extra review context query.
+    required: false
+    default: ""
+  limit:
+    description: Maximum affected files and context snippets to include.
+    required: false
+    default: "10"
+  budget:
+    description: Approximate byte budget for rendered review context.
+    required: false
+    default: "16000"
+  report-path:
+    description: Markdown report path written by the action.
+    required: false
+    default: .snapzip-pr-context.md
+  json-path:
+    description: JSON report path written by the action.
+    required: false
+    default: .snapzip-pr-context.json
+
+outputs:
+  report_path:
+    description: Path to the rendered Markdown PR context report.
+    value: ${{ steps.run.outputs.report_path }}
+  json_path:
+    description: Path to the structured JSON PR context report.
+    value: ${{ steps.run.outputs.json_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build SnapZip
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v go >/dev/null 2>&1; then
+          echo "Go is required. Add actions/setup-go before MTEnt/SnapZip." >&2
+          exit 1
+        fi
+        mkdir -p "${RUNNER_TEMP}/snapzip-action"
+        (
+          cd "${GITHUB_ACTION_PATH}"
+          go build -o "${RUNNER_TEMP}/snapzip-action/snapzip" ./cmd/snapzip
+        )
+        echo "${RUNNER_TEMP}/snapzip-action" >> "${GITHUB_PATH}"
+
+    - name: Build PR context
+      id: run
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "${GITHUB_WORKSPACE}"
+
+        db_dir="${{ inputs.db-dir }}"
+        langs="${{ inputs.langs }}"
+        crawl="${{ inputs.crawl }}"
+        base="${{ inputs.base }}"
+        changed="${{ inputs.changed }}"
+        query="${{ inputs.query }}"
+        limit="${{ inputs.limit }}"
+        budget="${{ inputs.budget }}"
+        report_path="${{ inputs.report-path }}"
+        json_path="${{ inputs.json-path }}"
+
+        mkdir -p "${db_dir}" "$(dirname "${report_path}")" "$(dirname "${json_path}")"
+        snapzip index --reset --db-dir "${db_dir}" --langs "${langs}" --crawl "${crawl}"
+
+        pr_args=(pr --db-dir "${db_dir}" --dir . --limit "${limit}" --budget "${budget}")
+        if [[ -n "${query}" ]]; then
+          pr_args+=(--query "${query}")
+        fi
+        if [[ "${changed}" == "true" ]]; then
+          pr_args+=(--changed)
+        else
+          if [[ -z "${base}" ]]; then
+            if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+              git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}"
+              base="origin/${GITHUB_BASE_REF}"
+            else
+              base="HEAD~1"
+            fi
+          fi
+          pr_args+=(--base "${base}")
+        fi
+
+        snapzip "${pr_args[@]}" > "${report_path}"
+        snapzip "${pr_args[@]}" --json > "${json_path}"
+        {
+          echo "report_path=${report_path}"
+          echo "json_path=${json_path}"
+        } >> "${GITHUB_OUTPUT}"
+
+        if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+          cat "${report_path}" >> "${GITHUB_STEP_SUMMARY}"
+        fi

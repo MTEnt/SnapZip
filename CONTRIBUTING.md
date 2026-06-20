@@ -37,4 +37,5 @@ go install golang.org/x/vuln/cmd/govulncheck@latest
 - Do not commit generated `memory.db` files, benchmark work directories, local sketches, or built binaries.
 - Add or update tests for behavior changes.
 - Keep CLI changes reflected in `README.md` and `LLM_INSTRUCTIONS.md` when agent usage changes.
+- Keep `action.yml` and `.github/workflows/snapzip-pr-context.yml` aligned when PR-context automation changes.
 - Prefer simple, explicit Go over clever abstractions.
