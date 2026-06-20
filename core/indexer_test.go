@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -54,6 +55,65 @@ func TestIndexDirectoryUsesLanguageAliasesAndRelativeTopics(t *testing.T) {
 	}
 	if results[0].Topic != "Source file: pkg/cache.py" {
 		t.Fatalf("got topic %q", results[0].Topic)
+	}
+}
+
+func TestIndexDirectorySkipsGeneratedLargeAndBinaryFiles(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "pkg/cache.py", "class BoundedCache:\n    pass\n")
+	writeTestFile(t, root, "node_modules/package/ignored.py", "class ShouldNotIndex:\n    pass\n")
+	writeTestFile(t, root, "pkg/large.py", strings.Repeat("x", int(DefaultMaxIndexFileBytes)+1))
+	writeTestFile(t, root, "pkg/binary.py", "valid text\x00binary tail")
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	count, err := IndexDirectory(db, root, NewLanguageFilter("python"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("indexed %d files, want 1", count)
+	}
+
+	stats, err := GetDatabaseStats(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.KnowledgeRows != 1 {
+		t.Fatalf("stored %d knowledge rows, want 1", stats.KnowledgeRows)
+	}
+}
+
+func TestIndexDirectoryUpdatesExistingRows(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "pkg/cache.py", "class BoundedCache:\n    pass\n")
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for i := 0; i < 2; i++ {
+		count, err := IndexDirectory(db, root, NewLanguageFilter("python"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("indexed %d files on pass %d, want 1", count, i+1)
+		}
+	}
+
+	stats, err := GetDatabaseStats(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.KnowledgeRows != 1 {
+		t.Fatalf("stored %d knowledge rows after duplicate indexing, want 1", stats.KnowledgeRows)
 	}
 }
 

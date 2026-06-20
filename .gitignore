@@ -3,6 +3,8 @@
 snapzip_temp_*
 sketch_*
 optimized_*.py
+/dist/
+/package/
 
 # Database files
 *.db
@@ -14,3 +16,7 @@ memory.db
 # Python caches
 __pycache__/
 *.pyc
+
+# Benchmark output
+/benchmarks/.work/
+*.benchmark.json

@@ -72,6 +72,7 @@ $$\Delta C = [C_{dict}(X') + \beta L_{prior}(X')] - [C_{dict}(X) + \beta L_{prio
 snapzip/
 |-- core/               # Go backend library (Zstd compression, SQLite indexing, MCMC loop)
 |-- cmd/snapzip/        # CLI interface parsing and command routing
+|-- benchmarks/         # Reproducible raw vs SnapZip benchmark harnesses
 |-- vis/                # Python sidecar for visual segment contouring
 |-- assets/             # Branding logo and graphics
 `-- examples/           # Developer templates and benchmarks
@@ -117,6 +118,14 @@ Index codebase files under a target directory, filtering by language name or ext
 
 `--langs` accepts presets (`popular`, `web`, `frontend`, `backend`, `mobile`, `systems`, `config`), extensions (`html,css,rb,py,js,rs,zig`), and language names (`ruby,python,javascript,rust`). Use `all` or `any` to index the full default source-code set. Explicit extensions are accepted even when they are not part of the default common-language list.
 
+Use `--reset` to remove an existing `memory.db` before indexing a fresh project:
+
+```bash
+./snapzip init-db --db-dir . --langs popular --crawl /path/to/your/codebase --reset
+```
+
+The indexer skips common dependency/build directories such as `.git`, `node_modules`, `vendor`, `dist`, `build`, `target`, `.venv`, and `__pycache__`. It also skips `memory.db`, binary-looking files, and files larger than 1 MiB by default. Override the file cap with `--max-file-bytes`.
+
 Common default formats include:
 
 ```text
@@ -133,7 +142,13 @@ Search templates using keyword matching and parallel compression distance:
 ./snapzip search --query "python lru cache" --limit 3
 ```
 
-### C. Optimize a Code Sketch
+### C. Inspect Database Stats
+Show indexed row counts and language breakdown:
+```bash
+./snapzip stats --db-dir .
+```
+
+### D. Optimize a Code Sketch
 Run the Metropolis-Hastings MCMC optimizer over a draft to align it with local codebase styles:
 ```bash
 ./snapzip optimize \
@@ -144,7 +159,7 @@ Run the Metropolis-Hastings MCMC optimizer over a draft to align it with local c
   --temp 0.15
 ```
 
-### D. Log & Query Negative Feedback Memory
+### E. Log & Query Negative Feedback Memory
 SnapZip automatically logs complaints when negative sentiment is parsed, but you can also interact with feedback manually:
 *   **Log feedback**:
     ```bash
@@ -171,20 +186,38 @@ Use [LLM_INSTRUCTIONS.md](LLM_INSTRUCTIONS.md) as a portable rule template for o
 
 ## Benchmarking Performance
 
-To measure SnapZip's evaluation throughput on your own machine, run the Go parallel benchmarks:
+Build the CLI and run the reproducible benchmark runner:
 ```bash
-cd SnapZip/examples
-go test -bench=BenchmarkBCACompress -benchtime=5s
+go build -o snapzip ./cmd/snapzip
+python3 benchmarks/run.py --suite smoke --snapzip-bin ./snapzip
 ```
 
-Performance depends on CPU, Go version, and dictionary size. Use the benchmark command above on your own machine for publishable numbers.
+Run the full 20-task algorithm suite:
+```bash
+python3 benchmarks/run.py --suite algorithm-20 --snapzip-bin ./snapzip
+```
+
+Run all benchmark suites and write a JSON report:
+```bash
+python3 benchmarks/run.py --suite all --snapzip-bin ./snapzip --json /tmp/snapzip-benchmark.json
+```
+
+For low-level compression throughput, run the Go benchmarks:
+```bash
+go test -bench=BenchmarkBCACompress -benchtime=5s ./examples
+```
+
+Performance depends on CPU, Go version, dictionary size, and installed local language tools. Publish benchmark results with the exact command, SnapZip commit, machine details, and JSON report.
 
 ---
 
 ## Contributing
-SnapZip is open-source and welcomes contributions! Feel free to:
-1. Open issues describing bugs or requested integrations.
-2. Submit PRs for core performance improvements or new language compilers.
+SnapZip is open-source and welcomes contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and pull request expectations.
+
+---
+
+## Security
+Please report suspected vulnerabilities privately. See [SECURITY.md](SECURITY.md).
 
 ---
 

@@ -26,6 +26,8 @@ func main() {
 		handleSearch()
 	case "optimize":
 		handleOptimize()
+	case "stats":
+		handleStats()
 	case "log-feedback":
 		handleLogFeedback()
 	case "get-feedback":
@@ -43,6 +45,7 @@ func printUsage() {
 	fmt.Println("  init-db        Initialize the local memory database and index project directories")
 	fmt.Println("  search         Search template database using Hybrid FTS5+QND ranking")
 	fmt.Println("  optimize       Refine code sketches using Bayesian Zstd MCMC")
+	fmt.Println("  stats          Show indexed row counts and language breakdown")
 	fmt.Println("  log-feedback   Log negative user feedback to database")
 	fmt.Println("  get-feedback   Retrieve recent negative feedback entries to guide LLM")
 }
@@ -52,6 +55,8 @@ func handleInitDB() {
 	dbDir := fs.String("db-dir", ".", "Directory to store memory.db")
 	langs := fs.String("langs", "", "Comma-separated language names/extensions to index, or all/any")
 	crawl := fs.String("crawl", "", "Codebase directory to crawl and index")
+	reset := fs.Bool("reset", false, "Remove any existing memory.db before initializing")
+	maxFileBytes := fs.Int64("max-file-bytes", core.DefaultMaxIndexFileBytes, "Maximum individual source file size to index")
 	_ = fs.Parse(os.Args[2:])
 	langsProvided := flagWasProvided(fs, "langs")
 	crawlProvided := flagWasProvided(fs, "crawl")
@@ -86,6 +91,13 @@ func handleInitDB() {
 	}
 	langFilter := core.NewLanguageFilter(langInput)
 
+	if *reset {
+		if err := core.ResetDB(*dbDir); err != nil {
+			fmt.Printf("Error resetting DB: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	// Initialize the Database
 	db, err := core.InitDB(*dbDir)
 	if err != nil {
@@ -100,7 +112,9 @@ func handleInitDB() {
 	// Crawl and index codebase files immediately if requested
 	if codebasePath != "" {
 		fmt.Printf("\nIndexing files under: %s...\n", codebasePath)
-		fileCount, err := core.IndexDirectory(db, codebasePath, langFilter)
+		options := core.DefaultIndexOptions()
+		options.MaxFileBytes = *maxFileBytes
+		fileCount, err := core.IndexDirectoryWithOptions(db, codebasePath, langFilter, options)
 
 		if err != nil {
 			fmt.Printf("Error indexing codebase files: %v\n", err)
@@ -241,6 +255,36 @@ func handleOptimize() {
 	}
 
 	fmt.Printf("Success: Optimized code saved to %s\n", *outputFile)
+}
+
+func handleStats() {
+	fs := flag.NewFlagSet("stats", flag.ExitOnError)
+	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
+	_ = fs.Parse(os.Args[2:])
+
+	db, err := core.InitDB(*dbDir)
+	if err != nil {
+		fmt.Printf("Error opening DB: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	stats, err := core.GetDatabaseStats(db)
+	if err != nil {
+		fmt.Printf("Error reading stats: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("knowledge rows: %d\n", stats.KnowledgeRows)
+	fmt.Printf("feedback rows: %d\n", stats.FeedbackRows)
+	if len(stats.Languages) == 0 {
+		fmt.Println("languages: none")
+		return
+	}
+	fmt.Println("languages:")
+	for _, lang := range stats.Languages {
+		fmt.Printf("  %s: %d\n", lang.Language, lang.Count)
+	}
 }
 
 func handleLogFeedback() {

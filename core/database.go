@@ -2,6 +2,7 @@ package core
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,13 +21,34 @@ type Snippet struct {
 
 var DBPath string
 
+func DBFilePath(dir string) string {
+	return filepath.Join(dir, "memory.db")
+}
+
+func ResetDB(dir string) error {
+	path := DBFilePath(dir)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // InitDB sets up the main SQLite database and virtual FTS5 index tables
 func InitDB(dir string) (*sql.DB, error) {
-	DBPath = filepath.Join(dir, "memory.db")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+	DBPath = DBFilePath(dir)
 	db, err := sql.Open("sqlite", DBPath)
 	if err != nil {
 		return nil, err
 	}
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = db.Close()
+		}
+	}()
 
 	// Create real knowledge table
 	_, err = db.Exec(`
@@ -64,6 +86,11 @@ func InitDB(dir string) (*sql.DB, error) {
 		return nil, err
 	}
 
+	if err := migrateKnowledgeIndex(db); err != nil {
+		return nil, err
+	}
+
+	initialized = true
 	return db, nil
 }
 
@@ -76,20 +103,29 @@ func AddKnowledge(db *sql.DB, language, topic, content string) error {
 	}
 	defer tx.Rollback()
 
-	res, err := tx.Exec(
-		"INSERT INTO knowledge (language, topic, content) VALUES (?, ?, ?)",
+	_, err = tx.Exec(`
+		INSERT INTO knowledge (language, topic, content)
+		VALUES (?, ?, ?)
+		ON CONFLICT(language, topic) DO UPDATE SET
+			content = excluded.content,
+			created_at = CURRENT_TIMESTAMP`,
 		language, topic, content,
 	)
 	if err != nil {
 		return err
 	}
 
-	rowID, err := res.LastInsertId()
-	if err != nil {
+	var rowID int64
+	if err := tx.QueryRow(
+		"SELECT id FROM knowledge WHERE language = ? AND topic = ?",
+		language, topic,
+	).Scan(&rowID); err != nil {
 		return err
 	}
 
-	// Index in FTS5
+	if _, err = tx.Exec("DELETE FROM knowledge_fts WHERE rowid = ?", rowID); err != nil {
+		return err
+	}
 	_, err = tx.Exec(
 		"INSERT INTO knowledge_fts (rowid, topic, content) VALUES (?, ?, ?)",
 		rowID, topic, content,
@@ -99,6 +135,73 @@ func AddKnowledge(db *sql.DB, language, topic, content string) error {
 	}
 
 	return tx.Commit()
+}
+
+type DatabaseStats struct {
+	KnowledgeRows int
+	FeedbackRows  int
+	Languages     []LanguageStat
+}
+
+type LanguageStat struct {
+	Language string
+	Count    int
+}
+
+func GetDatabaseStats(db *sql.DB) (DatabaseStats, error) {
+	var stats DatabaseStats
+	if err := db.QueryRow("SELECT COUNT(*) FROM knowledge").Scan(&stats.KnowledgeRows); err != nil {
+		return stats, err
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM negative_feedback").Scan(&stats.FeedbackRows); err != nil {
+		return stats, err
+	}
+
+	rows, err := db.Query(`
+		SELECT language, COUNT(*)
+		FROM knowledge
+		GROUP BY language
+		ORDER BY COUNT(*) DESC, language ASC`)
+	if err != nil {
+		return stats, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var lang LanguageStat
+		if err := rows.Scan(&lang.Language, &lang.Count); err != nil {
+			return stats, err
+		}
+		stats.Languages = append(stats.Languages, lang)
+	}
+	if err := rows.Err(); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+func migrateKnowledgeIndex(db *sql.DB) error {
+	if _, err := db.Exec(`
+		DELETE FROM knowledge
+		WHERE id NOT IN (
+			SELECT MAX(id)
+			FROM knowledge
+			GROUP BY language, topic
+		);`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS knowledge_language_topic_idx
+		ON knowledge(language, topic);`); err != nil {
+		return err
+	}
+	if _, err := db.Exec("DELETE FROM knowledge_fts;"); err != nil {
+		return err
+	}
+	_, err := db.Exec(`
+		INSERT INTO knowledge_fts(rowid, topic, content)
+		SELECT id, topic, content FROM knowledge;`)
+	return err
 }
 
 // DetectLanguage parses terms in a query to find the target programming language

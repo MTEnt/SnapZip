@@ -1,9 +1,18 @@
 # SnapZip Agent Rules & Guidelines
 
 ## SnapZip Memory
-When the `snapzip` binary is available in this workspace, retrieve recent project feedback before code changes:
+When the `snapzip` binary is available in this workspace, inspect the local index and retrieve recent project feedback before code changes:
+```bash
+./snapzip stats --db-dir .
+```
+
 ```bash
 ./snapzip get-feedback --limit 10
+```
+
+Use targeted search for local examples instead of reading broad directory trees into context:
+```bash
+./snapzip search --query "<topic>" --limit 3
 ```
 
 If the command fails because the binary or database has not been created yet, continue normally and report that SnapZip memory was unavailable.

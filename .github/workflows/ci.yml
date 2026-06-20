@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Run Go vet
+        run: go vet ./...
+
+      - name: Run race tests
+        run: go test -race ./...
+
+      - name: Compile Python helpers
+        run: |
+          python3 -m py_compile \
+            examples/draft_cache.py \
+            examples/context_code/cache_reference.py \
+            vis/parser.py \
+            benchmarks/run.py \
+            benchmarks/stress_rbt.py \
+            benchmarks/suites/algorithm_20/*.py
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run vulnerability scan
+        run: $(go env GOPATH)/bin/govulncheck ./...
+
+      - name: Build CLI
+        run: go build -o snapzip ./cmd/snapzip
+
+      - name: Run benchmark smoke suite
+        run: python3 benchmarks/run.py --suite smoke --snapzip-bin ./snapzip --json /tmp/snapzip-benchmark-smoke.json

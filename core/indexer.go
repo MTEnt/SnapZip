@@ -10,6 +10,39 @@ import (
 )
 
 const DefaultContextLimitBytes = 2 * 1024 * 1024
+const DefaultMaxIndexFileBytes int64 = 1024 * 1024
+
+var defaultSkipDirs = stringSet(
+	".cache",
+	".git",
+	".hg",
+	".idea",
+	".next",
+	".svn",
+	".turbo",
+	".venv",
+	".vscode",
+	"build",
+	"coverage",
+	"dist",
+	"node_modules",
+	"out",
+	"target",
+	"vendor",
+	"venv",
+	"__pycache__",
+)
+
+var defaultSkipFiles = stringSet(
+	".ds_store",
+	"memory.db",
+)
+
+type IndexOptions struct {
+	MaxFileBytes int64
+	SkipDirs     map[string]bool
+	SkipFiles    map[string]bool
+}
 
 type ContextBundle struct {
 	Data       []byte
@@ -17,11 +50,27 @@ type ContextBundle struct {
 	FileCount  int
 }
 
+func DefaultIndexOptions() IndexOptions {
+	return IndexOptions{
+		MaxFileBytes: DefaultMaxIndexFileBytes,
+		SkipDirs:     copyBoolMap(defaultSkipDirs),
+		SkipFiles:    copyBoolMap(defaultSkipFiles),
+	}
+}
+
 func IndexDirectory(db *sql.DB, root string, filter LanguageFilter) (int, error) {
+	return IndexDirectoryWithOptions(db, root, filter, DefaultIndexOptions())
+}
+
+func IndexDirectoryWithOptions(db *sql.DB, root string, filter LanguageFilter, options IndexOptions) (int, error) {
+	options = normalizeIndexOptions(options)
 	indexed := 0
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if skip, err := shouldSkipEntry(path, entry, options); skip || err != nil {
+			return err
 		}
 		if entry.IsDir() {
 			return nil
@@ -36,6 +85,9 @@ func IndexDirectory(db *sql.DB, root string, filter LanguageFilter) (int, error)
 		if err != nil {
 			return err
 		}
+		if !isTextContent(content) {
+			return nil
+		}
 		if err := AddKnowledge(db, language, topicForPath(root, path), string(content)); err != nil {
 			return err
 		}
@@ -49,6 +101,7 @@ func LoadContextDirectory(root string, filter LanguageFilter, maxBytes int) (Con
 	if maxBytes <= 0 {
 		maxBytes = DefaultContextLimitBytes
 	}
+	options := DefaultIndexOptions()
 
 	vocab := make(map[string]bool)
 	var builder strings.Builder
@@ -57,6 +110,9 @@ func LoadContextDirectory(root string, filter LanguageFilter, maxBytes int) (Con
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if skip, err := shouldSkipEntry(path, entry, options); skip || err != nil {
+			return err
 		}
 		if entry.IsDir() {
 			return nil
@@ -73,6 +129,9 @@ func LoadContextDirectory(root string, filter LanguageFilter, maxBytes int) (Con
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return err
+		}
+		if !isTextContent(content) {
+			return nil
 		}
 		writeLimited(&builder, content, maxBytes)
 		if builder.Len() < maxBytes {
@@ -119,4 +178,69 @@ func topicForPath(root, path string) string {
 		rel = filepath.Base(path)
 	}
 	return fmt.Sprintf("Source file: %s", rel)
+}
+
+func normalizeIndexOptions(options IndexOptions) IndexOptions {
+	if options.MaxFileBytes <= 0 {
+		options.MaxFileBytes = DefaultMaxIndexFileBytes
+	}
+	if options.SkipDirs == nil {
+		options.SkipDirs = copyBoolMap(defaultSkipDirs)
+	}
+	if options.SkipFiles == nil {
+		options.SkipFiles = copyBoolMap(defaultSkipFiles)
+	}
+	return options
+}
+
+func shouldSkipEntry(path string, entry fs.DirEntry, options IndexOptions) (bool, error) {
+	base := strings.ToLower(entry.Name())
+	if entry.IsDir() {
+		if options.SkipDirs[base] {
+			return true, filepath.SkipDir
+		}
+		return false, nil
+	}
+	if options.SkipFiles[base] {
+		return true, nil
+	}
+
+	info, err := entry.Info()
+	if err != nil {
+		return false, err
+	}
+	if info.Size() > options.MaxFileBytes {
+		return true, nil
+	}
+	return false, nil
+}
+
+func isTextContent(content []byte) bool {
+	if len(content) == 0 {
+		return true
+	}
+
+	sampleSize := len(content)
+	if sampleSize > 8192 {
+		sampleSize = 8192
+	}
+
+	controlBytes := 0
+	for _, b := range content[:sampleSize] {
+		if b == 0 {
+			return false
+		}
+		if b < 0x09 || (b > 0x0d && b < 0x20) {
+			controlBytes++
+		}
+	}
+	return controlBytes*100/sampleSize < 30
+}
+
+func copyBoolMap(input map[string]bool) map[string]bool {
+	output := make(map[string]bool, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
