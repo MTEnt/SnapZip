@@ -3,23 +3,26 @@ package core
 import (
 	"database/sql"
 	"strings"
+	"unicode"
 )
 
-var negativeWords = []string{
+var negativeWords = stringSet(
 	"bad",
 	"broken",
 	"crap",
 	"dumb",
-	"error",
-	"fail",
+	"failed",
+	"failing",
+	"failure",
 	"garbage",
 	"hate",
 	"incorrect",
+	"regression",
 	"stupid",
 	"trash",
 	"useless",
 	"wrong",
-}
+)
 
 // Feedback represents a logged negative feedback entry.
 type Feedback struct {
@@ -32,14 +35,7 @@ type Feedback struct {
 
 // AddFeedback inserts a feedback record when negative sentiment is detected.
 func AddFeedback(db *sql.DB, userInput, botResponse string) (bool, error) {
-	lowerInput := strings.ToLower(userInput)
-	detectedWord := ""
-	for _, word := range negativeWords {
-		if strings.Contains(lowerInput, word) {
-			detectedWord = word
-			break
-		}
-	}
+	detectedWord := DetectNegativeFeedback(userInput)
 	if detectedWord == "" {
 		return false, nil
 	}
@@ -52,6 +48,21 @@ func AddFeedback(db *sql.DB, userInput, botResponse string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func DetectNegativeFeedback(input string) string {
+	for _, token := range feedbackTokens(input) {
+		if negativeWords[token] {
+			return token
+		}
+	}
+	return ""
+}
+
+func feedbackTokens(input string) []string {
+	return strings.FieldsFunc(strings.ToLower(input), func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_')
+	})
 }
 
 // RetrieveNegativeFeedback returns recent negative feedback entries to guide the AI.

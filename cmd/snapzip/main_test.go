@@ -31,7 +31,7 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 	searchOutput := runSnapZip(t, repoRoot,
 		"search",
 		"--db-dir", dbDir,
-		"--query", "ruby CacheStore",
+		"--query", "ruby error handling CacheStore",
 		"--limit", "1",
 	)
 	if !strings.Contains(searchOutput, "CacheStore") {
@@ -41,6 +41,9 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 	statsOutput := runSnapZip(t, repoRoot, "stats", "--db-dir", dbDir)
 	if !strings.Contains(statsOutput, "knowledge rows: 3") {
 		t.Fatalf("stats output did not show three indexed files:\n%s", statsOutput)
+	}
+	if !strings.Contains(statsOutput, "feedback rows: 0") {
+		t.Fatalf("search query polluted feedback memory:\n%s", statsOutput)
 	}
 
 	ignoredOutput := runSnapZip(t, repoRoot,

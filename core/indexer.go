@@ -11,6 +11,7 @@ import (
 
 const DefaultContextLimitBytes = 2 * 1024 * 1024
 const DefaultMaxIndexFileBytes int64 = 1024 * 1024
+const DefaultMaxKnowledgeContentBytes = 64 * 1024
 
 var defaultSkipDirs = stringSet(
 	".cache",
@@ -39,9 +40,10 @@ var defaultSkipFiles = stringSet(
 )
 
 type IndexOptions struct {
-	MaxFileBytes int64
-	SkipDirs     map[string]bool
-	SkipFiles    map[string]bool
+	MaxFileBytes    int64
+	MaxContentBytes int
+	SkipDirs        map[string]bool
+	SkipFiles       map[string]bool
 }
 
 type ContextBundle struct {
@@ -52,9 +54,10 @@ type ContextBundle struct {
 
 func DefaultIndexOptions() IndexOptions {
 	return IndexOptions{
-		MaxFileBytes: DefaultMaxIndexFileBytes,
-		SkipDirs:     copyBoolMap(defaultSkipDirs),
-		SkipFiles:    copyBoolMap(defaultSkipFiles),
+		MaxFileBytes:    DefaultMaxIndexFileBytes,
+		MaxContentBytes: DefaultMaxKnowledgeContentBytes,
+		SkipDirs:        copyBoolMap(defaultSkipDirs),
+		SkipFiles:       copyBoolMap(defaultSkipFiles),
 	}
 }
 
@@ -88,10 +91,11 @@ func IndexDirectoryWithOptions(db *sql.DB, root string, filter LanguageFilter, o
 		if !isTextContent(content) {
 			return nil
 		}
-		if err := AddKnowledge(db, language, topicForPath(root, path), string(content)); err != nil {
+		chunks, err := AddKnowledgeContent(db, language, topicForPath(root, path), content, options.MaxContentBytes)
+		if err != nil {
 			return err
 		}
-		indexed++
+		indexed += chunks
 		return nil
 	})
 	return indexed, err
@@ -180,9 +184,26 @@ func topicForPath(root, path string) string {
 	return fmt.Sprintf("Source file: %s", rel)
 }
 
+func AddKnowledgeContent(db *sql.DB, language, topic string, content []byte, maxContentBytes int) (int, error) {
+	chunks := splitContentChunks(content, maxContentBytes)
+	for idx, chunk := range chunks {
+		chunkTopic := topic
+		if len(chunks) > 1 {
+			chunkTopic = fmt.Sprintf("%s #chunk-%03d", topic, idx+1)
+		}
+		if err := AddKnowledge(db, language, chunkTopic, string(chunk)); err != nil {
+			return idx, err
+		}
+	}
+	return len(chunks), nil
+}
+
 func normalizeIndexOptions(options IndexOptions) IndexOptions {
 	if options.MaxFileBytes <= 0 {
 		options.MaxFileBytes = DefaultMaxIndexFileBytes
+	}
+	if options.MaxContentBytes <= 0 {
+		options.MaxContentBytes = DefaultMaxKnowledgeContentBytes
 	}
 	if options.SkipDirs == nil {
 		options.SkipDirs = copyBoolMap(defaultSkipDirs)
@@ -191,6 +212,41 @@ func normalizeIndexOptions(options IndexOptions) IndexOptions {
 		options.SkipFiles = copyBoolMap(defaultSkipFiles)
 	}
 	return options
+}
+
+func splitContentChunks(content []byte, maxBytes int) [][]byte {
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxKnowledgeContentBytes
+	}
+	if len(content) <= maxBytes {
+		return [][]byte{content}
+	}
+
+	var chunks [][]byte
+	for start := 0; start < len(content); {
+		end := start + maxBytes
+		if end >= len(content) {
+			chunks = append(chunks, content[start:])
+			break
+		}
+
+		chunkEnd := end
+		if newline := lastNewline(content[start:end]); newline > maxBytes/2 {
+			chunkEnd = start + newline + 1
+		}
+		chunks = append(chunks, content[start:chunkEnd])
+		start = chunkEnd
+	}
+	return chunks
+}
+
+func lastNewline(content []byte) int {
+	for idx := len(content) - 1; idx >= 0; idx-- {
+		if content[idx] == '\n' {
+			return idx
+		}
+	}
+	return -1
 }
 
 func shouldSkipEntry(path string, entry fs.DirEntry, options IndexOptions) (bool, error) {

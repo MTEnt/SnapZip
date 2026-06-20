@@ -117,6 +117,38 @@ func TestIndexDirectoryUpdatesExistingRows(t *testing.T) {
 	}
 }
 
+func TestIndexDirectoryChunksLargeFiles(t *testing.T) {
+	root := t.TempDir()
+	content := strings.Repeat("def helper():\n    return 'chunked search content'\n", 200)
+	writeTestFile(t, root, "pkg/large.py", content)
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	options := DefaultIndexOptions()
+	options.MaxFileBytes = int64(len(content) + 1024)
+	options.MaxContentBytes = 1024
+
+	count, err := IndexDirectoryWithOptions(db, root, NewLanguageFilter("python"), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count <= 1 {
+		t.Fatalf("indexed %d chunks, want more than 1", count)
+	}
+
+	stats, err := GetDatabaseStats(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.KnowledgeRows != count {
+		t.Fatalf("stored %d rows, want %d", stats.KnowledgeRows, count)
+	}
+}
+
 func TestLoadContextDirectoryRespectsLanguageFilter(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root, "cache.py", "class BoundedCache:\n    pass\n")

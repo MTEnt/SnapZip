@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ type Snippet struct {
 }
 
 var DBPath string
+
+const defaultSearchCandidateLimit = 50
 
 func DBFilePath(dir string) string {
 	return filepath.Join(dir, "memory.db")
@@ -251,7 +254,7 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 				JOIN knowledge_fts f ON k.id = f.rowid
 				WHERE knowledge_fts MATCH ? AND k.language = ?
 				ORDER BY f.rank
-				LIMIT 100`, ftsQuery, detectedLang)
+				LIMIT ?`, ftsQuery, detectedLang, defaultSearchCandidateLimit)
 		} else {
 			rows, err = db.Query(`
 				SELECT k.id, k.language, k.topic, k.content 
@@ -259,15 +262,15 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 				JOIN knowledge_fts f ON k.id = f.rowid
 				WHERE knowledge_fts MATCH ? 
 				ORDER BY f.rank
-				LIMIT 100`, ftsQuery)
+				LIMIT ?`, ftsQuery, defaultSearchCandidateLimit)
 		}
 	}
 
 	if err != nil || rows == nil {
 		if detectedLang != "" {
-			rows, err = db.Query("SELECT id, language, topic, content FROM knowledge WHERE language = ? ORDER BY id DESC LIMIT 100", detectedLang)
+			rows, err = db.Query("SELECT id, language, topic, content FROM knowledge WHERE language = ? ORDER BY id DESC LIMIT ?", detectedLang, defaultSearchCandidateLimit)
 		} else {
-			rows, err = db.Query("SELECT id, language, topic, content FROM knowledge ORDER BY id DESC LIMIT 100")
+			rows, err = db.Query("SELECT id, language, topic, content FROM knowledge ORDER BY id DESC LIMIT ?", defaultSearchCandidateLimit)
 		}
 		if err != nil {
 			return nil, err
@@ -285,7 +288,11 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 
 	// Parallel QND Re-ranking using Goroutines
 	if len(candidates) > 0 {
-		numWorkers := 18
+		numWorkers := min(runtime.NumCPU(), len(candidates))
+		if numWorkers < 1 {
+			numWorkers = 1
+		}
+		promptCompressedSize := comp.Compress([]byte(prompt))
 		jobs := make(chan int, len(candidates))
 		var wg sync.WaitGroup
 
@@ -294,7 +301,7 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 			go func() {
 				defer wg.Done()
 				for idx := range jobs {
-					candidates[idx].Score = CalculateQND(comp, prompt, candidates[idx].Content)
+					candidates[idx].Score = CalculateQNDWithPromptSize(comp, prompt, candidates[idx].Content, promptCompressedSize)
 				}
 			}()
 		}

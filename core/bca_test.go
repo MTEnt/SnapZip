@@ -29,6 +29,47 @@ func TestVerifyCompilationPython(t *testing.T) {
 	}
 }
 
+func TestCheckCompilationReportsAvailability(t *testing.T) {
+	checked, valid := CheckCompilation("def ok():\n    return 1\n", "example.py")
+	if !checked || !valid {
+		t.Fatalf("CheckCompilation valid Python = checked %v, valid %v; want true, true", checked, valid)
+	}
+
+	checked, valid = CheckCompilation("<main>no checker</main>\n", "example.html")
+	if checked || !valid {
+		t.Fatalf("CheckCompilation HTML = checked %v, valid %v; want false, true", checked, valid)
+	}
+}
+
+func TestOptimizeReturnsSeedWithoutSyntaxChecker(t *testing.T) {
+	opt, err := NewBCAOptimizer(BCAConfig{MaxIterations: 100}, []byte("context"), []string{"replacement"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seed := "<main>Keep this exact HTML</main>\n"
+	if got := opt.Optimize(seed, "index.html"); got != seed {
+		t.Fatalf("Optimize without syntax checker changed seed:\n%s", got)
+	}
+}
+
+func TestOptimizeKeepsPythonSyntaxValid(t *testing.T) {
+	opt, err := NewBCAOptimizer(
+		BCAConfig{MaxIterations: 200, Temperature: 0.15, PriorWeight: 1},
+		[]byte("def total(items):\n    return sum(items)\n"),
+		[]string{"total", "items", "sum", "value"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seed := "def total(items):\n    return sum(items)\n"
+	got := opt.Optimize(seed, "example.py")
+	if !VerifyCompilation(got, "example.py") {
+		t.Fatalf("optimized Python failed syntax check:\n%s", got)
+	}
+}
+
 func TestSyntaxCheckerForPopularLanguages(t *testing.T) {
 	cases := map[string]string{
 		"c":     "cc",

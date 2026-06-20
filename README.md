@@ -73,7 +73,6 @@ snapzip/
 |-- core/               # Go backend library (Zstd compression, SQLite indexing, MCMC loop)
 |-- cmd/snapzip/        # CLI interface parsing and command routing
 |-- benchmarks/         # Reproducible raw vs SnapZip benchmark harnesses
-|-- vis/                # Python sidecar for visual segment contouring
 |-- assets/             # Branding logo and graphics
 `-- examples/           # Developer templates and benchmarks
 ```
@@ -85,7 +84,7 @@ snapzip/
 ### 1. Prerequisites
 Ensure you have the following installed on your machine:
 *   **Go** (version 1.25 or later)
-*   **Python 3.x** (for compiler checks and visual segmentation checks)
+*   **Python 3.x** (for Python syntax checks and benchmarks)
 
 ### 2. Install or Compile the CLI Binary
 Install directly from GitHub:
@@ -124,7 +123,7 @@ Use `--reset` to remove an existing `memory.db` before indexing a fresh project:
 ./snapzip init-db --db-dir . --langs popular --crawl /path/to/your/codebase --reset
 ```
 
-The indexer skips common dependency/build directories such as `.git`, `node_modules`, `vendor`, `dist`, `build`, `target`, `.venv`, and `__pycache__`. It also skips `memory.db`, binary-looking files, and files larger than 1 MiB by default. Override the file cap with `--max-file-bytes`.
+The indexer skips common dependency/build directories such as `.git`, `node_modules`, `vendor`, `dist`, `build`, `target`, `.venv`, and `__pycache__`. It also skips `memory.db`, binary-looking files, and files larger than 1 MiB by default. Larger accepted source files are split into bounded searchable chunks to keep search reranking responsive. Override the file cap with `--max-file-bytes`.
 
 Common default formats include:
 
@@ -159,8 +158,10 @@ Run the Metropolis-Hastings MCMC optimizer over a draft to align it with local c
   --temp 0.15
 ```
 
+Optimization is conservative: SnapZip only mutates files when a local syntax checker is available for that language, rejects syntactically invalid proposals, and otherwise returns the seed draft unchanged.
+
 ### E. Log & Query Negative Feedback Memory
-SnapZip automatically logs complaints when negative sentiment is parsed, but you can also interact with feedback manually:
+SnapZip does not log search queries into feedback memory. Feedback is only stored when you explicitly call `log-feedback` with a clear negative critique:
 *   **Log feedback**:
     ```bash
     ./snapzip log-feedback --input "this cache eviction logic is incorrect" --bot-response "def put(...): ..."

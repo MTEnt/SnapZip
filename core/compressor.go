@@ -66,16 +66,18 @@ func (zc ZlibCompressor) Compress(data []byte) int {
 
 // CalculateQND computes the Query-Normalized Compression Distance between a prompt and document content
 func CalculateQND(comp Compressor, prompt string, content string) float64 {
-	x := []byte(prompt)
+	return CalculateQNDWithPromptSize(comp, prompt, content, comp.Compress([]byte(prompt)))
+}
+
+func CalculateQNDWithPromptSize(comp Compressor, prompt string, content string, promptCompressedSize int) float64 {
 	y := []byte(content)
 	xy := []byte(content + "\n" + prompt)
 
-	cx := comp.Compress(x)
-	if cx == 0 {
+	if promptCompressedSize == 0 {
 		return 1.0
 	}
 	cy := comp.Compress(y)
 	cxy := comp.Compress(xy)
 
-	return float64(cxy-cy) / float64(cx)
+	return float64(cxy-cy) / float64(promptCompressedSize)
 }

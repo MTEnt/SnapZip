@@ -114,12 +114,12 @@ func handleInitDB() {
 		fmt.Printf("\nIndexing files under: %s...\n", codebasePath)
 		options := core.DefaultIndexOptions()
 		options.MaxFileBytes = *maxFileBytes
-		fileCount, err := core.IndexDirectoryWithOptions(db, codebasePath, langFilter, options)
+		entryCount, err := core.IndexDirectoryWithOptions(db, codebasePath, langFilter, options)
 
 		if err != nil {
 			fmt.Printf("Error indexing codebase files: %v\n", err)
 		} else {
-			fmt.Printf("Indexed %d files into memory.db\n", fileCount)
+			fmt.Printf("Indexed %d entries into memory.db\n", entryCount)
 		}
 	}
 }
@@ -144,10 +144,7 @@ func handleSearch() {
 	}
 	defer db.Close()
 
-	// Automatically analyze and log query if it contains negative sentiment/complaints
-	_, _ = core.AddFeedback(db, *query, "")
-
-	// Automatically retrieve and print past negative feedback to alert the user/agent
+	// Retrieve and print past negative feedback to alert the user/agent.
 	feedbacks, err := core.RetrieveNegativeFeedback(db, 5)
 	if err == nil && len(feedbacks) > 0 {
 		fmt.Fprintln(os.Stderr, "\n[SnapZip Memory Warning] Avoid repeating these past mistakes/failures:")
