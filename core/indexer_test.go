@@ -56,6 +56,12 @@ func TestIndexDirectoryUsesLanguageAliasesAndRelativeTopics(t *testing.T) {
 	if results[0].Topic != "Source file: pkg/cache.py" {
 		t.Fatalf("got topic %q", results[0].Topic)
 	}
+	if results[0].Path != "pkg/cache.py" {
+		t.Fatalf("got path %q", results[0].Path)
+	}
+	if results[0].StartLine != 1 || results[0].EndLine != 2 {
+		t.Fatalf("got lines %d-%d, want 1-2", results[0].StartLine, results[0].EndLine)
+	}
 }
 
 func TestIndexDirectorySkipsGeneratedLargeAndBinaryFiles(t *testing.T) {
@@ -146,6 +152,69 @@ func TestIndexDirectoryChunksLargeFiles(t *testing.T) {
 	}
 	if stats.KnowledgeRows != count {
 		t.Fatalf("stored %d rows, want %d", stats.KnowledgeRows, count)
+	}
+
+	results, err := RetrieveSimilarSnippets(db, mustTestCompressor(t), "chunked search content", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("got no chunked results")
+	}
+	for _, result := range results {
+		if result.Path != "pkg/large.py" {
+			t.Fatalf("got chunk path %q", result.Path)
+		}
+		if result.StartLine <= 0 || result.EndLine < result.StartLine {
+			t.Fatalf("invalid chunk line range %d-%d", result.StartLine, result.EndLine)
+		}
+	}
+}
+
+func TestIndexDirectoryStoresSymbolsAndRepoMap(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
+	writeTestFile(t, root, "pkg/cache_test.go", "package cache\n\nfunc TestCacheStore(t *testing.T) {}\n")
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	count, err := IndexDirectory(db, root, NewLanguageFilter("go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("indexed %d files, want 2", count)
+	}
+
+	symbols, err := SearchSymbols(db, "CacheStore", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(symbols) < 2 {
+		t.Fatalf("got %d symbols, want at least 2", len(symbols))
+	}
+	if symbols[0].Path == "" || symbols[0].Line == 0 {
+		t.Fatalf("symbol missing source coordinates: %+v", symbols[0])
+	}
+
+	repoMap, err := BuildRepoMap(db, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repoMap.Files) != 2 {
+		t.Fatalf("repo map files = %d, want 2", len(repoMap.Files))
+	}
+
+	related, err := RelatedFiles(db, "pkg/cache.go", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(related) == 0 || related[0].Path != "pkg/cache_test.go" {
+		t.Fatalf("related files = %+v, want cache_test.go", related)
 	}
 }
 

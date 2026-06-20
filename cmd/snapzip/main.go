@@ -23,10 +23,28 @@ func main() {
 	switch subcommand {
 	case "init-db":
 		handleInitDB()
+	case "index":
+		handleIndex()
 	case "search":
 		handleSearch()
 	case "pack":
 		handlePack()
+	case "map":
+		handleMap()
+	case "symbols":
+		handleSymbols()
+	case "related":
+		handleRelated()
+	case "audit":
+		handleAudit()
+	case "install-agent":
+		handleInstallAgent()
+	case "eval":
+		handleEval()
+	case "explain-failure":
+		handleExplainFailure()
+	case "repair-pack":
+		handleRepairPack()
 	case "mcp":
 		handleMCP()
 	case "optimize":
@@ -48,8 +66,17 @@ func printUsage() {
 	fmt.Println("Usage: snapzip <subcommand> [options]")
 	fmt.Println("Subcommands:")
 	fmt.Println("  init-db        Initialize the local memory database and index project directories")
+	fmt.Println("  index          Incrementally index full, changed, or since-ref files")
 	fmt.Println("  search         Search template database using Hybrid FTS5+QND ranking")
 	fmt.Println("  pack           Build a bounded context pack for AI coding agents")
+	fmt.Println("  map            Show a compact repo map from indexed symbols")
+	fmt.Println("  symbols        Search indexed symbols")
+	fmt.Println("  related        Find files related to an indexed path")
+	fmt.Println("  audit          Check local privacy and index hygiene")
+	fmt.Println("  install-agent  Write SnapZip agent integration files")
+	fmt.Println("  eval           Run included public benchmark suites")
+	fmt.Println("  explain-failure Build context from test/build failure output")
+	fmt.Println("  repair-pack    Alias for explain-failure with repair-oriented context")
 	fmt.Println("  mcp            Run SnapZip as a read-only MCP stdio server")
 	fmt.Println("  optimize       Refine code sketches using the conservative local-context optimizer")
 	fmt.Println("  stats          Show indexed row counts and language breakdown")
@@ -192,6 +219,7 @@ func handlePack() {
 	limit := fs.Int("limit", 5, "Maximum snippets to include")
 	budget := fs.Int("budget", core.DefaultContextPackBudgetBytes, "Approximate byte budget for rendered context")
 	feedbackLimit := fs.Int("feedback-limit", 5, "Maximum feedback entries to include")
+	mode := fs.String("mode", "", "Pack mode: debug, refactor, test, docs, or default")
 	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
 	_ = fs.Parse(os.Args[2:])
 
@@ -214,7 +242,7 @@ func handlePack() {
 		os.Exit(1)
 	}
 
-	pack, err := core.BuildContextPack(db, comp, *query, *limit, *budget, *feedbackLimit)
+	pack, err := core.BuildContextPackWithMode(db, comp, *query, *mode, *limit, *budget, *feedbackLimit)
 	if err != nil {
 		fmt.Printf("Pack failed: %v\n", err)
 		os.Exit(1)
@@ -331,6 +359,7 @@ func handleStats() {
 
 	fmt.Printf("knowledge rows: %d\n", stats.KnowledgeRows)
 	fmt.Printf("feedback rows: %d\n", stats.FeedbackRows)
+	fmt.Printf("symbol rows: %d\n", stats.SymbolRows)
 	if len(stats.Languages) == 0 {
 		fmt.Println("languages: none")
 		return

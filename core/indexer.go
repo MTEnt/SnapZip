@@ -84,14 +84,7 @@ func IndexDirectoryWithOptions(db *sql.DB, root string, filter LanguageFilter, o
 			return nil
 		}
 
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if !isTextContent(content) {
-			return nil
-		}
-		chunks, err := AddKnowledgeContent(db, language, topicForPath(root, path), content, options.MaxContentBytes)
+		chunks, err := IndexFileWithOptions(db, root, path, filter, options)
 		if err != nil {
 			return err
 		}
@@ -99,6 +92,70 @@ func IndexDirectoryWithOptions(db *sql.DB, root string, filter LanguageFilter, o
 		return nil
 	})
 	return indexed, err
+}
+
+func IndexFilesWithOptions(db *sql.DB, root string, paths []string, filter LanguageFilter, options IndexOptions) (int, error) {
+	options = normalizeIndexOptions(options)
+	indexed := 0
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, path)
+		}
+		chunks, err := IndexFileWithOptions(db, root, path, filter, options)
+		if err != nil {
+			return indexed, err
+		}
+		indexed += chunks
+	}
+	return indexed, nil
+}
+
+func IndexFileWithOptions(db *sql.DB, root, path string, filter LanguageFilter, options IndexOptions) (int, error) {
+	options = normalizeIndexOptions(options)
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if info.IsDir() || info.Size() > options.MaxFileBytes {
+		return 0, nil
+	}
+	relPath := relativeSourcePath(root, path)
+	if options.SkipFiles[strings.ToLower(filepath.Base(relPath))] {
+		return 0, nil
+	}
+	for _, part := range strings.Split(filepath.ToSlash(relPath), "/") {
+		if options.SkipDirs[strings.ToLower(part)] {
+			return 0, nil
+		}
+	}
+
+	language := LanguageFromPath(path)
+	if !filter.Matches(language) {
+		return 0, nil
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	if !isTextContent(content) {
+		return 0, nil
+	}
+
+	chunks, err := AddKnowledgeContent(db, language, topicForPath(root, path), relPath, content, options.MaxContentBytes, info.ModTime().Unix())
+	if err != nil {
+		return 0, err
+	}
+	if err := ReplaceSymbolsForFile(db, language, relPath, content); err != nil {
+		return 0, err
+	}
+	return chunks, nil
 }
 
 func LoadContextDirectory(root string, filter LanguageFilter, maxBytes int) (ContextBundle, error) {
@@ -177,21 +234,35 @@ func writeLimited(builder *strings.Builder, content []byte, maxBytes int) {
 }
 
 func topicForPath(root, path string) string {
+	return fmt.Sprintf("Source file: %s", relativeSourcePath(root, path))
+}
+
+func relativeSourcePath(root, path string) string {
 	rel, err := filepath.Rel(root, path)
 	if err != nil || rel == "." {
 		rel = filepath.Base(path)
 	}
-	return fmt.Sprintf("Source file: %s", rel)
+	return filepath.ToSlash(rel)
 }
 
-func AddKnowledgeContent(db *sql.DB, language, topic string, content []byte, maxContentBytes int) (int, error) {
+func AddKnowledgeContent(db *sql.DB, language, topic, path string, content []byte, maxContentBytes int, sourceMTime int64) (int, error) {
 	chunks := splitContentChunks(content, maxContentBytes)
 	for idx, chunk := range chunks {
 		chunkTopic := topic
 		if len(chunks) > 1 {
 			chunkTopic = fmt.Sprintf("%s #chunk-%03d", topic, idx+1)
 		}
-		if err := AddKnowledge(db, language, chunkTopic, string(chunk)); err != nil {
+		_, err := AddKnowledgeEntry(db, KnowledgeEntry{
+			Language:    language,
+			Topic:       chunkTopic,
+			Path:        path,
+			StartLine:   chunk.StartLine,
+			EndLine:     chunk.EndLine,
+			Content:     string(chunk.Data),
+			ContentHash: contentHash(chunk.Data),
+			SourceMTime: sourceMTime,
+		})
+		if err != nil {
 			return idx, err
 		}
 	}
@@ -214,19 +285,35 @@ func normalizeIndexOptions(options IndexOptions) IndexOptions {
 	return options
 }
 
-func splitContentChunks(content []byte, maxBytes int) [][]byte {
+type contentChunk struct {
+	Data      []byte
+	StartLine int
+	EndLine   int
+}
+
+func splitContentChunks(content []byte, maxBytes int) []contentChunk {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxKnowledgeContentBytes
 	}
 	if len(content) <= maxBytes {
-		return [][]byte{content}
+		return []contentChunk{{
+			Data:      content,
+			StartLine: 1,
+			EndLine:   lineCount(content),
+		}}
 	}
 
-	var chunks [][]byte
+	var chunks []contentChunk
+	startLine := 1
 	for start := 0; start < len(content); {
 		end := start + maxBytes
 		if end >= len(content) {
-			chunks = append(chunks, content[start:])
+			chunk := content[start:]
+			chunks = append(chunks, contentChunk{
+				Data:      chunk,
+				StartLine: startLine,
+				EndLine:   startLine + lineCount(chunk) - 1,
+			})
 			break
 		}
 
@@ -234,10 +321,33 @@ func splitContentChunks(content []byte, maxBytes int) [][]byte {
 		if newline := lastNewline(content[start:end]); newline > maxBytes/2 {
 			chunkEnd = start + newline + 1
 		}
-		chunks = append(chunks, content[start:chunkEnd])
+		chunk := content[start:chunkEnd]
+		endLine := startLine + lineCount(chunk) - 1
+		chunks = append(chunks, contentChunk{
+			Data:      chunk,
+			StartLine: startLine,
+			EndLine:   endLine,
+		})
+		startLine = endLine + 1
 		start = chunkEnd
 	}
 	return chunks
+}
+
+func lineCount(content []byte) int {
+	if len(content) == 0 {
+		return 1
+	}
+	lines := 1
+	for _, b := range content {
+		if b == '\n' {
+			lines++
+		}
+	}
+	if content[len(content)-1] == '\n' && lines > 1 {
+		lines--
+	}
+	return lines
 }
 
 func lastNewline(content []byte) int {

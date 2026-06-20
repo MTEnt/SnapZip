@@ -10,9 +10,21 @@ When the `snapzip` binary is available in this workspace, inspect the local inde
 ./snapzip get-feedback --limit 10
 ```
 
-Use targeted search for local examples instead of reading broad directory trees into context:
+Use bounded context packs for local examples instead of reading broad directory trees into context:
 ```bash
-./snapzip search --query "<topic>" --limit 3
+./snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>
+```
+
+Use structural lookup when symbol/file relationships matter:
+```bash
+./snapzip map --limit 50
+./snapzip symbols --query "<symbol>" --limit 10
+./snapzip related --path <file> --limit 10
+```
+
+After failing tests or builds, capture output and build a repair pack:
+```bash
+./snapzip repair-pack --error-file <test-output-file> --budget 12000
 ```
 
 If the command fails because the binary or database has not been created yet, continue normally and report that SnapZip memory was unavailable.

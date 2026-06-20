@@ -165,6 +165,101 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	}
 }
 
+func TestCLIAdvancedContextCommands(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fixture := t.TempDir()
+	writeCLIFile(t, fixture, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
+	writeCLIFile(t, fixture, "pkg/cache_test.go", "package cache\n\nfunc TestCacheStore() {}\n")
+
+	dbDir := t.TempDir()
+	runSnapZip(t, repoRoot,
+		"index",
+		"--db-dir", dbDir,
+		"--langs", "go",
+		"--crawl", fixture,
+	)
+
+	mapOutput := runSnapZip(t, repoRoot, "map", "--db-dir", dbDir, "--limit", "10")
+	if !strings.Contains(mapOutput, "NewCacheStore") {
+		t.Fatalf("map output missing symbol:\n%s", mapOutput)
+	}
+
+	symbolOutput := runSnapZip(t, repoRoot, "symbols", "--db-dir", dbDir, "--query", "CacheStore", "--limit", "5")
+	if !strings.Contains(symbolOutput, "pkg/cache.go") {
+		t.Fatalf("symbols output missing source path:\n%s", symbolOutput)
+	}
+
+	relatedOutput := runSnapZip(t, repoRoot, "related", "--db-dir", dbDir, "--path", "pkg/cache.go", "--limit", "5")
+	if !strings.Contains(relatedOutput, "pkg/cache_test.go") {
+		t.Fatalf("related output missing test file:\n%s", relatedOutput)
+	}
+
+	packOutput := runSnapZip(t, repoRoot, "pack", "--db-dir", dbDir, "--query", "CacheStore", "--mode", "test", "--limit", "3", "--budget", "4096")
+	if !strings.Contains(packOutput, "Mode: test") || !strings.Contains(packOutput, "pkg/cache_test.go") {
+		t.Fatalf("mode-specific pack output missing expected context:\n%s", packOutput)
+	}
+
+	errorFile := filepath.Join(t.TempDir(), "failure.txt")
+	if err := os.WriteFile(errorFile, []byte("pkg/cache_test.go:3: undefined: CacheStore\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	repairOutput := runSnapZip(t, repoRoot, "repair-pack", "--db-dir", dbDir, "--error-file", errorFile, "--budget", "4096")
+	if !strings.Contains(repairOutput, "SnapZip Context Pack") || !strings.Contains(repairOutput, "cache") {
+		t.Fatalf("repair-pack output missing failure context:\n%s", repairOutput)
+	}
+
+	auditOutput := runSnapZip(t, repoRoot, "audit", "--db-dir", dbDir)
+	if !strings.Contains(auditOutput, "memory.db gitignore") || !strings.Contains(auditOutput, "MCP") {
+		t.Fatalf("audit output missing expected checks:\n%s", auditOutput)
+	}
+
+	agentDir := t.TempDir()
+	installOutput := runSnapZip(t, repoRoot, "install-agent", "codex", "--dir", agentDir)
+	if !strings.Contains(installOutput, "AGENTS.md") {
+		t.Fatalf("install-agent did not report AGENTS.md:\n%s", installOutput)
+	}
+	agentBytes, err := os.ReadFile(filepath.Join(agentDir, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(agentBytes), "snapzip pack") {
+		t.Fatalf("AGENTS.md missing SnapZip pack rule:\n%s", string(agentBytes))
+	}
+}
+
+func TestIndexChangedIncludesUntrackedFiles(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fixture := t.TempDir()
+	cmd := exec.Command("git", "init")
+	cmd.Dir = fixture
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, string(output))
+	}
+	writeCLIFile(t, fixture, "pkg/new_cache.go", "package cache\n\nfunc NewUntrackedCache() {}\n")
+
+	dbDir := t.TempDir()
+	runSnapZip(t, repoRoot,
+		"index",
+		"--db-dir", dbDir,
+		"--langs", "go",
+		"--crawl", fixture,
+		"--changed",
+	)
+
+	symbolOutput := runSnapZip(t, repoRoot, "symbols", "--db-dir", dbDir, "--query", "NewUntrackedCache")
+	if !strings.Contains(symbolOutput, "NewUntrackedCache") {
+		t.Fatalf("changed index did not include untracked file:\n%s", symbolOutput)
+	}
+}
+
 func runSnapZip(t *testing.T, repoRoot string, args ...string) string {
 	t.Helper()
 	cmdArgs := append([]string{"run", "./cmd/snapzip"}, args...)

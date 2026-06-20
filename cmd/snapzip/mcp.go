@@ -164,7 +164,7 @@ func (s mcpServer) initializeResult(params json.RawMessage) map[string]any {
 			"version":     "0.1.0",
 			"description": "Local codebase memory and context packs for AI coding agents.",
 		},
-		"instructions": "Use SnapZip tools to search indexed local code, build bounded context packs, read feedback memory, and inspect index stats. Tools are read-only.",
+		"instructions": "Use SnapZip tools to search indexed local code, build bounded context packs, inspect repo maps and symbols, read feedback memory, and inspect index stats. Tools are read-only.",
 	}
 }
 
@@ -195,6 +195,45 @@ func (s mcpServer) tools() []mcpTool {
 					"limit":          integerSchema("Maximum snippets to consider.", 1, 100),
 					"budget":         integerSchema("Approximate byte budget for rendered context.", core.MinContextPackBudgetBytes, core.MaxContextPackBudgetBytes),
 					"feedback_limit": integerSchema("Maximum feedback entries to include.", 0, 100),
+					"mode":           stringSchema("Optional pack mode: debug, refactor, test, or docs."),
+				},
+			),
+		},
+		{
+			Name:        "map",
+			Title:       "Show SnapZip repo map",
+			Description: "Return a compact repo map from indexed symbols.",
+			InputSchema: objectSchema(
+				nil,
+				map[string]any{
+					"db_dir": stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
+					"limit":  integerSchema("Maximum files to include.", 1, 100),
+				},
+			),
+		},
+		{
+			Name:        "symbols",
+			Title:       "Search SnapZip symbols",
+			Description: "Search indexed functions, classes, methods, and types.",
+			InputSchema: objectSchema(
+				[]string{"query"},
+				map[string]any{
+					"query":  stringSchema("Symbol, file, language, or signature query."),
+					"db_dir": stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
+					"limit":  integerSchema("Maximum symbols to return.", 1, 100),
+				},
+			),
+		},
+		{
+			Name:        "related",
+			Title:       "Find related files",
+			Description: "Find files related to an indexed source path using shared indexed symbols.",
+			InputSchema: objectSchema(
+				[]string{"path"},
+				map[string]any{
+					"path":   stringSchema("Indexed source path, such as core/database.go."),
+					"db_dir": stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
+					"limit":  integerSchema("Maximum related files to return.", 1, 100),
 				},
 			),
 		},
@@ -241,6 +280,12 @@ func (s mcpServer) callTool(params json.RawMessage) (mcpToolResult, *rpcError) {
 		return s.callSearch(call.Arguments), nil
 	case "context_pack":
 		return s.callContextPack(call.Arguments), nil
+	case "map":
+		return s.callMap(call.Arguments), nil
+	case "symbols":
+		return s.callSymbols(call.Arguments), nil
+	case "related":
+		return s.callRelated(call.Arguments), nil
 	case "get_feedback":
 		return s.callGetFeedback(call.Arguments), nil
 	case "stats":
@@ -291,10 +336,11 @@ func (s mcpServer) callContextPack(args map[string]any) mcpToolResult {
 		return toolError(err.Error())
 	}
 
-	pack, err := core.BuildContextPack(
+	pack, err := core.BuildContextPackWithMode(
 		db,
 		comp,
 		query,
+		stringArg(args, "mode", ""),
 		intArg(args, "limit", 5),
 		intArg(args, "budget", core.DefaultContextPackBudgetBytes),
 		intArg(args, "feedback_limit", 5),
@@ -303,6 +349,61 @@ func (s mcpServer) callContextPack(args map[string]any) mcpToolResult {
 		return toolError(err.Error())
 	}
 	return toolSuccess(core.RenderContextPack(pack), pack)
+}
+
+func (s mcpServer) callMap(args map[string]any) mcpToolResult {
+	db, done, err := s.openDB(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	defer done()
+
+	repoMap, err := core.BuildRepoMap(db, intArg(args, "limit", 50))
+	if err != nil {
+		return toolError(err.Error())
+	}
+	return toolSuccess(core.RenderRepoMap(repoMap), repoMap)
+}
+
+func (s mcpServer) callSymbols(args map[string]any) mcpToolResult {
+	query := strings.TrimSpace(stringArg(args, "query", ""))
+	if query == "" {
+		return toolError("query is required")
+	}
+	db, done, err := s.openDB(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	defer done()
+
+	symbols, err := core.SearchSymbols(db, query, intArg(args, "limit", 20))
+	if err != nil {
+		return toolError(err.Error())
+	}
+	var builder strings.Builder
+	for _, symbol := range symbols {
+		fmt.Fprintf(&builder, "%s:%d [%s %s] %s\n", symbol.Path, symbol.Line, symbol.Language, symbol.Kind, symbol.Signature)
+	}
+	return toolSuccess(builder.String(), symbols)
+}
+
+func (s mcpServer) callRelated(args map[string]any) mcpToolResult {
+	path := strings.TrimSpace(stringArg(args, "path", ""))
+	if path == "" {
+		return toolError("path is required")
+	}
+	db, done, err := s.openDB(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	defer done()
+
+	files, err := core.RelatedFiles(db, path, intArg(args, "limit", 10))
+	if err != nil {
+		return toolError(err.Error())
+	}
+	repoMap := core.RepoMap{Files: files}
+	return toolSuccess(core.RenderRepoMap(repoMap), files)
 }
 
 func (s mcpServer) callGetFeedback(args map[string]any) mcpToolResult {

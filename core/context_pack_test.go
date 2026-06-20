@@ -61,3 +61,18 @@ func TestBuildContextPackBoundsLargeFeedback(t *testing.T) {
 		t.Fatalf("pack used %d bytes, budget %d", pack.UsedBytes, pack.BudgetBytes)
 	}
 }
+
+func TestExpandQueryForPackMode(t *testing.T) {
+	if got := ExpandQueryForPackMode("cache", "debug"); !strings.Contains(got, "failure") {
+		t.Fatalf("debug mode did not add failure terms: %q", got)
+	}
+	if got := ExpandQueryForPackMode("cache", "refactor"); !strings.Contains(got, "caller") {
+		t.Fatalf("refactor mode did not add caller terms: %q", got)
+	}
+	if got := ExpandQueryForPackMode("cache", "test"); !strings.Contains(got, "assertion") {
+		t.Fatalf("test mode did not add assertion terms: %q", got)
+	}
+	if got := ExpandQueryForPackMode("cache", "docs"); !strings.Contains(got, "documentation") {
+		t.Fatalf("docs mode did not add documentation terms: %q", got)
+	}
+}

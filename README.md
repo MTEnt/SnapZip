@@ -30,6 +30,8 @@ It combines SQLite FTS5 search, path-aware relevance, compression-distance re-ra
 
 *   **Local code search**: SQLite FTS5 keyword search with path-aware lexical weighting and Query-Normalized Distance (QND) compression re-ranking.
 *   **Language-aware indexing**: Index popular source formats by default, or pass explicit extensions such as `html,css,rb,py,go,rs,zig`.
+*   **Repo maps and symbols**: Stores file paths, line ranges, content hashes, and indexed functions/classes/types for structural lookup.
+*   **Task-specific context packs**: Build bounded packs for debug, refactor, test, and docs workflows.
 *   **Syntax checks where available**: Uses local toolchains for Go, Python, JavaScript, Ruby, PHP, Perl, Lua, shell, C/C++, Swift, and TypeScript validation during optimization.
 *   **Private feedback memory**: Stores negative project feedback locally so agents can avoid repeating known mistakes.
 *   **Simple agent integration**: Works as a CLI, JSON-output command, or read-only MCP stdio server for coding agents and editor integrations.
@@ -111,6 +113,14 @@ Index codebase files under a target directory, filtering by language name or ext
 snapzip init-db --db-dir . --langs popular --crawl /path/to/your/codebase
 ```
 
+Use `index` for repeat indexing and incremental workflows:
+
+```bash
+snapzip index --db-dir . --langs all --crawl .
+snapzip index --db-dir . --langs all --crawl . --changed
+snapzip index --db-dir . --langs all --crawl . --since HEAD~1
+```
+
 `--langs` accepts presets (`popular`, `web`, `frontend`, `backend`, `mobile`, `systems`, `config`), extensions (`html,css,rb,py,js,rs,zig`), and language names (`ruby,python,javascript,rust`).
 
 Use `popular` for source-heavy indexing. Use `all` or `any` when you also want docs, configs, workflows, and project instructions included in search results. Explicit extensions are accepted even when they are not part of the default common-language list.
@@ -122,6 +132,8 @@ snapzip init-db --db-dir . --langs all --crawl /path/to/your/codebase --reset
 ```
 
 The indexer skips common dependency/build directories such as `.git`, `node_modules`, `vendor`, `dist`, `build`, `target`, `.venv`, and `__pycache__`. It also skips `memory.db`, binary-looking files, and files larger than 1 MiB by default. Larger accepted source files are split into bounded searchable chunks to keep search reranking responsive. Override the file cap with `--max-file-bytes`.
+
+Indexed snippets include source path, line range, content hash, and source modification time. Supported source files also populate the local symbol table used by repo maps and related-file lookup.
 
 Common default formats include:
 
@@ -151,19 +163,66 @@ Build a bounded Markdown context pack with ranked snippets and relevant feedback
 snapzip pack --query "python lru cache" --limit 5 --budget 12000
 ```
 
+Use a mode when the task has a clear shape:
+
+```bash
+snapzip pack --query "cache failure" --mode debug --limit 5 --budget 12000
+snapzip pack --query "cache storage" --mode refactor --limit 5 --budget 12000
+snapzip pack --query "cache behavior" --mode test --limit 5 --budget 12000
+snapzip pack --query "installation" --mode docs --limit 5 --budget 12000
+```
+
 Use JSON output when the caller wants structured snippets instead of Markdown:
 
 ```bash
 snapzip pack --query "python lru cache" --limit 5 --budget 12000 --json
 ```
 
-### D. MCP Server
+### D. Repo Map and Symbols
+Inspect indexed structure:
+
+```bash
+snapzip map --db-dir . --limit 50
+snapzip symbols --db-dir . --query "CacheStore" --limit 10
+snapzip related --db-dir . --path core/database.go --limit 10
+```
+
+Use these commands when an agent needs structural context before editing a file.
+
+### E. Failure Context
+Build a context pack from failing test/build output:
+
+```bash
+snapzip repair-pack --db-dir . --error-file /tmp/test-output.txt --budget 12000
+```
+
+`explain-failure` is the same workflow with a diagnosis-oriented name.
+
+### F. Privacy Audit and Agent Setup
+Check local index hygiene:
+
+```bash
+snapzip audit --db-dir .
+```
+
+Generate integration files for common coding-agent surfaces:
+
+```bash
+snapzip install-agent codex --dir .
+snapzip install-agent claude --dir .
+snapzip install-agent cursor --dir .
+snapzip install-agent continue --dir .
+```
+
+Existing files are skipped unless `--force` is provided.
+
+### G. MCP Server
 Run SnapZip as a local read-only MCP stdio server:
 ```bash
 snapzip mcp --db-dir .
 ```
 
-The MCP server exposes `search`, `context_pack`, `get_feedback`, and `stats` tools. It writes protocol messages to stdout and logs only to stderr, so it can be launched by MCP-compatible clients.
+The MCP server exposes `search`, `context_pack`, `map`, `symbols`, `related`, `get_feedback`, and `stats` tools. It writes protocol messages to stdout and logs only to stderr, so it can be launched by MCP-compatible clients.
 
 Example client configuration shape:
 
@@ -178,7 +237,7 @@ Example client configuration shape:
 }
 ```
 
-### E. Inspect Database Stats
+### H. Inspect Database Stats
 Show indexed row counts and language breakdown:
 ```bash
 snapzip stats --db-dir .
@@ -190,7 +249,7 @@ Use `--json` for structured stats:
 snapzip stats --db-dir . --json
 ```
 
-### F. Optimize a Code Sketch
+### I. Optimize a Code Sketch
 Run the conservative optimizer over a draft using local codebase context:
 ```bash
 snapzip optimize \
@@ -203,7 +262,7 @@ snapzip optimize \
 
 Optimization is conservative: SnapZip only mutates files when a local syntax checker is available for that language, rejects syntactically invalid proposals, and otherwise returns the seed draft unchanged.
 
-### G. Log & Query Negative Feedback Memory
+### J. Log & Query Negative Feedback Memory
 SnapZip does not log search queries into feedback memory. Feedback is only stored when you explicitly call `log-feedback` with a clear negative critique:
 *   **Log feedback**:
     ```bash
@@ -221,7 +280,7 @@ SnapZip does not log search queries into feedback memory. Feedback is only store
 Add a project or global agent rule that calls SnapZip when the binary is available:
 
 ```text
-Use SnapZip when available. Before non-trivial code changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000` for targeted local context and feedback memory. Use `snapzip search --query "<topic>" --limit 3 --json` when structured snippets are easier to consume. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` when practical.
+Use SnapZip when available. Before non-trivial code changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, and `snapzip related --path <file>` for structural context. After failing tests, run `snapzip repair-pack --error-file <test-output>`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` when practical.
 ```
 
 Use [LLM_INSTRUCTIONS.md](LLM_INSTRUCTIONS.md) as a portable rule template for other agents and editor integrations.
@@ -234,6 +293,12 @@ Build the CLI and run the included benchmark harness:
 ```bash
 go build -o snapzip ./cmd/snapzip
 python3 benchmarks/run.py --suite smoke --snapzip-bin ./snapzip
+```
+
+Or run the benchmark harness through SnapZip:
+
+```bash
+snapzip eval --suite smoke --snapzip-bin ./snapzip
 ```
 
 Run the full 20-task algorithm suite:

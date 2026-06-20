@@ -1,7 +1,9 @@
 package core
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,11 +15,27 @@ import (
 )
 
 type Snippet struct {
-	ID       int     `json:"id"`
-	Language string  `json:"language"`
-	Topic    string  `json:"topic"`
-	Content  string  `json:"content"`
-	Score    float64 `json:"score"`
+	ID          int     `json:"id"`
+	Language    string  `json:"language"`
+	Topic       string  `json:"topic"`
+	Path        string  `json:"path,omitempty"`
+	StartLine   int     `json:"start_line,omitempty"`
+	EndLine     int     `json:"end_line,omitempty"`
+	Content     string  `json:"content"`
+	ContentHash string  `json:"content_hash,omitempty"`
+	SourceMTime int64   `json:"source_mtime,omitempty"`
+	Score       float64 `json:"score"`
+}
+
+type KnowledgeEntry struct {
+	Language    string
+	Topic       string
+	Path        string
+	StartLine   int
+	EndLine     int
+	Content     string
+	ContentHash string
+	SourceMTime int64
 }
 
 var DBPath string
@@ -60,6 +78,11 @@ func InitDB(dir string) (*sql.DB, error) {
 		language TEXT,
 		topic TEXT,
 		content TEXT,
+		path TEXT DEFAULT '',
+		start_line INTEGER DEFAULT 0,
+		end_line INTEGER DEFAULT 0,
+		content_hash TEXT DEFAULT '',
+		source_mtime INTEGER DEFAULT 0,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);`)
 	if err != nil {
@@ -89,6 +112,22 @@ func InitDB(dir string) (*sql.DB, error) {
 		return nil, err
 	}
 
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS symbols (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT,
+		kind TEXT,
+		signature TEXT,
+		language TEXT,
+		path TEXT,
+		line INTEGER,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(path, name, kind, line)
+	);`)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := migrateKnowledgeIndex(db); err != nil {
 		return nil, err
 	}
@@ -99,50 +138,106 @@ func InitDB(dir string) (*sql.DB, error) {
 
 // AddKnowledge inserts a new codebase template or config note into SQLite and the FTS5 index
 func AddKnowledge(db *sql.DB, language, topic, content string) error {
-	language = NormalizeLanguage(language)
+	_, err := AddKnowledgeEntry(db, KnowledgeEntry{
+		Language: language,
+		Topic:    topic,
+		Path:     pathFromTopic(topic),
+		Content:  content,
+	})
+	return err
+}
+
+func AddKnowledgeEntry(db *sql.DB, entry KnowledgeEntry) (bool, error) {
+	language := NormalizeLanguage(entry.Language)
+	entry.Language = language
+	entry.Topic = strings.TrimSpace(entry.Topic)
+	entry.Path = strings.TrimSpace(entry.Path)
+	if entry.Topic == "" && entry.Path != "" {
+		entry.Topic = "Source file: " + entry.Path
+	}
+	if entry.Path == "" {
+		entry.Path = pathFromTopic(entry.Topic)
+	}
+	if entry.ContentHash == "" {
+		entry.ContentHash = contentHash([]byte(entry.Content))
+	}
+	if entry.StartLine < 0 {
+		entry.StartLine = 0
+	}
+	if entry.EndLine < entry.StartLine {
+		entry.EndLine = entry.StartLine
+	}
+
+	changed := true
+	var existingHash string
+	if err := db.QueryRow(
+		"SELECT content_hash FROM knowledge WHERE language = ? AND topic = ?",
+		entry.Language,
+		entry.Topic,
+	).Scan(&existingHash); err == nil && existingHash == entry.ContentHash {
+		changed = false
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 
 	_, err = tx.Exec(`
-		INSERT INTO knowledge (language, topic, content)
-		VALUES (?, ?, ?)
+		INSERT INTO knowledge (language, topic, content, path, start_line, end_line, content_hash, source_mtime)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(language, topic) DO UPDATE SET
 			content = excluded.content,
+			path = excluded.path,
+			start_line = excluded.start_line,
+			end_line = excluded.end_line,
+			content_hash = excluded.content_hash,
+			source_mtime = excluded.source_mtime,
 			created_at = CURRENT_TIMESTAMP`,
-		language, topic, content,
+		entry.Language,
+		entry.Topic,
+		entry.Content,
+		entry.Path,
+		entry.StartLine,
+		entry.EndLine,
+		entry.ContentHash,
+		entry.SourceMTime,
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	var rowID int64
 	if err := tx.QueryRow(
 		"SELECT id FROM knowledge WHERE language = ? AND topic = ?",
-		language, topic,
+		entry.Language,
+		entry.Topic,
 	).Scan(&rowID); err != nil {
-		return err
+		return false, err
 	}
 
 	if _, err = tx.Exec("DELETE FROM knowledge_fts WHERE rowid = ?", rowID); err != nil {
-		return err
+		return false, err
 	}
 	_, err = tx.Exec(
 		"INSERT INTO knowledge_fts (rowid, topic, content) VALUES (?, ?, ?)",
-		rowID, topic, content,
+		rowID, entry.Topic, entry.Content,
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return changed, nil
 }
 
 type DatabaseStats struct {
 	KnowledgeRows int            `json:"knowledge_rows"`
 	FeedbackRows  int            `json:"feedback_rows"`
+	SymbolRows    int            `json:"symbol_rows"`
 	Languages     []LanguageStat `json:"languages"`
 }
 
@@ -157,6 +252,9 @@ func GetDatabaseStats(db *sql.DB) (DatabaseStats, error) {
 		return stats, err
 	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM negative_feedback").Scan(&stats.FeedbackRows); err != nil {
+		return stats, err
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM symbols").Scan(&stats.SymbolRows); err != nil {
 		return stats, err
 	}
 
@@ -184,6 +282,21 @@ func GetDatabaseStats(db *sql.DB) (DatabaseStats, error) {
 }
 
 func migrateKnowledgeIndex(db *sql.DB) error {
+	for _, column := range []struct {
+		name string
+		def  string
+	}{
+		{"path", "TEXT DEFAULT ''"},
+		{"start_line", "INTEGER DEFAULT 0"},
+		{"end_line", "INTEGER DEFAULT 0"},
+		{"content_hash", "TEXT DEFAULT ''"},
+		{"source_mtime", "INTEGER DEFAULT 0"},
+	} {
+		if err := ensureKnowledgeColumn(db, column.name, column.def); err != nil {
+			return err
+		}
+	}
+
 	if _, err := db.Exec(`
 		DELETE FROM knowledge
 		WHERE id NOT IN (
@@ -204,6 +317,32 @@ func migrateKnowledgeIndex(db *sql.DB) error {
 	_, err := db.Exec(`
 		INSERT INTO knowledge_fts(rowid, topic, content)
 		SELECT id, topic, content FROM knowledge;`)
+	return err
+}
+
+func ensureKnowledgeColumn(db *sql.DB, name, definition string) error {
+	rows, err := db.Query("PRAGMA table_info(knowledge)")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var columnName, columnType string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if columnName == name {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec("ALTER TABLE knowledge ADD COLUMN " + name + " " + definition)
 	return err
 }
 
@@ -247,6 +386,7 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 	if ftsQuery != "" {
 		rows, err = db.Query(`
 			SELECT k.id, k.language, k.topic, k.content
+				, k.path, k.start_line, k.end_line, k.content_hash, k.source_mtime
 			FROM knowledge k
 			JOIN knowledge_fts f ON k.id = f.rowid
 			WHERE knowledge_fts MATCH ?
@@ -255,7 +395,11 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 	}
 
 	if err != nil || rows == nil {
-		rows, err = db.Query("SELECT id, language, topic, content FROM knowledge ORDER BY id DESC LIMIT ?", defaultSearchCandidateLimit)
+		rows, err = db.Query(`
+			SELECT id, language, topic, content, path, start_line, end_line, content_hash, source_mtime
+			FROM knowledge
+			ORDER BY id DESC
+			LIMIT ?`, defaultSearchCandidateLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -264,7 +408,7 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 
 	for rows.Next() {
 		var s Snippet
-		if err := rows.Scan(&s.ID, &s.Language, &s.Topic, &s.Content); err != nil {
+		if err := rows.Scan(&s.ID, &s.Language, &s.Topic, &s.Content, &s.Path, &s.StartLine, &s.EndLine, &s.ContentHash, &s.SourceMTime); err != nil {
 			return nil, err
 		}
 		candidates = append(candidates, s)
@@ -441,4 +585,18 @@ func isLanguageQueryToken(token string) bool {
 	}
 	_, ok := languageAliases[normalized]
 	return ok
+}
+
+func contentHash(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
+}
+
+func pathFromTopic(topic string) string {
+	topic = strings.TrimSpace(topic)
+	topic = strings.TrimPrefix(topic, "Source file: ")
+	if idx := strings.Index(topic, " #chunk-"); idx >= 0 {
+		topic = topic[:idx]
+	}
+	return strings.TrimSpace(topic)
 }
