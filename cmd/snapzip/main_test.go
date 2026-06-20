@@ -125,15 +125,16 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 }
 
 func TestMCPServerExposesSearchTool(t *testing.T) {
+	fixture := t.TempDir()
+	writeCLIFile(t, fixture, "lib/cache.rb", "class CacheStore\nend\n\ndef build_cache\n  CacheStore.new\nend\n")
+	writeCLIFile(t, fixture, "test/cache_test.rb", "def test_cache\n  build_cache()\nend\n")
+
 	dbDir := t.TempDir()
 	db, err := core.InitDB(dbDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := core.AddKnowledge(db, "rb", "Source file: lib/cache.rb", "class CacheStore\nend\n"); err != nil {
-		t.Fatal(err)
-	}
-	if err := core.AddKnowledge(db, "rb", "Source file: test/cache_test.rb", "class CacheStoreTest\nend\n"); err != nil {
+	if _, err := core.IndexDirectory(db, fixture, core.NewLanguageFilter("ruby")); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -148,6 +149,7 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"context_pack","arguments":{"query":"ruby CacheStore","limit":1,"budget":2048}}}`,
 		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"repair_pack","arguments":{"error_output":"lib/cache.rb:1: uninitialized constant CacheStore","limit":2,"budget":4096}}}`,
 		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"affected_tests","arguments":{"path":"lib/cache.rb","limit":5}}}`,
+		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"symbol_context","arguments":{"query":"build_cache","limit":5}}}`,
 	}, "\n") + "\n"
 
 	var output bytes.Buffer
@@ -156,10 +158,10 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 6 {
-		t.Fatalf("got %d MCP responses, want 6:\n%s", len(lines), output.String())
+	if len(lines) != 7 {
+		t.Fatalf("got %d MCP responses, want 7:\n%s", len(lines), output.String())
 	}
-	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) {
+	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) || !strings.Contains(lines[1], `"symbol_context"`) {
 		t.Fatalf("tools/list did not expose expected tools:\n%s", lines[1])
 	}
 	if !strings.Contains(lines[2], "CacheStore") {
@@ -174,6 +176,9 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	if !strings.Contains(lines[5], "test/cache_test.rb") {
 		t.Fatalf("affected_tests tool response missing direct test:\n%s", lines[5])
 	}
+	if !strings.Contains(lines[6], "SnapZip Symbol Context") || !strings.Contains(lines[6], "test/cache_test.rb") {
+		t.Fatalf("symbol_context tool response missing reference context:\n%s", lines[6])
+	}
 }
 
 func TestCLIAdvancedContextCommands(t *testing.T) {
@@ -184,7 +189,7 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 
 	fixture := t.TempDir()
 	writeCLIFile(t, fixture, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
-	writeCLIFile(t, fixture, "pkg/cache_test.go", "package cache\n\nfunc TestCacheStore() {}\n")
+	writeCLIFile(t, fixture, "pkg/cache_test.go", "package cache\n\nfunc TestConstructor() { _ = NewCacheStore() }\n")
 
 	dbDir := t.TempDir()
 	runSnapZip(t, repoRoot,
@@ -202,6 +207,11 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 	symbolOutput := runSnapZip(t, repoRoot, "symbols", "--db-dir", dbDir, "--query", "CacheStore", "--limit", "5")
 	if !strings.Contains(symbolOutput, "pkg/cache.go") {
 		t.Fatalf("symbols output missing source path:\n%s", symbolOutput)
+	}
+
+	symbolContextOutput := runSnapZip(t, repoRoot, "symbol-context", "--db-dir", dbDir, "--query", "NewCacheStore", "--limit", "5")
+	if !strings.Contains(symbolContextOutput, "Definitions") || !strings.Contains(symbolContextOutput, "References") || !strings.Contains(symbolContextOutput, "pkg/cache_test.go") {
+		t.Fatalf("symbol-context output missing definition/reference context:\n%s", symbolContextOutput)
 	}
 
 	relatedOutput := runSnapZip(t, repoRoot, "related", "--db-dir", dbDir, "--path", "pkg/cache.go", "--limit", "5")

@@ -30,7 +30,7 @@ It combines SQLite FTS5 search, path-aware relevance, compression-distance re-ra
 
 *   **Local code search**: SQLite FTS5 keyword search with path-aware lexical weighting and Query-Normalized Distance (QND) compression re-ranking.
 *   **Language-aware indexing**: Index popular source formats by default, or pass explicit extensions such as `html,css,rb,py,go,rs,zig`.
-*   **Repo maps and symbols**: Stores file paths, line ranges, content hashes, and indexed functions/classes/types for structural lookup.
+*   **Repo maps, symbols, and references**: Stores file paths, line ranges, content hashes, indexed functions/classes/types, and lightweight call/reference sites for structural lookup.
 *   **Task-specific context packs**: Build bounded packs for debug, refactor, test, and docs workflows.
 *   **Syntax checks where available**: Uses local toolchains for Go, Python, JavaScript, Ruby, PHP, Perl, Lua, shell, C/C++, Swift, and TypeScript validation during optimization.
 *   **Private feedback memory**: Stores negative project feedback locally so agents can avoid repeating known mistakes.
@@ -57,6 +57,7 @@ SnapZip is primarily a retrieval and local-memory tool. It ranks indexed snippet
 *   source path and file-type relevance
 *   lexical overlap with the query
 *   Query-Normalized Distance (QND) compression scoring
+*   indexed definitions and lightweight call/reference-site matches
 *   repair-specific stack, symbol, identifier, and file/line signals when using failure workflows
 
 Every context pack includes context receipts when budget allows. Receipts explain why each snippet was included, such as a matched stack frame, matched symbol, related test, or fallback retrieval match. This makes the context auditable for humans and machine-readable for agents.
@@ -196,10 +197,11 @@ Inspect indexed structure:
 ```bash
 snapzip map --db-dir . --limit 50
 snapzip symbols --db-dir . --query "CacheStore" --limit 10
+snapzip symbol-context --db-dir . --query "CacheStore" --limit 10
 snapzip related --db-dir . --path core/database.go --limit 10
 ```
 
-Use these commands when an agent needs structural context before editing a file.
+Use these commands when an agent needs structural context before editing a file. `symbol-context` returns matching definitions plus indexed call/reference sites.
 
 ### E. Failure Context
 Build a context pack from failing test/build output:
@@ -253,7 +255,7 @@ Run SnapZip as a local read-only MCP stdio server:
 snapzip mcp --db-dir .
 ```
 
-The MCP server exposes read-only `search`, `context_pack`, `repair_pack`, `affected_tests`, `map`, `symbols`, `related`, `get_feedback`, and `stats` tools. It writes protocol messages to stdout and logs only to stderr, so it can be launched by MCP-compatible clients.
+The MCP server exposes read-only `search`, `context_pack`, `repair_pack`, `affected_tests`, `map`, `symbols`, `symbol_context`, `related`, `get_feedback`, and `stats` tools. It writes protocol messages to stdout and logs only to stderr, so it can be launched by MCP-compatible clients.
 
 Example client configuration shape:
 

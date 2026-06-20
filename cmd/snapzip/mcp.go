@@ -164,7 +164,7 @@ func (s mcpServer) initializeResult(params json.RawMessage) map[string]any {
 			"version":     "0.1.0",
 			"description": "Local codebase memory and context packs for AI coding agents.",
 		},
-		"instructions": "Use SnapZip tools to search indexed local code, build bounded context packs, inspect repo maps and symbols, read feedback memory, and inspect index stats. Tools are read-only.",
+		"instructions": "Use SnapZip tools to search indexed local code, build bounded context and repair packs, inspect repo maps, symbols, symbol references, likely affected tests, feedback memory, and index stats. Tools are read-only.",
 	}
 }
 
@@ -255,9 +255,22 @@ func (s mcpServer) tools() []mcpTool {
 			),
 		},
 		{
+			Name:        "symbol_context",
+			Title:       "Show symbol definitions and references",
+			Description: "Return matching indexed definitions plus call/reference sites for a symbol or identifier.",
+			InputSchema: objectSchema(
+				[]string{"query"},
+				map[string]any{
+					"query":  stringSchema("Symbol, function, class, method, or call-site query."),
+					"db_dir": stringSchema("Directory containing memory.db. Defaults to the server --db-dir."),
+					"limit":  integerSchema("Maximum definitions and references to return.", 1, 100),
+				},
+			),
+		},
+		{
 			Name:        "related",
 			Title:       "Find related files",
-			Description: "Find files related to an indexed source path using shared indexed symbols.",
+			Description: "Find files related to an indexed source path using shared indexed symbols and call/reference sites.",
 			InputSchema: objectSchema(
 				[]string{"path"},
 				map[string]any{
@@ -318,6 +331,8 @@ func (s mcpServer) callTool(params json.RawMessage) (mcpToolResult, *rpcError) {
 		return s.callMap(call.Arguments), nil
 	case "symbols":
 		return s.callSymbols(call.Arguments), nil
+	case "symbol_context":
+		return s.callSymbolContext(call.Arguments), nil
 	case "related":
 		return s.callRelated(call.Arguments), nil
 	case "get_feedback":
@@ -481,6 +496,24 @@ func (s mcpServer) callSymbols(args map[string]any) mcpToolResult {
 	return toolSuccess(builder.String(), symbols)
 }
 
+func (s mcpServer) callSymbolContext(args map[string]any) mcpToolResult {
+	query := strings.TrimSpace(stringArg(args, "query", ""))
+	if query == "" {
+		return toolError("query is required")
+	}
+	db, done, err := s.openDB(args)
+	if err != nil {
+		return toolError(err.Error())
+	}
+	defer done()
+
+	context, err := core.BuildSymbolContext(db, query, intArg(args, "limit", 20))
+	if err != nil {
+		return toolError(err.Error())
+	}
+	return toolSuccess(core.RenderSymbolContext(context), context)
+}
+
 func (s mcpServer) callRelated(args map[string]any) mcpToolResult {
 	path := strings.TrimSpace(stringArg(args, "path", ""))
 	if path == "" {
@@ -535,6 +568,8 @@ func (s mcpServer) callStats(args map[string]any) mcpToolResult {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "knowledge rows: %d\n", stats.KnowledgeRows)
 	fmt.Fprintf(&builder, "feedback rows: %d\n", stats.FeedbackRows)
+	fmt.Fprintf(&builder, "symbol rows: %d\n", stats.SymbolRows)
+	fmt.Fprintf(&builder, "symbol reference rows: %d\n", stats.SymbolReferenceRows)
 	if len(stats.Languages) == 0 {
 		builder.WriteString("languages: none\n")
 	} else {

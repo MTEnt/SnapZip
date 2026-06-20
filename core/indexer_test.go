@@ -204,7 +204,7 @@ func TestIndexDirectoryChunksLargeFiles(t *testing.T) {
 func TestFindAffectedTestsUsesDirectAndRelatedSignals(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
-	writeTestFile(t, root, "pkg/cache_test.go", "package cache\n\nfunc TestCacheStore(t *testing.T) {}\n")
+	writeTestFile(t, root, "pkg/cache_test.go", "package cache\n\nfunc TestConstructor(t *testing.T) { _ = NewCacheStore() }\n")
 
 	db, err := InitDB(t.TempDir())
 	if err != nil {
@@ -227,7 +227,7 @@ func TestFindAffectedTestsUsesDirectAndRelatedSignals(t *testing.T) {
 func TestIndexDirectoryStoresSymbolsAndRepoMap(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
-	writeTestFile(t, root, "pkg/cache_test.go", "package cache\n\nfunc TestCacheStore(t *testing.T) {}\n")
+	writeTestFile(t, root, "pkg/cache_test.go", "package cache\n\nfunc TestConstructor(t *testing.T) { _ = NewCacheStore() }\n")
 
 	db, err := InitDB(t.TempDir())
 	if err != nil {
@@ -260,6 +260,13 @@ func TestIndexDirectoryStoresSymbolsAndRepoMap(t *testing.T) {
 	}
 	if len(repoMap.Files) != 2 {
 		t.Fatalf("repo map files = %d, want 2", len(repoMap.Files))
+	}
+	stats, err := GetDatabaseStats(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.SymbolReferenceRows == 0 {
+		t.Fatal("expected indexed symbol references")
 	}
 
 	related, err := RelatedFiles(db, "pkg/cache.go", 10)

@@ -18,6 +18,15 @@ type Symbol struct {
 	Line      int    `json:"line"`
 }
 
+type SymbolReference struct {
+	ID       int    `json:"id,omitempty"`
+	Name     string `json:"name"`
+	Language string `json:"language"`
+	Path     string `json:"path"`
+	Line     int    `json:"line"`
+	Context  string `json:"context,omitempty"`
+}
+
 type RepoMapFile struct {
 	Path     string   `json:"path"`
 	Language string   `json:"language"`
@@ -26,6 +35,12 @@ type RepoMapFile struct {
 
 type RepoMap struct {
 	Files []RepoMapFile `json:"files"`
+}
+
+type SymbolContext struct {
+	Query       string            `json:"query"`
+	Definitions []Symbol          `json:"definitions"`
+	References  []SymbolReference `json:"references"`
 }
 
 var symbolPatterns = map[string][]symbolPattern{
@@ -68,6 +83,8 @@ var symbolPatterns = map[string][]symbolPattern{
 		{kind: "function", re: regexp.MustCompile(`^\s*(?:public\s+|private\s+|internal\s+)?fun\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(`)},
 	},
 }
+
+var symbolReferenceCallPattern = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 
 type symbolPattern struct {
 	kind string
@@ -120,6 +137,41 @@ func ReplaceSymbolsForFile(db *sql.DB, language, path string, content []byte) er
 	return tx.Commit()
 }
 
+func ReplaceSymbolReferencesForFile(db *sql.DB, language, path string, content []byte) error {
+	language = NormalizeLanguage(language)
+	path = strings.TrimSpace(path)
+	refs := ExtractSymbolReferences(language, path, string(content))
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM symbol_refs WHERE path = ?", path); err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		_, err := tx.Exec(`
+			INSERT INTO symbol_refs (name, language, path, line, context)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(path, name, line) DO UPDATE SET
+				language = excluded.language,
+				context = excluded.context,
+				created_at = CURRENT_TIMESTAMP`,
+			ref.Name,
+			ref.Language,
+			ref.Path,
+			ref.Line,
+			ref.Context,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func ExtractSymbols(language, path, content string) []Symbol {
 	language = NormalizeLanguage(language)
 	patterns := symbolPatterns[language]
@@ -151,6 +203,46 @@ func ExtractSymbols(language, path, content string) []Symbol {
 		}
 	}
 	return symbols
+}
+
+func ExtractSymbolReferences(language, path, content string) []SymbolReference {
+	language = NormalizeLanguage(language)
+	if !supportsSymbolReferences(language) {
+		return nil
+	}
+
+	definedOnLine := map[int]map[string]bool{}
+	for _, symbol := range ExtractSymbols(language, path, content) {
+		if definedOnLine[symbol.Line] == nil {
+			definedOnLine[symbol.Line] = map[string]bool{}
+		}
+		definedOnLine[symbol.Line][symbol.Name] = true
+	}
+
+	seen := map[string]bool{}
+	var refs []SymbolReference
+	lines := strings.Split(content, "\n")
+	for idx, line := range lines {
+		lineNumber := idx + 1
+		for _, name := range callNamesFromLine(language, line) {
+			if definedOnLine[lineNumber][name] || protectedIdentifier(name) || commonSymbolReferenceName(name) {
+				continue
+			}
+			key := fmt.Sprintf("%s:%d:%s", path, lineNumber, name)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			refs = append(refs, SymbolReference{
+				Name:     name,
+				Language: language,
+				Path:     path,
+				Line:     lineNumber,
+				Context:  strings.TrimSpace(line),
+			})
+		}
+	}
+	return refs
 }
 
 func SearchSymbols(db *sql.DB, query string, limit int) ([]Symbol, error) {
@@ -186,6 +278,80 @@ func SearchSymbols(db *sql.DB, query string, limit int) ([]Symbol, error) {
 		matches = matches[:limit]
 	}
 	return matches, nil
+}
+
+func SearchSymbolReferences(db *sql.DB, query string, limit int) ([]SymbolReference, error) {
+	limit = normalizeResultLimit(limit, 20)
+	tokens := searchTokens(query)
+	rows, err := db.Query(`
+		SELECT id, name, language, path, line, context
+		FROM symbol_refs
+		ORDER BY path ASC, line ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var matches []SymbolReference
+	for rows.Next() {
+		ref, err := scanSymbolReference(rows)
+		if err != nil {
+			return nil, err
+		}
+		if symbolReferenceMatches(ref, tokens) {
+			matches = append(matches, ref)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.SliceStable(matches, func(i, j int) bool {
+		return symbolReferenceScore(matches[i], tokens) > symbolReferenceScore(matches[j], tokens)
+	})
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
+	return matches, nil
+}
+
+func BuildSymbolContext(db *sql.DB, query string, limit int) (SymbolContext, error) {
+	limit = normalizeResultLimit(limit, 20)
+	definitions, err := SearchSymbols(db, query, limit)
+	if err != nil {
+		return SymbolContext{}, err
+	}
+	references, err := SearchSymbolReferences(db, query, limit)
+	if err != nil {
+		return SymbolContext{}, err
+	}
+	return SymbolContext{
+		Query:       strings.TrimSpace(query),
+		Definitions: definitions,
+		References:  references,
+	}, nil
+}
+
+func RenderSymbolContext(context SymbolContext) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "# SnapZip Symbol Context\n\nQuery: %s\n", context.Query)
+	builder.WriteString("\n## Definitions\n")
+	if len(context.Definitions) == 0 {
+		builder.WriteString("\nNo matching definitions found.\n")
+	} else {
+		for _, symbol := range context.Definitions {
+			fmt.Fprintf(&builder, "- %s:%d [%s %s] %s\n", symbol.Path, symbol.Line, symbol.Language, symbol.Kind, symbol.Signature)
+		}
+	}
+	builder.WriteString("\n## References\n")
+	if len(context.References) == 0 {
+		builder.WriteString("\nNo matching references found.\n")
+	} else {
+		for _, ref := range context.References {
+			fmt.Fprintf(&builder, "- %s:%d [%s] %s\n", ref.Path, ref.Line, ref.Language, ref.Context)
+		}
+	}
+	return builder.String()
 }
 
 func BuildRepoMap(db *sql.DB, limit int) (RepoMap, error) {
@@ -285,6 +451,17 @@ func RelatedFiles(db *sql.DB, path string, limit int) ([]RepoMapFile, error) {
 				symbolsByPath[symbol.Path] = append(symbolsByPath[symbol.Path], symbol)
 			}
 		}
+		refs, err := SearchSymbolReferences(db, name, 100)
+		if err != nil {
+			return nil, err
+		}
+		for _, ref := range refs {
+			if ref.Path == path {
+				continue
+			}
+			scoreByPath[ref.Path] += 2
+			languageByPath[ref.Path] = ref.Language
+		}
 	}
 
 	type scoredPath struct {
@@ -348,6 +525,14 @@ func scanSymbol(rows interface {
 	return symbol, err
 }
 
+func scanSymbolReference(rows interface {
+	Scan(dest ...any) error
+}) (SymbolReference, error) {
+	var ref SymbolReference
+	err := rows.Scan(&ref.ID, &ref.Name, &ref.Language, &ref.Path, &ref.Line, &ref.Context)
+	return ref, err
+}
+
 func symbolMatches(symbol Symbol, tokens []string) bool {
 	if len(tokens) == 0 {
 		return true
@@ -375,6 +560,83 @@ func symbolScore(symbol Symbol, tokens []string) int {
 		case strings.Contains(lowerPath, token):
 			score += 3
 		case strings.Contains(lowerSignature, token):
+			score += 2
+		}
+	}
+	return score
+}
+
+func supportsSymbolReferences(language string) bool {
+	switch NormalizeLanguage(language) {
+	case "go", "py", "rb", "js", "jsx", "ts", "tsx", "java", "rs", "php", "swift", "kt":
+		return true
+	default:
+		return false
+	}
+}
+
+func callNamesFromLine(language, line string) []string {
+	language = NormalizeLanguage(language)
+	line = stripLineComment(language, line)
+	var names []string
+	for _, match := range symbolReferenceCallPattern.FindAllStringSubmatch(line, -1) {
+		if len(match) > 1 {
+			names = append(names, match[1])
+		}
+	}
+	return uniqueStrings(names)
+}
+
+func stripLineComment(language, line string) string {
+	switch NormalizeLanguage(language) {
+	case "py", "rb":
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			return line[:idx]
+		}
+	default:
+		if idx := strings.Index(line, "//"); idx >= 0 {
+			return line[:idx]
+		}
+	}
+	return line
+}
+
+func commonSymbolReferenceName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "append", "array", "assert", "assertequal", "assertfalse", "assertin", "assertis", "assertisnone", "assertisnotnone", "assertraises", "asserttrue", "bool", "boolean", "cap", "copy", "delete", "dict", "format", "int", "len", "list", "log", "make", "object", "open", "print", "printf", "println", "set", "str", "string", "super", "tuple":
+		return true
+	default:
+		return commonFailureWord(name)
+	}
+}
+
+func symbolReferenceMatches(ref SymbolReference, tokens []string) bool {
+	if len(tokens) == 0 {
+		return true
+	}
+	haystack := strings.ToLower(ref.Name + " " + ref.Language + " " + ref.Path + " " + ref.Context)
+	for _, token := range tokens {
+		if strings.Contains(haystack, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func symbolReferenceScore(ref SymbolReference, tokens []string) int {
+	score := 0
+	lowerName := strings.ToLower(ref.Name)
+	lowerPath := strings.ToLower(ref.Path)
+	lowerContext := strings.ToLower(ref.Context)
+	for _, token := range tokens {
+		switch {
+		case lowerName == token:
+			score += 8
+		case strings.Contains(lowerName, token):
+			score += 5
+		case strings.Contains(lowerPath, token):
+			score += 3
+		case strings.Contains(lowerContext, token):
 			score += 2
 		}
 	}

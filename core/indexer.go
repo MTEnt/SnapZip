@@ -162,6 +162,9 @@ func IndexFileWithOptions(db *sql.DB, root, path string, filter LanguageFilter, 
 	if err := ReplaceSymbolsForFile(db, language, relPath, content); err != nil {
 		return 0, err
 	}
+	if err := ReplaceSymbolReferencesForFile(db, language, relPath, content); err != nil {
+		return 0, err
+	}
 	return chunks, nil
 }
 

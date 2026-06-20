@@ -128,6 +128,21 @@ func InitDB(dir string) (*sql.DB, error) {
 		return nil, err
 	}
 
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS symbol_refs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT,
+		language TEXT,
+		path TEXT,
+		line INTEGER,
+		context TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(path, name, line)
+	);`)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := migrateKnowledgeIndex(db); err != nil {
 		return nil, err
 	}
@@ -235,10 +250,11 @@ func AddKnowledgeEntry(db *sql.DB, entry KnowledgeEntry) (bool, error) {
 }
 
 type DatabaseStats struct {
-	KnowledgeRows int            `json:"knowledge_rows"`
-	FeedbackRows  int            `json:"feedback_rows"`
-	SymbolRows    int            `json:"symbol_rows"`
-	Languages     []LanguageStat `json:"languages"`
+	KnowledgeRows       int            `json:"knowledge_rows"`
+	FeedbackRows        int            `json:"feedback_rows"`
+	SymbolRows          int            `json:"symbol_rows"`
+	SymbolReferenceRows int            `json:"symbol_reference_rows"`
+	Languages           []LanguageStat `json:"languages"`
 }
 
 type LanguageStat struct {
@@ -255,6 +271,9 @@ func GetDatabaseStats(db *sql.DB) (DatabaseStats, error) {
 		return stats, err
 	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM symbols").Scan(&stats.SymbolRows); err != nil {
+		return stats, err
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM symbol_refs").Scan(&stats.SymbolReferenceRows); err != nil {
 		return stats, err
 	}
 
