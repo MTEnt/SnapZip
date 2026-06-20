@@ -143,6 +143,22 @@ func InitDB(dir string) (*sql.DB, error) {
 		return nil, err
 	}
 
+	_, err = db.Exec(`
+	CREATE TABLE IF NOT EXISTS import_refs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		import_path TEXT,
+		alias TEXT,
+		language TEXT,
+		path TEXT,
+		line INTEGER,
+		context TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(path, import_path, line)
+	);`)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := migrateKnowledgeIndex(db); err != nil {
 		return nil, err
 	}
@@ -254,6 +270,7 @@ type DatabaseStats struct {
 	FeedbackRows        int            `json:"feedback_rows"`
 	SymbolRows          int            `json:"symbol_rows"`
 	SymbolReferenceRows int            `json:"symbol_reference_rows"`
+	ImportRows          int            `json:"import_rows"`
 	Languages           []LanguageStat `json:"languages"`
 }
 
@@ -274,6 +291,9 @@ func GetDatabaseStats(db *sql.DB) (DatabaseStats, error) {
 		return stats, err
 	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM symbol_refs").Scan(&stats.SymbolReferenceRows); err != nil {
+		return stats, err
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM import_refs").Scan(&stats.ImportRows); err != nil {
 		return stats, err
 	}
 

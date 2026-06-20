@@ -268,6 +268,9 @@ func TestIndexDirectoryStoresSymbolsAndRepoMap(t *testing.T) {
 	if stats.SymbolReferenceRows == 0 {
 		t.Fatal("expected indexed symbol references")
 	}
+	if stats.ImportRows == 0 {
+		t.Fatal("expected indexed import references")
+	}
 
 	related, err := RelatedFiles(db, "pkg/cache.go", 10)
 	if err != nil {
@@ -283,6 +286,38 @@ func TestIndexDirectoryStoresSymbolsAndRepoMap(t *testing.T) {
 	}
 	if len(plan.SuggestedCommands) == 0 || !strings.Contains(plan.SuggestedCommands[0].Command, "go test ./pkg") {
 		t.Fatalf("validation plan missing Go test command: %+v", plan.SuggestedCommands)
+	}
+}
+
+func TestImportsConnectSourceAndTests(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "app/cache.py", "class CacheStore:\n    pass\n\ndef build_cache():\n    return CacheStore()\n")
+	writeTestFile(t, root, "tests/test_cache.py", "from app.cache import build_cache\n\ndef test_build_cache():\n    assert build_cache()\n")
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := IndexDirectory(db, root, NewLanguageFilter("python")); err != nil {
+		t.Fatal(err)
+	}
+
+	imports, err := SearchImports(db, "app.cache", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imports) == 0 || imports[0].Path != "tests/test_cache.py" {
+		t.Fatalf("imports = %+v, want tests/test_cache.py", imports)
+	}
+
+	related, err := RelatedFiles(db, "app/cache.py", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(related) == 0 || related[0].Path != "tests/test_cache.py" {
+		t.Fatalf("related files = %+v, want tests/test_cache.py", related)
 	}
 }
 

@@ -429,9 +429,6 @@ func RelatedFiles(db *sql.DB, path string, limit int) ([]RepoMapFile, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(names) == 0 {
-		return relatedFilesByPathTokens(db, path, limit)
-	}
 
 	scoreByPath := map[string]int{}
 	languageByPath := map[string]string{}
@@ -462,6 +459,12 @@ func RelatedFiles(db *sql.DB, path string, limit int) ([]RepoMapFile, error) {
 			scoreByPath[ref.Path] += 2
 			languageByPath[ref.Path] = ref.Language
 		}
+	}
+	if err := scoreImportRelatedFiles(db, path, scoreByPath, languageByPath); err != nil {
+		return nil, err
+	}
+	if len(scoreByPath) == 0 {
+		return relatedFilesByPathTokens(db, path, limit)
 	}
 
 	type scoredPath struct {
@@ -593,6 +596,8 @@ func stripLineComment(language, line string) string {
 		if idx := strings.Index(line, "#"); idx >= 0 {
 			return line[:idx]
 		}
+	case "css", "scss", "sass", "less", "html", "vue", "svelte", "astro":
+		return line
 	default:
 		if idx := strings.Index(line, "//"); idx >= 0 {
 			return line[:idx]

@@ -30,7 +30,7 @@ It combines SQLite FTS5 search, path-aware relevance, compression-distance re-ra
 
 *   **Local code search**: SQLite FTS5 keyword search with path-aware lexical weighting and Query-Normalized Distance (QND) compression re-ranking.
 *   **Language-aware indexing**: Index popular source formats by default, or pass explicit extensions such as `html,css,rb,py,go,rs,zig`.
-*   **Repo maps, symbols, and references**: Stores file paths, line ranges, content hashes, indexed functions/classes/types, and lightweight call/reference sites for structural lookup.
+*   **Repo maps, symbols, references, and imports**: Stores file paths, line ranges, content hashes, indexed functions/classes/types, lightweight call/reference sites, and import/dependency references for structural lookup.
 *   **Task-specific context packs**: Build bounded packs for debug, refactor, test, and docs workflows.
 *   **Context quality scoring**: Every pack reports receipt coverage, evidence density, definition/reference/test coverage, uniqueness, budget use, and warnings.
 *   **Validation planning**: Finds likely affected tests, suggests validation commands, and can run a supplied command with repair context on failure.
@@ -60,7 +60,7 @@ SnapZip is primarily a retrieval and local-memory tool. It ranks indexed snippet
 *   source path and file-type relevance
 *   lexical overlap with the query
 *   Query-Normalized Distance (QND) compression scoring
-*   indexed definitions and lightweight call/reference-site matches
+*   indexed definitions, lightweight call/reference-site matches, and import/dependency references
 *   repair-specific stack, symbol, identifier, and file/line signals when using failure workflows
 
 Every context pack includes context receipts when budget allows. Receipts explain why each snippet was included, such as a matched stack frame, matched symbol, related test, or fallback retrieval match. Packs also include a context quality score with measurable coverage and warning signals. This makes the context auditable for humans and machine-readable for agents.
@@ -155,7 +155,7 @@ private/
 scratch/
 ```
 
-Indexed snippets include source path, line range, content hash, and source modification time. Supported source files also populate the local symbol table used by repo maps and related-file lookup.
+Indexed snippets include source path, line range, content hash, and source modification time. Supported source files also populate local symbol, reference, and import tables used by repo maps and related-file lookup.
 
 Common default formats include:
 
@@ -209,10 +209,11 @@ Inspect indexed structure:
 snapzip map --db-dir . --limit 50
 snapzip symbols --db-dir . --query "CacheStore" --limit 10
 snapzip symbol-context --db-dir . --query "CacheStore" --limit 10
+snapzip imports --db-dir . --query "app.cache" --limit 10
 snapzip related --db-dir . --path core/database.go --limit 10
 ```
 
-Use these commands when an agent needs structural context before editing a file. `symbol-context` returns matching definitions plus indexed call/reference sites.
+Use these commands when an agent needs structural context before editing a file. `symbol-context` returns matching definitions plus indexed call/reference sites. `imports` returns matching module, package, dependency, and linked-asset references.
 
 ### E. Failure Context
 Build a context pack from failing test/build output:
@@ -296,7 +297,7 @@ Run SnapZip as a local read-only MCP stdio server:
 snapzip mcp --db-dir .
 ```
 
-The MCP server exposes read-only `search`, `context_pack`, `repair_pack`, `affected_tests`, `validation_plan`, `map`, `symbols`, `symbol_context`, `related`, `get_feedback`, and `stats` tools. It writes protocol messages to stdout and logs only to stderr, so it can be launched by MCP-compatible clients.
+The MCP server exposes read-only `search`, `context_pack`, `repair_pack`, `affected_tests`, `validation_plan`, `map`, `symbols`, `symbol_context`, `imports`, `related`, `get_feedback`, and `stats` tools. It writes protocol messages to stdout and logs only to stderr, so it can be launched by MCP-compatible clients.
 
 Example client configuration shape:
 
@@ -354,7 +355,7 @@ SnapZip does not log search queries into feedback memory. Feedback is only store
 Add a project or global agent rule that calls SnapZip when the binary is available:
 
 ```text
-Use SnapZip when available. Before non-trivial code changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context, receipts, and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, `snapzip related --path <file>`, and `snapzip affected --path <file>` for structural and test context. After failing tests, run `snapzip repair-pack --error-file <test-output>` or `snapzip diagnose --cmd "<test command>"`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` when practical.
+Use SnapZip when available. Before non-trivial code changes, run `snapzip pack --query "<topic>" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>` for targeted local context, receipts, and feedback memory. Use `snapzip map`, `snapzip symbols --query "<symbol>"`, `snapzip imports --query "<module>"`, `snapzip related --path <file>`, and `snapzip affected --path <file>` for structural and test context. After failing tests, run `snapzip repair-pack --error-file <test-output>` or `snapzip diagnose --cmd "<test command>"`. For generated drafts, run `snapzip optimize --sketch <draft> --context <context_dir> --output <final>` when practical.
 ```
 
 Use [LLM_INSTRUCTIONS.md](LLM_INSTRUCTIONS.md) as a portable rule template for other agents and editor integrations.

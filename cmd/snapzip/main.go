@@ -35,6 +35,8 @@ func main() {
 		handleSymbols()
 	case "symbol-context":
 		handleSymbolContext()
+	case "imports":
+		handleImports()
 	case "related":
 		handleRelated()
 	case "affected":
@@ -82,6 +84,7 @@ func printUsage() {
 	fmt.Println("  map            Show a compact repo map from indexed symbols")
 	fmt.Println("  symbols        Search indexed symbols")
 	fmt.Println("  symbol-context Show matching definitions and call/reference sites")
+	fmt.Println("  imports        Search indexed imports and dependency references")
 	fmt.Println("  related        Find files related to an indexed path")
 	fmt.Println("  affected       Find tests likely affected by changed or named files")
 	fmt.Println("  diagnose       Run a command and build a repair pack from failures")
@@ -376,6 +379,7 @@ func handleStats() {
 	fmt.Printf("feedback rows: %d\n", stats.FeedbackRows)
 	fmt.Printf("symbol rows: %d\n", stats.SymbolRows)
 	fmt.Printf("symbol reference rows: %d\n", stats.SymbolReferenceRows)
+	fmt.Printf("import rows: %d\n", stats.ImportRows)
 	if len(stats.Languages) == 0 {
 		fmt.Println("languages: none")
 		return

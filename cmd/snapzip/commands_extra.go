@@ -249,6 +249,37 @@ func handleSymbolContext() {
 	fmt.Print(core.RenderSymbolContext(context))
 }
 
+func handleImports() {
+	fs := flag.NewFlagSet("imports", flag.ExitOnError)
+	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
+	query := fs.String("query", "", "Import path, module, package, file, or dependency query")
+	limit := fs.Int("limit", 20, "Maximum imports to return")
+	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
+	_ = fs.Parse(os.Args[2:])
+	if strings.TrimSpace(*query) == "" {
+		fmt.Println("Error: --query is required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	db, err := openDBOrExit(*dbDir)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	context, err := core.BuildImportContext(db, *query, *limit)
+	if err != nil {
+		fmt.Printf("Import lookup failed: %v\n", err)
+		os.Exit(1)
+	}
+	if *jsonOutput {
+		writeJSON(context)
+		return
+	}
+	fmt.Print(core.RenderImportContext(context))
+}
+
 func handleRelated() {
 	fs := flag.NewFlagSet("related", flag.ExitOnError)
 	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
@@ -656,7 +687,7 @@ func runAudit(dbDir string) auditReport {
 	report.Checks = append(report.Checks, auditSecrets(dbDir))
 	report.Checks = append(report.Checks,
 		auditCheck{Name: "dependency dirs skipped", Passed: true, Details: "indexer skips .git, node_modules, vendor, dist, build, target, venv, .venv, and common generated directories"},
-		auditCheck{Name: "mcp write surface", Passed: true, Details: "MCP server exposes read-only search, context_pack, repair_pack, affected_tests, validation_plan, get_feedback, stats, map, symbols, symbol_context, and related tools"},
+		auditCheck{Name: "mcp write surface", Passed: true, Details: "MCP server exposes read-only search, context_pack, repair_pack, affected_tests, validation_plan, get_feedback, stats, map, symbols, symbol_context, imports, and related tools"},
 	)
 	return report
 }
@@ -705,7 +736,7 @@ func auditDBStats(dbDir string) []auditCheck {
 	}
 	return []auditCheck{
 		{Name: "database opens", Passed: true, Details: "memory.db opened successfully"},
-		{Name: "index rows", Passed: true, Details: fmt.Sprintf("%d knowledge rows, %d symbol rows, %d symbol reference rows, %d feedback rows", stats.KnowledgeRows, stats.SymbolRows, stats.SymbolReferenceRows, stats.FeedbackRows)},
+		{Name: "index rows", Passed: true, Details: fmt.Sprintf("%d knowledge rows, %d symbol rows, %d symbol reference rows, %d import rows, %d feedback rows", stats.KnowledgeRows, stats.SymbolRows, stats.SymbolReferenceRows, stats.ImportRows, stats.FeedbackRows)},
 	}
 }
 
@@ -846,7 +877,7 @@ func agentRuleText() string {
 
 Use SnapZip when available. Run ` + "`snapzip stats --db-dir .`" + ` to check whether local context exists.
 Before non-trivial code changes, run ` + "`snapzip pack --query \"<topic>\" --limit 5 --budget 12000 --mode <debug|refactor|test|docs>`" + ` for targeted local context, receipts, quality warnings, and feedback memory.
-Use ` + "`snapzip symbol-context --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip symbols --query \"<symbol>\" --limit 10`" + `, or ` + "`snapzip map --limit 50`" + ` for structural context.
+Use ` + "`snapzip symbol-context --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip symbols --query \"<symbol>\" --limit 10`" + `, ` + "`snapzip imports --query \"<module>\" --limit 10`" + `, or ` + "`snapzip map --limit 50`" + ` for structural context.
 Use ` + "`snapzip related --path <file>`" + ` and ` + "`snapzip affected --path <file>`" + ` to find related files and likely tests.
 Use ` + "`snapzip validate --path <file>`" + ` to plan validation, or ` + "`snapzip validate --changed --cmd \"<test command>\"`" + ` to run validation and get failure context.
 If ` + "`.snapzip/config.toml`" + ` defines validation, use ` + "`snapzip validate --changed --run-config`" + ` when explicitly running the configured project command.

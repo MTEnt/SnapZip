@@ -21,7 +21,7 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 	fixture := t.TempDir()
 	writeCLIFile(t, fixture, "web/index.html", "<main>SnapZip HTML fixture</main>\n")
 	writeCLIFile(t, fixture, "web/site.css", ".snapzip { color: #123456; }\n")
-	writeCLIFile(t, fixture, "lib/cache.rb", "class CacheStore\nend\n")
+	writeCLIFile(t, fixture, "lib/cache.rb", "require \"json\"\n\nclass CacheStore\nend\n")
 	writeCLIFile(t, fixture, "node_modules/ignored/skip.rb", "class IgnoredDependency\nend\n")
 
 	dbDir := t.TempDir()
@@ -84,7 +84,7 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 	if err := json.Unmarshal([]byte(statsJSON), &statsPayload); err != nil {
 		t.Fatalf("stats --json returned invalid JSON: %v\n%s", err, statsJSON)
 	}
-	if statsPayload.KnowledgeRows != 3 || statsPayload.FeedbackRows != 0 {
+	if statsPayload.KnowledgeRows != 3 || statsPayload.FeedbackRows != 0 || statsPayload.ImportRows == 0 {
 		t.Fatalf("stats --json returned wrong counts: %+v", statsPayload)
 	}
 
@@ -136,7 +136,7 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 
 func TestMCPServerExposesSearchTool(t *testing.T) {
 	fixture := t.TempDir()
-	writeCLIFile(t, fixture, "lib/cache.rb", "class CacheStore\nend\n\ndef build_cache\n  CacheStore.new\nend\n")
+	writeCLIFile(t, fixture, "lib/cache.rb", "require \"json\"\n\nclass CacheStore\nend\n\ndef build_cache\n  CacheStore.new\nend\n")
 	writeCLIFile(t, fixture, "test/cache_test.rb", "def test_cache\n  build_cache()\nend\n")
 
 	dbDir := t.TempDir()
@@ -160,7 +160,8 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"repair_pack","arguments":{"error_output":"lib/cache.rb:1: uninitialized constant CacheStore","limit":2,"budget":4096}}}`,
 		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"affected_tests","arguments":{"path":"lib/cache.rb","limit":5}}}`,
 		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"symbol_context","arguments":{"query":"build_cache","limit":5}}}`,
-		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"validation_plan","arguments":{"path":"lib/cache.rb","limit":5}}}`,
+		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"imports","arguments":{"query":"json","limit":5}}}`,
+		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"validation_plan","arguments":{"path":"lib/cache.rb","limit":5}}}`,
 	}, "\n") + "\n"
 
 	var output bytes.Buffer
@@ -169,10 +170,10 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 8 {
-		t.Fatalf("got %d MCP responses, want 8:\n%s", len(lines), output.String())
+	if len(lines) != 9 {
+		t.Fatalf("got %d MCP responses, want 9:\n%s", len(lines), output.String())
 	}
-	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) || !strings.Contains(lines[1], `"symbol_context"`) || !strings.Contains(lines[1], `"validation_plan"`) {
+	if !strings.Contains(lines[1], `"tools"`) || !strings.Contains(lines[1], `"context_pack"`) || !strings.Contains(lines[1], `"repair_pack"`) || !strings.Contains(lines[1], `"symbol_context"`) || !strings.Contains(lines[1], `"imports"`) || !strings.Contains(lines[1], `"validation_plan"`) {
 		t.Fatalf("tools/list did not expose expected tools:\n%s", lines[1])
 	}
 	if !strings.Contains(lines[2], "CacheStore") {
@@ -190,8 +191,11 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	if !strings.Contains(lines[6], "SnapZip Symbol Context") || !strings.Contains(lines[6], "test/cache_test.rb") {
 		t.Fatalf("symbol_context tool response missing reference context:\n%s", lines[6])
 	}
-	if !strings.Contains(lines[7], "SnapZip Validation Plan") || !strings.Contains(lines[7], "bundle exec rake test") {
-		t.Fatalf("validation_plan tool response missing suggested validation:\n%s", lines[7])
+	if !strings.Contains(lines[7], "SnapZip Import Context") || !strings.Contains(lines[7], "lib/cache.rb") {
+		t.Fatalf("imports tool response missing import context:\n%s", lines[7])
+	}
+	if !strings.Contains(lines[8], "SnapZip Validation Plan") || !strings.Contains(lines[8], "bundle exec rake test") {
+		t.Fatalf("validation_plan tool response missing suggested validation:\n%s", lines[8])
 	}
 }
 
@@ -228,6 +232,11 @@ func TestCLIAdvancedContextCommands(t *testing.T) {
 	symbolContextOutput := runSnapZip(t, repoRoot, "symbol-context", "--db-dir", dbDir, "--query", "NewCacheStore", "--limit", "5")
 	if !strings.Contains(symbolContextOutput, "Definitions") || !strings.Contains(symbolContextOutput, "References") || !strings.Contains(symbolContextOutput, "pkg/cache_test.go") {
 		t.Fatalf("symbol-context output missing definition/reference context:\n%s", symbolContextOutput)
+	}
+
+	importsOutput := runSnapZip(t, repoRoot, "imports", "--db-dir", dbDir, "--query", "testing", "--limit", "5")
+	if !strings.Contains(importsOutput, "SnapZip Import Context") || !strings.Contains(importsOutput, "pkg/cache_test.go") {
+		t.Fatalf("imports output missing Go test import:\n%s", importsOutput)
 	}
 
 	relatedOutput := runSnapZip(t, repoRoot, "related", "--db-dir", dbDir, "--path", "pkg/cache.go", "--limit", "5")
