@@ -91,6 +91,22 @@ The default CI workflow runs this gated public sample so retrieval changes must 
 
 Add `--snapzip-diagnostics` to RepoBench-R or RepoBench-P runs when tuning ranking. The JSON records will include compact score diagnostics for SnapZip's top-5 results, including QND, lexical/BM25/BM25F boosts, identifier/path/structure boosts, rank-fusion contribution, final rank, and matched query tokens.
 
+Use the offline tuner to test alternate score-feature weights against those returned candidates:
+
+```bash
+python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip \
+  --repobench-sample-size 100 \
+  --snapzip-diagnostics \
+  --json /tmp/snapzip-repobench-r-diagnostics.json
+
+python3 benchmarks/tune_diagnostics.py \
+  --input /tmp/snapzip-repobench-r-diagnostics.json \
+  --metric mrr@5 \
+  --json /tmp/snapzip-repobench-r-tuning.json
+```
+
+The tuner only reorders candidates SnapZip already returned, so it is useful for rank-quality experiments, not recall experiments.
+
 ## RepoBench v1.1 Pipeline-Context Proxy
 
 The `repobench-p` suite uses the public RepoBench v1.1 parquet dataset. It materializes each row's cross-file context snippets, indexes them with SnapZip, and compares top-5 context selection against random, token Jaccard, and BM25 baselines.
