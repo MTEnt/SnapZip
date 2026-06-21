@@ -586,6 +586,7 @@ func TestCandidateRankFusionCombinesIndependentSignals(t *testing.T) {
 		map[int]int{2: 1},
 		map[string]int{"app/target.py": 1},
 		map[int]int{2: 1},
+		map[int]int{},
 	)
 
 	if candidates[0].ID != 2 {

@@ -192,6 +192,7 @@ func handleSearch() {
 	query := fs.String("query", "", "Search query string")
 	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
 	limit := fs.Int("limit", 3, "Number of snippets to return")
+	rerankCmd := fs.String("rerank-cmd", "", "Command to run external reranker (e.g. 'python rerank.py')")
 	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
 	_ = fs.Parse(os.Args[2:])
 
@@ -200,6 +201,8 @@ func handleSearch() {
 		fs.Usage()
 		os.Exit(1)
 	}
+
+	core.RerankCmd = *rerankCmd
 
 	db, err := core.InitDB(*dbDir)
 	if err != nil {
@@ -249,6 +252,7 @@ func handlePack() {
 	budget := fs.Int("budget", core.DefaultContextPackBudgetBytes, "Approximate byte budget for rendered context")
 	feedbackLimit := fs.Int("feedback-limit", 5, "Maximum feedback entries to include")
 	mode := fs.String("mode", "", "Pack mode: debug, refactor, test, docs, review, or default")
+	rerankCmd := fs.String("rerank-cmd", "", "Command to run external reranker (e.g. 'python rerank.py')")
 	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
 	_ = fs.Parse(os.Args[2:])
 
@@ -257,6 +261,8 @@ func handlePack() {
 		fs.Usage()
 		os.Exit(1)
 	}
+
+	core.RerankCmd = *rerankCmd
 
 	db, err := core.InitDB(*dbDir)
 	if err != nil {

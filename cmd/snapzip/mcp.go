@@ -8,13 +8,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/MTEnt/SnapZip/core"
 	"github.com/klauspost/compress/zstd"
 )
 
 const mcpProtocolVersion = "2025-06-18"
+const mcpLazySyncInterval = 30 * time.Second
 
 var supportedMCPProtocolVersions = map[string]bool{
 	"2024-11-05": true,
@@ -22,6 +26,11 @@ var supportedMCPProtocolVersions = map[string]bool{
 	"2025-06-18": true,
 	"2025-11-25": true,
 }
+
+var (
+	mcpLazySyncMu   sync.Mutex
+	mcpLazySyncSeen = map[string]time.Time{}
+)
 
 type mcpServer struct {
 	dbDir string
@@ -761,7 +770,26 @@ func (s mcpServer) openDB(args map[string]any) (*sql.DB, func(), error) {
 	if err != nil {
 		return nil, func() {}, err
 	}
+	if shouldRunMCPLazySync(dbDir, time.Now()) {
+		_ = core.LazySyncIndex(db, dbDir)
+	}
 	return db, func() { _ = db.Close() }, nil
+}
+
+func shouldRunMCPLazySync(dbDir string, now time.Time) bool {
+	key, err := filepath.Abs(dbDir)
+	if err != nil {
+		key = dbDir
+	}
+
+	mcpLazySyncMu.Lock()
+	defer mcpLazySyncMu.Unlock()
+
+	if last, ok := mcpLazySyncSeen[key]; ok && now.Sub(last) < mcpLazySyncInterval {
+		return false
+	}
+	mcpLazySyncSeen[key] = now
+	return true
 }
 
 func toolSuccess(text string, structured any) mcpToolResult {

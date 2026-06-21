@@ -521,7 +521,7 @@ func SearchSymbols(db *sql.DB, query string, limit int) ([]Symbol, error) {
 
 	if ftsQuery := metadataFTSQuery(tokens); ftsQuery != "" {
 		rows, err := db.Query(`
-			SELECT s.id, s.name, s.kind, s.signature, s.language, s.path, s.line
+			SELECT s.id, s.name, s.kind, s.signature, s.language, s.path, s.line, s.docstring
 			FROM symbols s
 			JOIN symbols_fts f ON s.id = f.rowid
 			WHERE symbols_fts MATCH ?
@@ -550,10 +550,10 @@ func SearchSymbols(db *sql.DB, query string, limit int) ([]Symbol, error) {
 
 	if len(matches) < limit {
 		sqlText := `
-			SELECT id, name, kind, signature, language, path, line
+			SELECT id, name, kind, signature, language, path, line, docstring
 			FROM symbols`
 		args := []any(nil)
-		if where, whereArgs := metadataSearchWhere(tokens, "name", "kind", "signature", "language", "path"); where != "" {
+		if where, whereArgs := metadataSearchWhere(tokens, "name", "kind", "signature", "language", "path", "docstring"); where != "" {
 			sqlText += " WHERE " + where
 			args = append(args, whereArgs...)
 		}
@@ -709,7 +709,7 @@ func RenderSymbolContext(context SymbolContext) string {
 func BuildRepoMap(db *sql.DB, limit int) (RepoMap, error) {
 	limit = normalizeResultLimit(limit, 100)
 	rows, err := db.Query(`
-		SELECT id, name, kind, signature, language, path, line
+		SELECT id, name, kind, signature, language, path, line, docstring
 		FROM symbols
 		ORDER BY path ASC, line ASC
 		LIMIT ?`, limit*20)
@@ -761,7 +761,7 @@ func RelatedFiles(db *sql.DB, path string, limit int) ([]RepoMapFile, error) {
 	}
 
 	rows, err := db.Query(`
-		SELECT id, name, kind, signature, language, path, line
+		SELECT id, name, kind, signature, language, path, line, docstring
 		FROM symbols
 		WHERE path = ?
 		ORDER BY line ASC`, path)
@@ -876,7 +876,7 @@ func scanSymbol(rows interface {
 	Scan(dest ...any) error
 }) (Symbol, error) {
 	var symbol Symbol
-	err := rows.Scan(&symbol.ID, &symbol.Name, &symbol.Kind, &symbol.Signature, &symbol.Language, &symbol.Path, &symbol.Line)
+	err := rows.Scan(&symbol.ID, &symbol.Name, &symbol.Kind, &symbol.Signature, &symbol.Language, &symbol.Path, &symbol.Line, &symbol.Docstring)
 	return symbol, err
 }
 
@@ -892,7 +892,7 @@ func symbolMatches(symbol Symbol, tokens []string) bool {
 	if len(tokens) == 0 {
 		return true
 	}
-	haystack := strings.ToLower(symbol.Name + " " + symbol.Kind + " " + symbol.Signature + " " + symbol.Language + " " + symbol.Path)
+	haystack := strings.ToLower(symbol.Name + " " + symbol.Kind + " " + symbol.Signature + " " + symbol.Language + " " + symbol.Path + " " + symbol.Docstring)
 	for _, token := range tokens {
 		if strings.Contains(haystack, token) {
 			return true
@@ -906,6 +906,7 @@ func symbolScore(symbol Symbol, tokens []string) int {
 	lowerName := strings.ToLower(symbol.Name)
 	lowerPath := strings.ToLower(symbol.Path)
 	lowerSignature := strings.ToLower(symbol.Signature)
+	lowerDocstring := strings.ToLower(symbol.Docstring)
 	for _, token := range tokens {
 		switch {
 		case lowerName == token:
@@ -916,6 +917,8 @@ func symbolScore(symbol Symbol, tokens []string) int {
 			score += 3
 		case strings.Contains(lowerSignature, token):
 			score += 2
+		case strings.Contains(lowerDocstring, token):
+			score += 1
 		}
 	}
 	return score

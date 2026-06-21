@@ -679,13 +679,6 @@ func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int, i
 
 	graphBudget := graphContextBudget(result.Mode, limit)
 	candidates := graphContextCandidates(db, result.Snippets, graphBudget, result.Mode, includeDependentTypes)
-	if len(candidates) == 0 {
-		if len(result.Snippets) > limit {
-			result.Snippets = result.Snippets[:limit]
-			result.Receipts = alignReceiptsWithSnippets(result.Snippets, result.Receipts)
-		}
-		return result
-	}
 
 	receiptByKey := map[string]ContextReceipt{}
 	directSnippetByKey := map[string]Snippet{}
@@ -706,6 +699,7 @@ func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int, i
 	seen := map[string]bool{}
 	mergedIndexByKey := map[string]int{}
 	mergedIndexByID := map[int]int{}
+	mergedIndexByPath := map[string]int{}
 	mergeReceipt := func(idx int, receipt ContextReceipt) {
 		if idx < 0 || idx >= len(receipts) || receipt.Path == "" {
 			return
@@ -723,6 +717,13 @@ func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int, i
 	addSnippet := func(snippet Snippet, receipt ContextReceipt) bool {
 		if len(merged) >= limit {
 			return false
+		}
+		path := normalizeIndexedPath(snippet.Path)
+		if path != "" {
+			if existing, ok := mergedIndexByPath[path]; ok {
+				mergeReceipt(existing, receipt)
+				return false
+			}
 		}
 		if snippet.ID != 0 {
 			if existing, ok := mergedIndexByID[snippet.ID]; ok {
@@ -743,6 +744,9 @@ func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int, i
 		}
 		seen[key] = true
 		merged = append(merged, snippet)
+		if path != "" {
+			mergedIndexByPath[path] = len(merged) - 1
+		}
 		receiptKey := snippet.Path + ":" + fmt.Sprint(snippet.StartLine) + ":" + fmt.Sprint(snippet.EndLine)
 		if directReceipt, ok := receiptByKey[receiptKey]; ok {
 			if receipt.Path == "" {
@@ -834,36 +838,76 @@ func includeSymbolReferenceGraph(mode string) bool {
 }
 
 func outgoingGraphContextCandidates(db *sql.DB, seed Snippet) []graphContextCandidate {
-	refs, err := importsForPath(db, seed.Path)
-	if err != nil {
-		return nil
-	}
 	var candidates []graphContextCandidate
-	for _, ref := range refs {
-		if ref.TargetPath == "" || ref.TargetPath == seed.Path {
+	seenPaths := map[string]bool{seed.Path: true}
+
+	resolveImports := func(currentPath string) []ImportReference {
+		refs, err := importsForPath(db, currentPath)
+		if err != nil {
+			return nil
+		}
+		return refs
+	}
+
+	type queueItem struct {
+		path  string
+		depth int
+	}
+	queue := []queueItem{{path: seed.Path, depth: 0}}
+
+	for len(queue) > 0 {
+		item := queue[0]
+		queue = queue[1:]
+
+		if item.depth > 1 {
 			continue
 		}
-		snippet, matchedSymbol, ok, err := importedTargetSnippet(db, ref)
-		if err != nil || !ok {
-			continue
+
+		refs := resolveImports(item.path)
+		for _, ref := range refs {
+			if ref.TargetPath == "" || seenPaths[ref.TargetPath] {
+				continue
+			}
+			seenPaths[ref.TargetPath] = true
+
+			snippet, matchedSymbol, ok, err := importedTargetSnippet(db, ref)
+			if err != nil || !ok {
+				continue
+			}
+
+			scoreBoost := -0.65
+			confidence := 0.68
+			evidencePrefix := ""
+			reasons := []string{
+				"included through resolved local import graph",
+				"targeted by a retrieved snippet's local import",
+			}
+			if item.depth > 0 {
+				scoreBoost = -0.55
+				confidence = 0.55
+				reasons = append(reasons, "included as a transitive (depth 1) dependency")
+				evidencePrefix = fmt.Sprintf("[transitive from %s] ", item.path)
+			}
+
+			snippet.Score = minFloat(snippet.Score, scoreBoost)
+			evidence := fmt.Sprintf("%s%s imports %s -> %s", evidencePrefix, item.path, ref.ImportPath, ref.TargetPath)
+			evidenceItems := []string{evidence}
+			if matchedSymbol != "" {
+				reasons = append(reasons, "focused on imported symbol definition")
+				evidenceItems = append(evidenceItems, "imported symbol "+matchedSymbol)
+			}
+
+			receipt := receiptForSnippet(0, snippet, confidence, reasons, evidenceItems)
+			candidates = append(candidates, graphContextCandidate{
+				snippet:  snippet,
+				receipt:  receipt,
+				priority: graphContextPriority(snippet, "outgoing"),
+			})
+
+			if item.depth < 1 {
+				queue = append(queue, queueItem{path: ref.TargetPath, depth: item.depth + 1})
+			}
 		}
-		snippet.Score = minFloat(snippet.Score, -0.65)
-		evidence := fmt.Sprintf("%s imports %s -> %s", seed.Path, ref.ImportPath, ref.TargetPath)
-		reasons := []string{
-			"included through resolved local import graph",
-			"targeted by a retrieved snippet's local import",
-		}
-		evidenceItems := []string{evidence}
-		if matchedSymbol != "" {
-			reasons = append(reasons, "focused on imported symbol definition")
-			evidenceItems = append(evidenceItems, "imported symbol "+matchedSymbol)
-		}
-		receipt := receiptForSnippet(0, snippet, 0.68, reasons, evidenceItems)
-		candidates = append(candidates, graphContextCandidate{
-			snippet:  snippet,
-			receipt:  receipt,
-			priority: graphContextPriority(snippet, "outgoing"),
-		})
 	}
 	return candidates
 }
@@ -950,7 +994,7 @@ func symbolsForPathAndName(db *sql.DB, path, name string) ([]Symbol, error) {
 		return nil, nil
 	}
 	rows, err := db.Query(`
-		SELECT id, name, kind, signature, language, path, line
+		SELECT id, name, kind, signature, language, path, line, docstring
 		FROM symbols
 		WHERE path = ? AND lower(name) = lower(?)
 		ORDER BY
@@ -980,30 +1024,66 @@ func symbolsForPathAndName(db *sql.DB, path, name string) ([]Symbol, error) {
 }
 
 func incomingGraphContextCandidates(db *sql.DB, seed Snippet) []graphContextCandidate {
-	refs, err := importsTargetingPath(db, seed.Path)
-	if err != nil {
-		return nil
-	}
 	var candidates []graphContextCandidate
-	for _, ref := range refs {
-		if ref.Path == "" || ref.Path == seed.Path {
+	seenPaths := map[string]bool{seed.Path: true}
+
+	type queueItem struct {
+		path  string
+		depth int
+	}
+	queue := []queueItem{{path: seed.Path, depth: 0}}
+
+	for len(queue) > 0 {
+		item := queue[0]
+		queue = queue[1:]
+
+		if item.depth > 1 {
 			continue
 		}
-		snippet, ok, err := indexedSnippetAtLine(db, ref.Path, ref.Line, 32)
-		if err != nil || !ok {
+
+		refs, err := importsTargetingPath(db, item.path)
+		if err != nil {
 			continue
 		}
-		snippet.Score = minFloat(snippet.Score, -0.70)
-		evidence := fmt.Sprintf("%s imports %s -> %s", ref.Path, ref.ImportPath, seed.Path)
-		receipt := receiptForSnippet(0, snippet, 0.72, []string{
-			"included through resolved local import graph",
-			"imports a retrieved snippet",
-		}, []string{evidence})
-		candidates = append(candidates, graphContextCandidate{
-			snippet:  snippet,
-			receipt:  receipt,
-			priority: graphContextPriority(snippet, "incoming"),
-		})
+
+		for _, ref := range refs {
+			if ref.Path == "" || seenPaths[ref.Path] {
+				continue
+			}
+			seenPaths[ref.Path] = true
+
+			snippet, ok, err := indexedSnippetAtLine(db, ref.Path, ref.Line, 32)
+			if err != nil || !ok {
+				continue
+			}
+
+			scoreBoost := -0.70
+			confidence := 0.72
+			evidencePrefix := ""
+			reasons := []string{
+				"included through resolved local import graph",
+				"imports a retrieved snippet",
+			}
+			if item.depth > 0 {
+				scoreBoost = -0.58
+				confidence = 0.58
+				reasons = append(reasons, "included as a transitive (depth 1) incoming dependency")
+				evidencePrefix = fmt.Sprintf("[transitive targeting %s] ", item.path)
+			}
+
+			snippet.Score = minFloat(snippet.Score, scoreBoost)
+			evidence := fmt.Sprintf("%s%s imports %s -> %s", evidencePrefix, ref.Path, ref.ImportPath, item.path)
+			receipt := receiptForSnippet(0, snippet, confidence, reasons, []string{evidence})
+			candidates = append(candidates, graphContextCandidate{
+				snippet:  snippet,
+				receipt:  receipt,
+				priority: graphContextPriority(snippet, "incoming"),
+			})
+
+			if item.depth < 1 {
+				queue = append(queue, queueItem{path: ref.Path, depth: item.depth + 1})
+			}
+		}
 	}
 	return candidates
 }
@@ -1121,7 +1201,7 @@ func symbolsForPathRange(db *sql.DB, path string, startLine int, endLine int, li
 	}
 
 	query := `
-		SELECT id, name, kind, signature, language, path, line
+		SELECT id, name, kind, signature, language, path, line, docstring
 		FROM symbols
 		WHERE path = ?`
 	args := []any{path}
@@ -1227,7 +1307,7 @@ func symbolsForName(db *sql.DB, name string, language string, limit int) ([]Symb
 	}
 
 	rows, err := db.Query(`
-		SELECT id, name, kind, signature, language, path, line
+		SELECT id, name, kind, signature, language, path, line, docstring
 		FROM symbols
 		WHERE name = ? COLLATE NOCASE
 		ORDER BY
@@ -1466,91 +1546,130 @@ func dependentTypeContextCandidates(db *sql.DB, seed Snippet) []graphContextCand
 	var candidates []graphContextCandidate
 	seenKeys := map[string]bool{}
 
-	// 1. Fetch all local types/classes/interfaces in the same file
-	localRows, err := db.Query(`
-		SELECT name, line, kind FROM symbols
-		WHERE path = ? AND kind IN ('class', 'type', 'interface')`, seed.Path)
-	if err == nil {
-		defer localRows.Close()
-		for localRows.Next() {
-			var name string
-			var line int
-			var kind string
-			if err := localRows.Scan(&name, &line, &kind); err == nil {
-				if line > 0 && (line < seed.StartLine || line > seed.EndLine) {
-					wordRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-					if wordRe.MatchString(seed.Content) {
-						snippet, ok, err := indexedSnippetAtLine(db, seed.Path, line, 24)
-						if err == nil && ok {
-							key := snippetDedupeKey(snippet)
-							if !seenKeys[key] {
-								seenKeys[key] = true
-								snippet.Score = minFloat(snippet.Score, -0.75)
-								evidence := fmt.Sprintf("%s:%d uses local type %s defined at line %d", seed.Path, seed.StartLine, name, line)
-								receipt := receiptForSnippet(0, snippet, 0.85, []string{
-									"included through dependent type expansion",
-									"defines a type/class used in a retrieved snippet",
-								}, []string{evidence})
-								candidates = append(candidates, graphContextCandidate{
-									snippet:  snippet,
-									receipt:  receipt,
-									priority: graphContextPriorityForRelation(snippet, "dependent_type"),
-								})
+	resolveDirectTypes := func(sourcePath string, startLine, endLine int, content string, isTransitive bool) []Snippet {
+		var resolved []Snippet
+
+		// 1. Fetch local types in the same file
+		localRows, err := db.Query(`
+			SELECT name, line, kind FROM symbols
+			WHERE path = ? AND kind IN ('class', 'type', 'interface')`, sourcePath)
+		if err == nil {
+			defer localRows.Close()
+			for localRows.Next() {
+				var name string
+				var line int
+				var kind string
+				if err := localRows.Scan(&name, &line, &kind); err == nil {
+					if line > 0 && (isTransitive || (line < startLine || line > endLine)) {
+						wordRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+						if wordRe.MatchString(content) {
+							snippet, ok, err := indexedSnippetAtLine(db, sourcePath, line, 24)
+							if err == nil && ok {
+								key := snippetDedupeKey(snippet)
+								if !seenKeys[key] {
+									seenKeys[key] = true
+
+									scoreBoost := -0.75
+									confidence := 0.85
+									reasons := []string{
+										"included through dependent type expansion",
+										"defines a type/class used in a retrieved snippet",
+									}
+									evidence := fmt.Sprintf("%s:%d uses local type %s defined at line %d", sourcePath, startLine, name, line)
+									if isTransitive {
+										scoreBoost = -0.62
+										confidence = 0.65
+										reasons = append(reasons, "included as a transitive (depth 1) dependent type")
+										evidence = fmt.Sprintf("[transitive] %s:%d uses local type %s defined at line %d", sourcePath, startLine, name, line)
+									}
+
+									snippet.Score = minFloat(snippet.Score, scoreBoost)
+									receipt := receiptForSnippet(0, snippet, confidence, reasons, []string{evidence})
+									candidates = append(candidates, graphContextCandidate{
+										snippet:  snippet,
+										receipt:  receipt,
+										priority: graphContextPriorityForRelation(snippet, "dependent_type"),
+									})
+									resolved = append(resolved, snippet)
+								}
 							}
 						}
 					}
 				}
 			}
 		}
-	}
 
-	// 2. Scan content for global/imported PascalCase type identifiers
-	words := pascalCasePattern.FindAllString(seed.Content, -1)
-	uniqueWords := uniqueStrings(words)
+		// 2. Scan content for global/imported PascalCase type identifiers
+		words := pascalCasePattern.FindAllString(content, -1)
+		uniqueWords := uniqueStrings(words)
 
-	globalCount := 0
-	for _, word := range uniqueWords {
-		if len(word) <= 2 || isCommonGenericWord(word) {
-			continue
-		}
-		if globalCount >= 3 { // Limit to 3 external dependent types to avoid bloating budget
-			break
-		}
+		globalCount := 0
+		for _, word := range uniqueWords {
+			if len(word) <= 2 || isCommonGenericWord(word) {
+				continue
+			}
+			limitVal := 2
+			if isTransitive {
+				limitVal = 1
+			}
+			if globalCount >= 3 {
+				break
+			}
 
-		globalRows, err := db.Query(`
-			SELECT name, line, kind, path FROM symbols
-			WHERE name = ? AND kind IN ('class', 'type', 'interface') AND path != ?
-			LIMIT 2`, word, seed.Path)
-		if err == nil {
-			defer globalRows.Close()
-			for globalRows.Next() {
-				var name string
-				var line int
-				var kind string
-				var path string
-				if err := globalRows.Scan(&name, &line, &kind, &path); err == nil {
-					snippet, ok, err := indexedSnippetAtLine(db, path, line, 24)
-					if err == nil && ok {
-						key := snippetDedupeKey(snippet)
-						if !seenKeys[key] {
-							seenKeys[key] = true
-							globalCount++
-							snippet.Score = minFloat(snippet.Score, -0.74)
-							evidence := fmt.Sprintf("%s:%d references external type %s defined in %s:%d", seed.Path, seed.StartLine, name, path, line)
-							receipt := receiptForSnippet(0, snippet, 0.82, []string{
-								"included through dependent type expansion",
-								"defines an external type/class referenced by a retrieved snippet",
-							}, []string{evidence})
-							candidates = append(candidates, graphContextCandidate{
-								snippet:  snippet,
-								receipt:  receipt,
-								priority: graphContextPriorityForRelation(snippet, "dependent_type"),
-							})
+			globalRows, err := db.Query(`
+				SELECT name, line, kind, path FROM symbols
+				WHERE name = ? AND kind IN ('class', 'type', 'interface') AND path != ?
+				LIMIT ?`, word, sourcePath, limitVal)
+			if err == nil {
+				defer globalRows.Close()
+				for globalRows.Next() {
+					var name string
+					var line int
+					var kind string
+					var path string
+					if err := globalRows.Scan(&name, &line, &kind, &path); err == nil {
+						snippet, ok, err := indexedSnippetAtLine(db, path, line, 24)
+						if err == nil && ok {
+							key := snippetDedupeKey(snippet)
+							if !seenKeys[key] {
+								seenKeys[key] = true
+								globalCount++
+
+								scoreBoost := -0.74
+								confidence := 0.82
+								reasons := []string{
+									"included through dependent type expansion",
+									"defines an external type/class referenced by a retrieved snippet",
+								}
+								evidence := fmt.Sprintf("%s:%d references external type %s defined in %s:%d", sourcePath, startLine, name, path, line)
+								if isTransitive {
+									scoreBoost = -0.61
+									confidence = 0.62
+									reasons = append(reasons, "included as a transitive (depth 1) dependent type")
+									evidence = fmt.Sprintf("[transitive] %s:%d references external type %s defined in %s:%d", sourcePath, startLine, name, path, line)
+								}
+
+								snippet.Score = minFloat(snippet.Score, scoreBoost)
+								receipt := receiptForSnippet(0, snippet, confidence, reasons, []string{evidence})
+								candidates = append(candidates, graphContextCandidate{
+									snippet:  snippet,
+									receipt:  receipt,
+									priority: graphContextPriorityForRelation(snippet, "dependent_type"),
+								})
+								resolved = append(resolved, snippet)
+							}
 						}
 					}
 				}
 			}
 		}
+
+		return resolved
+	}
+
+	directDeps := resolveDirectTypes(seed.Path, seed.StartLine, seed.EndLine, seed.Content, false)
+	for _, dep := range directDeps {
+		resolveDirectTypes(dep.Path, dep.StartLine, dep.EndLine, dep.Content, true)
 	}
 
 	return candidates

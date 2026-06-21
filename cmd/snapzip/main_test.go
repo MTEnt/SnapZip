@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MTEnt/SnapZip/core"
 )
@@ -253,6 +254,25 @@ func TestMCPServerExposesSearchTool(t *testing.T) {
 	}
 	if !strings.Contains(lines[10], "SnapZip PR Context") || !strings.Contains(lines[10], "Mode: review") || !strings.Contains(lines[10], "test/cache_test.rb") {
 		t.Fatalf("pr_context tool response missing review context:\n%s", lines[10])
+	}
+}
+
+func TestMCPLazySyncThrottle(t *testing.T) {
+	mcpLazySyncMu.Lock()
+	mcpLazySyncSeen = map[string]time.Time{}
+	mcpLazySyncMu.Unlock()
+
+	dbDir := t.TempDir()
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+
+	if !shouldRunMCPLazySync(dbDir, now) {
+		t.Fatal("first lazy sync should run")
+	}
+	if shouldRunMCPLazySync(dbDir, now.Add(time.Second)) {
+		t.Fatal("lazy sync should be throttled inside interval")
+	}
+	if !shouldRunMCPLazySync(dbDir, now.Add(mcpLazySyncInterval+time.Second)) {
+		t.Fatal("lazy sync should run again after interval")
 	}
 }
 
@@ -595,6 +615,7 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 		"repobench-p",
 		"repobench-p-data",
 		"repobench-p-sample-size",
+		"snapzip-rerank-cmd",
 		"min-repobench-p-snapzip-new-token-coverage5-over-bm25",
 		"min-repobench-snapzip-ndcg5-over-bm25",
 	} {

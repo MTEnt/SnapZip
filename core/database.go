@@ -1,12 +1,17 @@
 package core
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -41,6 +46,7 @@ type KnowledgeEntry struct {
 }
 
 var DBPath string
+var RerankCmd string
 
 const defaultSearchCandidateLimit = 50
 const maxSearchCandidateLimit = 200
@@ -60,6 +66,7 @@ const queryPathRankFusionWeight = 0.35
 const bm25RankFusionWeight = 0.15
 const structuredRankFusionWeight = 0.45
 const structuralRerankFusionWeight = 0.65
+const pathProximityRankFusionWeight = 0.50
 const lexicalCoverageJaccardWeight = 1.0
 const lexicalCoverageBM25Weight = 0.85
 const structuralRerankMetadataLimit = 48
@@ -614,8 +621,119 @@ func DetectLanguage(prompt string) string {
 	return ""
 }
 
+func calculatePathProximityBoost(currentPath, candidatePath string) float64 {
+	currentPath = strings.ReplaceAll(currentPath, "\\", "/")
+	candidatePath = strings.ReplaceAll(candidatePath, "\\", "/")
+
+	currentParts := strings.Split(currentPath, "/")
+	candidateParts := strings.Split(candidatePath, "/")
+
+	if len(currentParts) > 0 {
+		currentParts = currentParts[:len(currentParts)-1]
+	}
+	if len(candidateParts) > 0 {
+		candidateParts = candidateParts[:len(candidateParts)-1]
+	}
+
+	matching := 0
+	minLen := len(currentParts)
+	if len(candidateParts) < minLen {
+		minLen = len(candidateParts)
+	}
+
+	for i := 0; i < minLen; i++ {
+		if strings.ToLower(currentParts[i]) == strings.ToLower(candidateParts[i]) {
+			matching++
+		} else {
+			break
+		}
+	}
+
+	if matching == 0 {
+		return 0.0
+	}
+
+	boost := float64(matching) * 0.04
+	if boost > 0.20 {
+		boost = 0.20
+	}
+	return boost
+}
+
 // RetrieveSimilarSnippets executes FTS5 full-text lookup and then parallel compression-aware re-ranking.
 func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit int) ([]Snippet, error) {
+	if RerankCmd != "" {
+		originalRerankCmd := RerankCmd
+		RerankCmd = ""
+		defer func() { RerankCmd = originalRerankCmd }()
+
+		fetchLimit := limit * 3
+		if fetchLimit < 15 {
+			fetchLimit = 15
+		}
+		snippets, err := RetrieveSimilarSnippets(db, comp, prompt, fetchLimit)
+		if err != nil {
+			return nil, err
+		}
+
+		cleanPrompt := prompt
+		if strings.HasPrefix(cleanPrompt, "--current-path:") {
+			parts := strings.SplitN(cleanPrompt, "\n", 2)
+			if len(parts) == 2 {
+				cleanPrompt = parts[1]
+			}
+		}
+		reranked, err := runExternalReranker(originalRerankCmd, cleanPrompt, snippets)
+		if err != nil {
+			return nil, err
+		}
+
+		baseRankMap := make(map[int]int)
+		for idx, s := range snippets {
+			baseRankMap[s.ID] = idx + 1
+		}
+		rerankRankMap := make(map[int]int)
+		for idx, s := range reranked {
+			rerankRankMap[s.ID] = idx + 1
+		}
+
+		type rrfSnippet struct {
+			snippet Snippet
+			score   float64
+		}
+		var rrfList []rrfSnippet
+		for _, s := range snippets {
+			baseRank := baseRankMap[s.ID]
+			rerankRank := rerankRankMap[s.ID]
+			if rerankRank == 0 {
+				rerankRank = len(snippets) + 1
+			}
+			score := 1.0/(20.0+float64(baseRank)) + 1.0/(20.0+float64(rerankRank))
+			rrfList = append(rrfList, rrfSnippet{snippet: s, score: score})
+		}
+
+		sort.Slice(rrfList, func(i, j int) bool {
+			return rrfList[i].score > rrfList[j].score
+		})
+
+		var finalSnippets []Snippet
+		for _, item := range rrfList {
+			finalSnippets = append(finalSnippets, item.snippet)
+		}
+
+		if len(finalSnippets) > limit {
+			finalSnippets = finalSnippets[:limit]
+		}
+		return finalSnippets, nil
+	}
+	var currentPath string
+	if strings.HasPrefix(prompt, "--current-path:") {
+		parts := strings.SplitN(prompt, "\n", 2)
+		if len(parts) == 2 {
+			currentPath = strings.TrimSpace(strings.TrimPrefix(parts[0], "--current-path:"))
+			prompt = parts[1]
+		}
+	}
 	detectedLang := DetectLanguage(prompt)
 	limit = normalizeResultLimit(limit, 3)
 	candidateLimit := searchCandidateLimit(limit)
@@ -758,6 +876,12 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 			return nil, err
 		}
 		baseScores := make([]float64, len(candidates))
+		var recentWeights map[string]float64
+		if currentPath != "" {
+			if root, err := getDBDir(db); err == nil && root != "" {
+				recentWeights, _ = gitRecentFiles(root)
+			}
+		}
 		jobs := make(chan int, len(candidates))
 		var wg sync.WaitGroup
 
@@ -767,8 +891,22 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 				defer wg.Done()
 				for idx := range jobs {
 					qnd := CalculateQNDWithPromptSize(comp, prompt, candidates[idx].Content, promptCompressedSize)
-					structuralBoost := structuredBoosts[idx] + structuralRerankBoosts[idx] + exactIdentifierBoosts[idx]
-					baseScores[idx] = relevanceScore(qnd, uniqueTokens, tokenWeights, 0, structuralBoost, candidates[idx], detectedLang, structureIntent, structureWeight)
+					pathProximityBoost := 0.0
+					if currentPath != "" {
+						pathProximityBoost = calculatePathProximityBoost(currentPath, candidates[idx].Path)
+					}
+					structuralBoost := structuredBoosts[idx] + structuralRerankBoosts[idx] + exactIdentifierBoosts[idx] + pathProximityBoost
+					gitBoost := 0.0
+					if recentWeights != nil {
+						candidatePath := filepath.ToSlash(candidates[idx].Path)
+						for gitPath, weight := range recentWeights {
+							if strings.HasSuffix(gitPath, candidatePath) || strings.HasSuffix(candidatePath, gitPath) {
+								gitBoost = weight
+								break
+							}
+						}
+					}
+					baseScores[idx] = relevanceScore(qnd, uniqueTokens, tokenWeights, 0, structuralBoost, candidates[idx], detectedLang, structureIntent, structureWeight) - gitBoost
 					candidates[idx].Score = baseScores[idx] - bm25Boosts[idx]
 				}
 			}()
@@ -788,7 +926,27 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 		sort.Slice(candidates, func(i, j int) bool {
 			return candidates[i].Score < candidates[j].Score
 		})
-		applyCandidateRankFusion(candidates, primaryCandidateRanks, queryPathCandidateRanks, bm25CandidateRanks, structuredPathRanks, structuralRerankRanks)
+		pathProximityRanks := map[int]int{}
+		if currentPath != "" {
+			type pathCandidate struct {
+				id    int
+				boost float64
+			}
+			var pathCands []pathCandidate
+			for idx := range candidates {
+				boost := calculatePathProximityBoost(currentPath, candidates[idx].Path)
+				if boost > 0 {
+					pathCands = append(pathCands, pathCandidate{id: candidates[idx].ID, boost: boost})
+				}
+			}
+			sort.Slice(pathCands, func(i, j int) bool {
+				return pathCands[i].boost > pathCands[j].boost
+			})
+			for r, pc := range pathCands {
+				pathProximityRanks[pc.id] = r + 1
+			}
+		}
+		applyCandidateRankFusion(candidates, primaryCandidateRanks, queryPathCandidateRanks, bm25CandidateRanks, structuredPathRanks, structuralRerankRanks, pathProximityRanks)
 	}
 
 	if usedFTS && len(primaryCandidateIDs) > 0 {
@@ -811,14 +969,14 @@ func queryKnowledgeFTS(db *sql.DB, ftsQuery string, candidateLimit int) (*sql.Ro
 		LIMIT ?`, ftsQuery, candidateLimit)
 }
 
-func applyCandidateRankFusion(candidates []Snippet, primaryRanks map[int]int, queryPathRanks map[int]int, bm25Ranks map[int]int, structuredPathRanks map[string]int, structuralRanks map[int]int) {
+func applyCandidateRankFusion(candidates []Snippet, primaryRanks map[int]int, queryPathRanks map[int]int, bm25Ranks map[int]int, structuredPathRanks map[string]int, structuralRanks map[int]int, pathProximityRanks map[int]int) {
 	if len(candidates) < 2 {
 		return
 	}
 
 	window := min(rankFusionWindow, len(candidates))
 	fusionWindow := candidates[:window]
-	fusionScores := candidateRankFusionScores(fusionWindow, primaryRanks, queryPathRanks, bm25Ranks, structuredPathRanks, structuralRanks)
+	fusionScores := candidateRankFusionScores(fusionWindow, primaryRanks, queryPathRanks, bm25Ranks, structuredPathRanks, structuralRanks, pathProximityRanks)
 	maxScore := 0.0
 	for _, score := range fusionScores {
 		if score > maxScore {
@@ -840,7 +998,7 @@ func applyCandidateRankFusion(candidates []Snippet, primaryRanks map[int]int, qu
 	})
 }
 
-func candidateRankFusionScores(candidates []Snippet, primaryRanks map[int]int, queryPathRanks map[int]int, bm25Ranks map[int]int, structuredPathRanks map[string]int, structuralRanks map[int]int) map[int]float64 {
+func candidateRankFusionScores(candidates []Snippet, primaryRanks map[int]int, queryPathRanks map[int]int, bm25Ranks map[int]int, structuredPathRanks map[string]int, structuralRanks map[int]int, pathProximityRanks map[int]int) map[int]float64 {
 	scores := make(map[int]float64, len(candidates))
 	for idx, candidate := range candidates {
 		if candidate.ID == 0 {
@@ -861,6 +1019,9 @@ func candidateRankFusionScores(candidates []Snippet, primaryRanks map[int]int, q
 		}
 		if rank := structuralRanks[candidate.ID]; rank > 0 {
 			addRankFusionScore(scores, candidate.ID, rank, structuralRerankFusionWeight)
+		}
+		if rank := pathProximityRanks[candidate.ID]; rank > 0 {
+			addRankFusionScore(scores, candidate.ID, rank, pathProximityRankFusionWeight)
 		}
 	}
 	return scores
@@ -1381,7 +1542,7 @@ func planRetrievalQuery(prompt string) retrievalQueryPlan {
 		if len(rankingTokens) == 0 {
 			rankingTokens = firstTokenList(primaryTokens, expandedTokens)
 		}
-		
+
 		synRankingTokens := expandSynonymTokens(rankingTokens)
 		synPrimaryTokens := expandSynonymTokens(primaryTokens)
 
@@ -2444,47 +2605,47 @@ func pathFromTopic(topic string) string {
 }
 
 var softwareSynonymMap = map[string][]string{
-	"delete":     {"remove", "evict", "purge", "clear", "destroy", "discard", "erase"},
-	"remove":     {"delete", "evict", "purge", "clear", "destroy", "discard", "erase"},
-	"evict":      {"delete", "remove", "purge", "clear", "discard"},
-	"purge":      {"delete", "remove", "evict", "clear", "discard"},
-	"destroy":    {"delete", "remove", "terminate", "close", "shutdown", "kill"},
-	"create":     {"build", "make", "new", "init", "setup", "generate", "produce"},
-	"build":      {"create", "make", "new", "init", "setup", "generate"},
-	"init":       {"create", "build", "setup", "initialize", "start", "begin"},
-	"initialize": {"create", "build", "setup", "init", "start", "begin"},
-	"start":      {"init", "begin", "launch", "run", "execute"},
-	"stop":       {"close", "shutdown", "terminate", "kill", "halt"},
-	"close":      {"stop", "shutdown", "terminate", "finalize"},
-	"shutdown":   {"stop", "close", "terminate", "kill"},
-	"fetch":      {"get", "retrieve", "load", "read", "query"},
-	"get":        {"fetch", "retrieve", "load", "read", "query"},
-	"retrieve":   {"fetch", "get", "load", "read", "query"},
-	"load":       {"fetch", "get", "retrieve", "read"},
-	"save":       {"write", "store", "persist", "insert", "update"},
-	"store":      {"save", "write", "persist", "insert"},
-	"persist":    {"save", "write", "store", "insert"},
-	"write":      {"save", "store", "persist", "insert"},
-	"add":        {"insert", "push", "append", "put"},
-	"insert":     {"add", "push", "append", "put"},
-	"push":       {"add", "insert", "append"},
-	"append":     {"add", "insert", "push"},
-	"put":        {"add", "insert", "set"},
-	"error":      {"fail", "failure", "exception", "panic", "err", "warn", "warning"},
-	"fail":       {"error", "failure", "exception", "panic", "err"},
-	"failure":    {"error", "fail", "exception", "panic", "err"},
-	"err":        {"error", "fail", "failure", "exception", "panic"},
-	"warn":       {"warning", "error"},
-	"warning":    {"warn", "error"},
-	"timeout":    {"deadline", "expiry", "expiration", "ttl"},
-	"expiry":     {"timeout", "deadline", "expiration", "ttl"},
-	"expiration": {"timeout", "deadline", "expiry", "ttl"},
-	"ttl":        {"timeout", "deadline", "expiry", "expiration"},
-	"auth":       {"login", "signin", "authenticate", "authorize", "token", "session"},
-	"login":      {"auth", "signin", "authenticate"},
-	"signin":     {"auth", "login", "authenticate"},
+	"delete":       {"remove", "evict", "purge", "clear", "destroy", "discard", "erase"},
+	"remove":       {"delete", "evict", "purge", "clear", "destroy", "discard", "erase"},
+	"evict":        {"delete", "remove", "purge", "clear", "discard"},
+	"purge":        {"delete", "remove", "evict", "clear", "discard"},
+	"destroy":      {"delete", "remove", "terminate", "close", "shutdown", "kill"},
+	"create":       {"build", "make", "new", "init", "setup", "generate", "produce"},
+	"build":        {"create", "make", "new", "init", "setup", "generate"},
+	"init":         {"create", "build", "setup", "initialize", "start", "begin"},
+	"initialize":   {"create", "build", "setup", "init", "start", "begin"},
+	"start":        {"init", "begin", "launch", "run", "execute"},
+	"stop":         {"close", "shutdown", "terminate", "kill", "halt"},
+	"close":        {"stop", "shutdown", "terminate", "finalize"},
+	"shutdown":     {"stop", "close", "terminate", "kill"},
+	"fetch":        {"get", "retrieve", "load", "read", "query"},
+	"get":          {"fetch", "retrieve", "load", "read", "query"},
+	"retrieve":     {"fetch", "get", "load", "read", "query"},
+	"load":         {"fetch", "get", "retrieve", "read"},
+	"save":         {"write", "store", "persist", "insert", "update"},
+	"store":        {"save", "write", "persist", "insert"},
+	"persist":      {"save", "write", "store", "insert"},
+	"write":        {"save", "store", "persist", "insert"},
+	"add":          {"insert", "push", "append", "put"},
+	"insert":       {"add", "push", "append", "put"},
+	"push":         {"add", "insert", "append"},
+	"append":       {"add", "insert", "push"},
+	"put":          {"add", "insert", "set"},
+	"error":        {"fail", "failure", "exception", "panic", "err", "warn", "warning"},
+	"fail":         {"error", "failure", "exception", "panic", "err"},
+	"failure":      {"error", "fail", "exception", "panic", "err"},
+	"err":          {"error", "fail", "failure", "exception", "panic"},
+	"warn":         {"warning", "error"},
+	"warning":      {"warn", "error"},
+	"timeout":      {"deadline", "expiry", "expiration", "ttl"},
+	"expiry":       {"timeout", "deadline", "expiration", "ttl"},
+	"expiration":   {"timeout", "deadline", "expiry", "ttl"},
+	"ttl":          {"timeout", "deadline", "expiry", "expiration"},
+	"auth":         {"login", "signin", "authenticate", "authorize", "token", "session"},
+	"login":        {"auth", "signin", "authenticate"},
+	"signin":       {"auth", "login", "authenticate"},
 	"authenticate": {"auth", "login", "signin", "authorize"},
-	"authorize":  {"auth", "authenticate", "permission", "allow"},
+	"authorize":    {"auth", "authenticate", "permission", "allow"},
 }
 
 func expandSynonymTokens(tokens []string) []string {
@@ -2505,4 +2666,191 @@ func expandSynonymTokens(tokens []string) []string {
 		}
 	}
 	return expanded
+}
+
+func getDBDir(db *sql.DB) (string, error) {
+	var seq int
+	var name string
+	var file string
+	err := db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &file)
+	if err != nil {
+		return "", err
+	}
+	if file == "" {
+		return "", fmt.Errorf("in-memory database")
+	}
+	return filepath.Dir(file), nil
+}
+
+func gitRecentFiles(root string) (map[string]float64, error) {
+	cmd := exec.Command("git", "-C", root, "log", "--name-only", "-n", "50", "--pretty=format:")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(out.String(), "\n")
+	weights := make(map[string]float64)
+	rank := 1
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		line = filepath.ToSlash(line)
+		if _, exists := weights[line]; !exists {
+			weight := 0.05 / float64(rank)
+			if weight < 0.005 {
+				weight = 0.005
+			}
+			weights[line] = weight
+			rank++
+			if rank > 20 {
+				break
+			}
+		}
+	}
+	return weights, nil
+}
+
+func runExternalReranker(cmdStr string, query string, snippets []Snippet) ([]Snippet, error) {
+	if cmdStr == "" || len(snippets) < 2 {
+		return snippets, nil
+	}
+
+	if strings.HasPrefix(cmdStr, "http://") || strings.HasPrefix(cmdStr, "https://") {
+		url := cmdStr
+		if !strings.HasSuffix(url, "/rerank") && !strings.Contains(url, "?") {
+			url = strings.TrimSuffix(url, "/") + "/rerank"
+		}
+
+		inputStruct := struct {
+			Query      string    `json:"query"`
+			Candidates []Snippet `json:"candidates"`
+		}{
+			Query:      query,
+			Candidates: snippets,
+		}
+		inputBytes, err := json.Marshal(inputStruct)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal reranker input: %w", err)
+		}
+
+		resp, err := http.Post(url, "application/json", bytes.NewReader(inputBytes))
+		if err != nil {
+			return nil, fmt.Errorf("http reranker request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("http reranker failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read http reranker response: %w", err)
+		}
+
+		var outputIDs []int
+		if err := json.Unmarshal(bodyBytes, &outputIDs); err != nil {
+			var outputObjects []struct {
+				ID int `json:"id"`
+			}
+			if err2 := json.Unmarshal(bodyBytes, &outputObjects); err2 != nil {
+				return nil, fmt.Errorf("failed to parse http reranker output: %w (original error: %w)", err2, err)
+			}
+			for _, obj := range outputObjects {
+				outputIDs = append(outputIDs, obj.ID)
+			}
+		}
+
+		idToSnippet := make(map[int]Snippet, len(snippets))
+		for _, s := range snippets {
+			idToSnippet[s.ID] = s
+		}
+
+		var reordered []Snippet
+		seen := make(map[int]bool, len(snippets))
+		for _, id := range outputIDs {
+			if s, ok := idToSnippet[id]; ok && !seen[id] {
+				reordered = append(reordered, s)
+				seen[id] = true
+			}
+		}
+
+		for _, s := range snippets {
+			if !seen[s.ID] {
+				reordered = append(reordered, s)
+			}
+		}
+
+		return reordered, nil
+	}
+
+	inputStruct := struct {
+		Query      string    `json:"query"`
+		Candidates []Snippet `json:"candidates"`
+	}{
+		Query:      query,
+		Candidates: snippets,
+	}
+	inputBytes, err := json.Marshal(inputStruct)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal reranker input: %w", err)
+	}
+
+	parts := strings.Fields(cmdStr)
+	if len(parts) == 0 {
+		return snippets, nil
+	}
+	cmdName := parts[0]
+	cmdArgs := parts[1:]
+
+	cmd := exec.Command(cmdName, cmdArgs...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Stdin = bytes.NewReader(inputBytes)
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("external reranker failed: %w (stderr: %s)", err, stderr.String())
+	}
+
+	var outputIDs []int
+	if err := json.Unmarshal(stdout.Bytes(), &outputIDs); err != nil {
+		var outputObjects []struct {
+			ID int `json:"id"`
+		}
+		if err2 := json.Unmarshal(stdout.Bytes(), &outputObjects); err2 != nil {
+			return nil, fmt.Errorf("failed to parse reranker output: %w (original error: %w)", err2, err)
+		}
+		for _, obj := range outputObjects {
+			outputIDs = append(outputIDs, obj.ID)
+		}
+	}
+
+	idToSnippet := make(map[int]Snippet, len(snippets))
+	for _, s := range snippets {
+		idToSnippet[s.ID] = s
+	}
+
+	var reordered []Snippet
+	seen := make(map[int]bool, len(snippets))
+	for _, id := range outputIDs {
+		if s, ok := idToSnippet[id]; ok && !seen[id] {
+			reordered = append(reordered, s)
+			seen[id] = true
+		}
+	}
+
+	for _, s := range snippets {
+		if !seen[s.ID] {
+			reordered = append(reordered, s)
+		}
+	}
+
+	return reordered, nil
 }

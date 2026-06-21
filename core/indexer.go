@@ -47,6 +47,7 @@ type IndexOptions struct {
 	SkipDirs        map[string]bool
 	SkipFiles       map[string]bool
 	IgnorePatterns  []string
+	Force           bool
 }
 
 type ContextBundle struct {
@@ -61,6 +62,7 @@ func DefaultIndexOptions() IndexOptions {
 		MaxContentBytes: DefaultMaxKnowledgeContentBytes,
 		SkipDirs:        copyBoolMap(defaultSkipDirs),
 		SkipFiles:       copyBoolMap(defaultSkipFiles),
+		Force:           true,
 	}
 }
 
@@ -155,6 +157,13 @@ func IndexFileWithOptions(db *sql.DB, root, path string, filter LanguageFilter, 
 	language := LanguageFromPath(path)
 	if !filter.Matches(language) {
 		return 0, nil
+	}
+
+	if !options.Force {
+		dbMTime, err := GetPathLastIndexedMTime(db, relPath)
+		if err == nil && dbMTime > 0 && dbMTime == info.ModTime().Unix() {
+			return 0, nil
+		}
 	}
 
 	content, err := os.ReadFile(path)
@@ -851,4 +860,144 @@ func copyBoolMap(input map[string]bool) map[string]bool {
 		output[key] = value
 	}
 	return output
+}
+
+func GetPathLastIndexedMTime(db *sql.DB, relPath string) (int64, error) {
+	var mtime int64
+	err := db.QueryRow("SELECT COALESCE(MAX(source_mtime), 0) FROM knowledge WHERE path = ?", relPath).Scan(&mtime)
+	return mtime, err
+}
+
+func RemoveFileFromIndex(db *sql.DB, relPath string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// 1. Delete from knowledge_fts
+	rows, err := tx.Query("SELECT id FROM knowledge WHERE path = ?", relPath)
+	if err == nil {
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err == nil {
+				ids = append(ids, id)
+			}
+		}
+		rows.Close()
+		for _, id := range ids {
+			tx.Exec("DELETE FROM knowledge_fts WHERE rowid = ?", id)
+		}
+	}
+	tx.Exec("DELETE FROM knowledge WHERE path = ?", relPath)
+
+	// 2. Delete from symbols and symbols_fts
+	tx.Exec("DELETE FROM symbols_fts WHERE path = ?", relPath)
+	tx.Exec("DELETE FROM symbols WHERE path = ?", relPath)
+
+	// 3. Delete from symbol_refs and symbol_refs_fts
+	tx.Exec("DELETE FROM symbol_refs_fts WHERE path = ?", relPath)
+	tx.Exec("DELETE FROM symbol_refs WHERE path = ?", relPath)
+
+	// 4. Delete from import_refs and import_refs_fts
+	tx.Exec("DELETE FROM import_refs_fts WHERE path = ?", relPath)
+	tx.Exec("DELETE FROM import_refs WHERE path = ?", relPath)
+
+	return tx.Commit()
+}
+
+func LazySyncIndex(db *sql.DB, root string) error {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+
+	// 1. Load all paths in DB and their mtime
+	dbPaths := make(map[string]int64)
+	rows, err := db.Query("SELECT path, COALESCE(MAX(source_mtime), 0) FROM knowledge GROUP BY path")
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var path string
+		var mtime int64
+		if err := rows.Scan(&path, &mtime); err == nil {
+			dbPaths[path] = mtime
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if len(dbPaths) == 0 {
+		return nil
+	}
+
+	// Verify that root is the correct workspace root directory containing indexed files.
+	// If the DB has paths, at least one of them must exist relative to root.
+	// Otherwise, root is a separate DB directory (like in tests) and we skip to avoid wiping the DB.
+	anyExists := false
+	for relPath := range dbPaths {
+		if _, err := os.Stat(filepath.Join(root, relPath)); err == nil {
+			anyExists = true
+			break
+		}
+	}
+	if !anyExists {
+		return nil
+	}
+
+	// 2. Walk directory to find modified/new files
+	options := normalizeIndexOptions(DefaultIndexOptions())
+	options.Force = false
+	options = withSnapZipIgnore(root, options)
+	filter := NewLanguageFilter("all")
+
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if skip, err := shouldSkipEntry(root, path, entry, options); skip || err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+
+		language := LanguageFromPath(path)
+		if language == "" || language == "unknown" {
+			return nil
+		}
+
+		relPath := relativeSourcePath(root, path)
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+
+		currMTime := info.ModTime().Unix()
+		dbMTime, exists := dbPaths[relPath]
+
+		if !exists || dbMTime != currMTime {
+			_, _ = IndexFileWithOptions(db, root, path, filter, options)
+		}
+
+		delete(dbPaths, relPath)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// 3. Any remaining files in the map were deleted
+	for relPath := range dbPaths {
+		_ = RemoveFileFromIndex(db, relPath)
+	}
+
+	_ = ResolveImportTargets(db)
+
+	return nil
 }

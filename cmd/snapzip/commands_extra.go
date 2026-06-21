@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -1049,8 +1051,14 @@ func installAgentFiles(root, target string, force bool) ([]string, []string, err
 		add(".cursor/rules/snapzip.mdc", rule)
 	case "continue":
 		add(".continue/snapzip.md", rule)
+	case "mcp":
+		mcpPath, err := installMCPGlobal()
+		if err != nil {
+			return nil, nil, err
+		}
+		return []string{mcpPath}, nil, nil
 	default:
-		return nil, nil, fmt.Errorf("unknown target %q; use all, codex, claude, cursor, or continue", target)
+		return nil, nil, fmt.Errorf("unknown target %q; use all, codex, claude, cursor, continue, or mcp", target)
 	}
 
 	var written, skipped []string
@@ -1104,6 +1112,7 @@ func handleEval() {
 	repobenchPSampleSize := fs.Int("repobench-p-sample-size", 100, "RepoBench v1.1 sample size")
 	repobenchPSeed := fs.Int("repobench-p-seed", 42, "RepoBench v1.1 sample seed")
 	repobenchPMaxShards := fs.Int("repobench-p-max-shards", 1, "Maximum RepoBench v1.1 parquet shards to load from Hugging Face; use 0 for all matching shards")
+	snapzipRerankCmd := fs.String("snapzip-rerank-cmd", "", "Command to run external reranker in snapzip search during benchmarks")
 	minRepobenchAcc1 := fs.String("min-repobench-snapzip-acc1", "", "Minimum SnapZip acc@1 for RepoBench-R")
 	minRepobenchAcc3 := fs.String("min-repobench-snapzip-acc3", "", "Minimum SnapZip acc@3 for RepoBench-R")
 	minRepobenchAcc5 := fs.String("min-repobench-snapzip-acc5", "", "Minimum SnapZip acc@5 for RepoBench-R")
@@ -1157,6 +1166,7 @@ func handleEval() {
 	appendIntFlag("--repobench-p-sample-size", *repobenchPSampleSize)
 	appendIntFlag("--repobench-p-seed", *repobenchPSeed)
 	appendIntFlag("--repobench-p-max-shards", *repobenchPMaxShards)
+	appendOptionalStringFlag("--snapzip-rerank-cmd", *snapzipRerankCmd)
 	appendOptionalStringFlag("--min-repobench-snapzip-acc1", *minRepobenchAcc1)
 	appendOptionalStringFlag("--min-repobench-snapzip-acc3", *minRepobenchAcc3)
 	appendOptionalStringFlag("--min-repobench-snapzip-acc5", *minRepobenchAcc5)
@@ -1238,6 +1248,7 @@ func openDBOrExit(dbDir string) (*sql.DB, error) {
 		fmt.Printf("Error opening DB: %v\n", err)
 		return nil, err
 	}
+	_ = core.LazySyncIndex(db, dbDir)
 	return db, nil
 }
 
@@ -1248,4 +1259,72 @@ func commandOutput(name string, args ...string) string {
 	cmd.Stderr = &output
 	_ = cmd.Run()
 	return strings.TrimSpace(output.String())
+}
+
+func installMCPGlobal() (string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("failed to get executable path: %w", err)
+	}
+	exePath, err = filepath.Abs(exePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute executable path: %w", err)
+	}
+
+	configPath := getClaudeConfigPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		return "", fmt.Errorf("failed to create directory for Claude config: %w", err)
+	}
+
+	var configMap map[string]any
+	fileBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			configMap = make(map[string]any)
+		} else {
+			return "", fmt.Errorf("failed to read Claude config: %w", err)
+		}
+	} else {
+		if err := json.Unmarshal(fileBytes, &configMap); err != nil {
+			return "", fmt.Errorf("Claude config contains invalid JSON, refusing to overwrite it: %w", err)
+		}
+	}
+
+	mcpServers, ok := configMap["mcpServers"].(map[string]any)
+	if !ok {
+		mcpServers = make(map[string]any)
+		configMap["mcpServers"] = mcpServers
+	}
+
+	mcpServers["snapzip"] = map[string]any{
+		"command": exePath,
+		"args":    []string{"mcp"},
+	}
+
+	newBytes, err := json.MarshalIndent(configMap, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to encode Claude config: %w", err)
+	}
+
+	if err := os.WriteFile(configPath, newBytes, 0644); err != nil {
+		return "", fmt.Errorf("failed to write Claude config: %w", err)
+	}
+
+	return configPath, nil
+}
+
+func getClaudeConfigPath() string {
+	home, _ := os.UserHomeDir()
+	switch runtime.GOOS {
+	case "windows":
+		appdata := os.Getenv("APPDATA")
+		if appdata == "" {
+			appdata = filepath.Join(home, "AppData", "Roaming")
+		}
+		return filepath.Join(appdata, "Claude", "claude_desktop_config.json")
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")
+	default:
+		return filepath.Join(home, ".config", "Claude", "claude_desktop_config.json")
+	}
 }

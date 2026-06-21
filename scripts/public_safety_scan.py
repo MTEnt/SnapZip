@@ -11,6 +11,7 @@ SKIP_DIRS = {
     ".snapzip-ci",
     ".work",
     "__pycache__",
+    "coder activity",
     "dist",
     "node_modules",
     "package",

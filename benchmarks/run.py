@@ -1025,6 +1025,18 @@ def repobench_p_context_texts(row, language):
     return [repobench_p_candidate_text(candidate, language) for candidate in row.get("context") or []]
 
 
+def safe_relative_path_parts(value):
+    parts = []
+    for part in Path(value or "").parts:
+        if part in ("", ".", "..", "/", "\\") or part.endswith(":"):
+            continue
+        clean = re.sub(r"[^A-Za-z0-9._-]+", "_", part)
+        clean = clean.strip("._")
+        if clean:
+            parts.append(clean)
+    return parts
+
+
 def completion_support_tokens(text):
     stop = {
         "and", "as", "async", "await", "break", "case", "catch", "class", "const", "continue",
@@ -1239,7 +1251,102 @@ def run_repobench_r(parent, args, snapzip_bin):
     return result
 
 
+def evaluate_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, args):
+    context = row.get("context") or []
+    if not context:
+        return None
+    case_dir = work_dir / f"case_{case_no:03d}_row_{row_idx:05d}"
+    source_dir = case_dir / "snippets"
+    db_dir = case_dir / "db"
+    candidate_texts = repobench_p_context_texts(row, language)
+    for snippet_idx, candidate_text in enumerate(candidate_texts):
+        rel_path = context[snippet_idx].get("path") or ""
+        parts = safe_relative_path_parts(str(Path(rel_path).parent))
+        dest_dir = source_dir.joinpath(*parts)
+        write_file(dest_dir / f"candidate_{snippet_idx:03d}{ext}", candidate_text)
+
+    _, index_record = run_cmd(
+        [
+            snapzip_bin,
+            "index",
+            "--reset",
+            "--db-dir",
+            str(db_dir),
+            "--crawl",
+            str(source_dir),
+            "--langs",
+            language,
+        ],
+        REPO_ROOT,
+    )
+    query = repobench_p_query(row)
+    file_path = row.get("file_path") or ""
+    injected_query = f"--current-path:{file_path}\n{query}" if file_path else query
+    search_cmd = [
+        snapzip_bin,
+        "search",
+        "--json",
+        "--limit",
+        "5",
+        "--db-dir",
+        str(db_dir),
+    ]
+    if args.snapzip_rerank_cmd:
+        search_cmd.extend(["--rerank-cmd", args.snapzip_rerank_cmd])
+    search_cmd.extend(["--query", injected_query])
+
+    _, search_record = run_cmd(search_cmd, REPO_ROOT)
+
+    jaccard_top = jaccard_top5(query, candidate_texts)
+    bm25_top = bm25_top5(query, candidate_texts)
+    random_top = deterministic_random_top5(len(candidate_texts), args.repobench_p_seed + row_idx)
+    snapzip_top, snapzip_return_count, snapzip_receipt_count = snapzip_top5_from_search(search_record["stdout"])
+    gold = int(row.get("gold_snippet_index", -1))
+    raw_prompt = repobench_p_raw_prompt(row)
+    next_line_tokens = completion_support_tokens(row.get("next_line") or "")
+    raw_tokens = set(completion_support_tokens(raw_prompt))
+    new_next_line_tokens = [token for token in next_line_tokens if token not in raw_tokens]
+    gold_identifier = ""
+    if 0 <= gold < len(context):
+        gold_identifier = context[gold].get("identifier") or ""
+
+    record = {
+        "case": case_no,
+        "dataset_row_index": row_idx,
+        "repo_name": row.get("repo_name", ""),
+        "file_path": row.get("file_path", ""),
+        "candidate_count": len(context),
+        "query_imports_and_last_3_lines": query,
+        "next_line": row.get("next_line", ""),
+        "gold_snippet_index": gold,
+        "gold_identifier": gold_identifier,
+        "new_next_line_tokens": new_next_line_tokens,
+        "jaccard_top5": jaccard_top,
+        "bm25_top5": bm25_top,
+        "random_top5": random_top,
+        "snapzip_top5": snapzip_top,
+        "snapzip_return_count": snapzip_return_count,
+        "snapzip_receipt_count": snapzip_receipt_count,
+        "raw_new_token_coverage@5": 0.0,
+        "index_elapsed_seconds": index_record["elapsed_seconds"],
+        "search_elapsed_seconds": search_record["elapsed_seconds"],
+    }
+    for name in ("random", "jaccard", "bm25", "snapzip"):
+        top = record[f"{name}_top5"]
+        selected_text = selected_context_text(top[:5], candidate_texts)
+        record[f"{name}_gold_rank"] = gold_rank(gold, top) if gold >= 0 else 0
+        record[f"{name}_rr@5"] = round(reciprocal_rank(gold, top, 5), 6) if gold >= 0 else 0.0
+        record[f"{name}_ndcg@5"] = round(ndcg_at_k(gold, top, 5), 6) if gold >= 0 else 0.0
+        record[f"{name}_duplicate_count@5"] = duplicate_result_count(top[:5])
+        record[f"{name}_new_token_coverage@5"] = round(token_coverage(new_next_line_tokens, selected_text), 6)
+        record[f"{name}_identifier_hit@5"] = bool(gold_identifier and gold_identifier in selected_text)
+        for k in (1, 3, 5):
+            record[f"{name}_gold_hit@{k}"] = gold >= 0 and gold in top[:k]
+    return record
+
 def run_repobench_p(parent, args, snapzip_bin):
+    from concurrent.futures import ThreadPoolExecutor
+
     rows, data_source, data_paths = load_repobench_p_rows(args)
     sample_size = min(args.repobench_p_sample_size, len(rows))
     if sample_size <= 0:
@@ -1256,96 +1363,36 @@ def run_repobench_p(parent, args, snapzip_bin):
     index_times = []
     search_times = []
     started = time.perf_counter()
-    for case_no, row_idx in enumerate(sample_indices):
-        row = rows[row_idx]
-        context = row.get("context") or []
-        if not context:
-            continue
-        case_dir = work_dir / f"case_{case_no:03d}_row_{row_idx:05d}"
-        source_dir = case_dir / "snippets"
-        db_dir = case_dir / "db"
-        candidate_texts = repobench_p_context_texts(row, language)
-        for snippet_idx, candidate_text in enumerate(candidate_texts):
-            write_file(source_dir / f"candidate_{snippet_idx:03d}{ext}", candidate_text)
 
-        _, index_record = run_cmd(
-            [
-                snapzip_bin,
-                "index",
-                "--reset",
-                "--db-dir",
-                str(db_dir),
-                "--crawl",
-                str(source_dir),
-                "--langs",
-                language,
-            ],
-            REPO_ROOT,
-        )
-        query = repobench_p_query(row)
-        _, search_record = run_cmd(
-            [
-                snapzip_bin,
-                "search",
-                "--json",
-                "--limit",
-                "5",
-                "--db-dir",
-                str(db_dir),
-                "--query",
-                query,
-            ],
-            REPO_ROOT,
-        )
+    max_workers = min(16, os.cpu_count() or 4)
+    print(f"Running RepoBench-P evaluation with {max_workers} parallel workers...", file=sys.stderr)
 
-        jaccard_top = jaccard_top5(query, candidate_texts)
-        bm25_top = bm25_top5(query, candidate_texts)
-        random_top = deterministic_random_top5(len(candidate_texts), args.repobench_p_seed + row_idx)
-        snapzip_top, snapzip_return_count, snapzip_receipt_count = snapzip_top5_from_search(search_record["stdout"])
-        gold = int(row.get("gold_snippet_index", -1))
-        raw_prompt = repobench_p_raw_prompt(row)
-        next_line_tokens = completion_support_tokens(row.get("next_line") or "")
-        raw_tokens = set(completion_support_tokens(raw_prompt))
-        new_next_line_tokens = [token for token in next_line_tokens if token not in raw_tokens]
-        gold_identifier = ""
-        if 0 <= gold < len(context):
-            gold_identifier = context[gold].get("identifier") or ""
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for case_no, row_idx in enumerate(sample_indices):
+            row = rows[row_idx]
+            futures.append(
+                executor.submit(
+                    evaluate_case,
+                    case_no,
+                    row_idx,
+                    row,
+                    work_dir,
+                    language,
+                    ext,
+                    snapzip_bin,
+                    args,
+                )
+            )
 
-        record = {
-            "case": case_no,
-            "dataset_row_index": row_idx,
-            "repo_name": row.get("repo_name", ""),
-            "file_path": row.get("file_path", ""),
-            "candidate_count": len(context),
-            "query_imports_and_last_3_lines": query,
-            "next_line": row.get("next_line", ""),
-            "gold_snippet_index": gold,
-            "gold_identifier": gold_identifier,
-            "new_next_line_tokens": new_next_line_tokens,
-            "jaccard_top5": jaccard_top,
-            "bm25_top5": bm25_top,
-            "random_top5": random_top,
-            "snapzip_top5": snapzip_top,
-            "snapzip_return_count": snapzip_return_count,
-            "snapzip_receipt_count": snapzip_receipt_count,
-            "raw_new_token_coverage@5": 0.0,
-            "index_elapsed_seconds": index_record["elapsed_seconds"],
-            "search_elapsed_seconds": search_record["elapsed_seconds"],
-        }
-        for name in ("random", "jaccard", "bm25", "snapzip"):
-            top = record[f"{name}_top5"]
-            selected_text = selected_context_text(top[:5], candidate_texts)
-            record[f"{name}_gold_rank"] = gold_rank(gold, top) if gold >= 0 else 0
-            record[f"{name}_rr@5"] = round(reciprocal_rank(gold, top, 5), 6) if gold >= 0 else 0.0
-            record[f"{name}_ndcg@5"] = round(ndcg_at_k(gold, top, 5), 6) if gold >= 0 else 0.0
-            record[f"{name}_duplicate_count@5"] = duplicate_result_count(top[:5])
-            record[f"{name}_new_token_coverage@5"] = round(token_coverage(new_next_line_tokens, selected_text), 6)
-            record[f"{name}_identifier_hit@5"] = bool(gold_identifier and gold_identifier in selected_text)
-            for k in (1, 3, 5):
-                record[f"{name}_gold_hit@{k}"] = gold >= 0 and gold in top[:k]
-        records.append(record)
-        index_times.append(index_record["elapsed_seconds"])
-        search_times.append(search_record["elapsed_seconds"])
+        for idx, fut in enumerate(futures, start=1):
+            record = fut.result()
+            if record is not None:
+                records.append(record)
+                index_times.append(record["index_elapsed_seconds"])
+                search_times.append(record["search_elapsed_seconds"])
+            if idx == len(futures) or idx % 25 == 0:
+                print(f"Evaluated {idx}/{len(futures)} RepoBench-P cases", file=sys.stderr)
 
     if not records:
         raise SystemExit("RepoBench v1.1 sample produced no usable rows")
@@ -1645,6 +1692,7 @@ def main():
     )
     parser.add_argument("--repobench-p-sample-size", type=int, default=100)
     parser.add_argument("--repobench-p-seed", type=int, default=42)
+    parser.add_argument("--snapzip-rerank-cmd", default="", help="Command to run external reranker in snapzip search")
     parser.add_argument(
         "--repobench-p-max-shards",
         type=int,
