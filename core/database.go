@@ -51,24 +51,26 @@ var RerankCmd string
 const defaultSearchCandidateLimit = 50
 const maxSearchCandidateLimit = 200
 const lexicalIDFBlend = 0.12
-const lexicalBM25Blend = 0.04
+const lexicalBM25Blend = 0.08
+const lexicalBM25FBlend = 0.05
 const exactIdentifierBlend = 0.08
 const structuredPathBlend = 0.02
 const structuralRerankBlend = 0.06
-const rankFusionBlend = 0.025
+const rankFusionBlend = 0.04
 const rankFusionK = 60.0
-const rankFusionWindow = 3
-const lexicalTailCoverageStart = 3
-const lexicalTailCoverageSlots = 2
+const rankFusionWindow = 5
+const lexicalTailCoverageStart = 4
+const lexicalTailCoverageSlots = 1
 const relevanceRankFusionWeight = 1.0
 const primaryRankFusionWeight = 0.8
 const queryPathRankFusionWeight = 0.35
-const bm25RankFusionWeight = 0.15
+const bm25RankFusionWeight = 0.55
+const bm25FRankFusionWeight = 0.45
 const structuredRankFusionWeight = 0.45
 const structuralRerankFusionWeight = 0.65
 const pathProximityRankFusionWeight = 0.50
-const lexicalCoverageJaccardWeight = 1.0
-const lexicalCoverageBM25Weight = 0.85
+const lexicalCoverageJaccardWeight = 0.35
+const lexicalCoverageBM25Weight = 1.3
 const structuralRerankMetadataLimit = 48
 
 type retrievalQueryPlan struct {
@@ -831,6 +833,12 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 			return nil, err
 		}
 	}
+	if usedFTS && looksLikeCodeContext(prompt) && len(candidates) < candidateLimit {
+		candidates, err = appendSmallCorpusSearchCandidates(db, candidates, candidateLimit)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if len(candidates) > 0 && len(candidates) < limit {
 		candidates, err = backfillSearchCandidates(db, candidates, candidateLimit)
 		if err != nil {
@@ -867,15 +875,16 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 		tokenWeights := queryTokenWeights(uniqueTokens, candidates)
 		bm25Boosts := candidateBM25Boosts(uniqueTokens, candidates)
 		bm25CandidateRanks := candidateValueRankMap(candidates, bm25Boosts, true)
+		bm25FBoosts := candidateBM25FBoosts(uniqueTokens, candidates)
+		bm25FCandidateRanks := candidateValueRankMap(candidates, bm25FBoosts, true)
 		jaccardCandidateRanks := candidateJaccardRankMap(uniqueTokens, candidates)
-		lexicalCoverageRanks = combinedLexicalCoverageRankMap(jaccardCandidateRanks, bm25CandidateRanks)
+		lexicalCoverageRanks = combinedLexicalCoverageRankMap(jaccardCandidateRanks, bm25CandidateRanks, bm25FCandidateRanks)
 		exactIdentifierBoosts := candidateExactIdentifierBoosts(prompt, candidates)
 		structuredBoosts := candidateStructuredPathBoosts(candidates, structuredPathRanks, primaryCandidateIDs)
 		structuralRerankBoosts, structuralRerankRanks, err := candidateStructuralRerankBoosts(db, prompt, candidates)
 		if err != nil {
 			return nil, err
 		}
-		baseScores := make([]float64, len(candidates))
 		var recentWeights map[string]float64
 		if currentPath != "" {
 			if root, err := getDBDir(db); err == nil && root != "" {
@@ -906,8 +915,8 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 							}
 						}
 					}
-					baseScores[idx] = relevanceScore(qnd, uniqueTokens, tokenWeights, 0, structuralBoost, candidates[idx], detectedLang, structureIntent, structureWeight) - gitBoost
-					candidates[idx].Score = baseScores[idx] - bm25Boosts[idx]
+					baseScore := relevanceScore(qnd, uniqueTokens, tokenWeights, 0, structuralBoost, candidates[idx], detectedLang, structureIntent, structureWeight) - gitBoost
+					candidates[idx].Score = baseScore - bm25Boosts[idx] - bm25FBoosts[idx]
 				}
 			}()
 		}
@@ -917,10 +926,6 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 		}
 		close(jobs)
 		wg.Wait()
-
-		if usedFTS && len(primaryCandidateIDs) > 0 {
-			protectedCandidateID = topCandidateIDByBaseScore(candidates, baseScores, primaryCandidateIDs)
-		}
 
 		// Sort candidates by score (lower QND score = higher similarity)
 		sort.Slice(candidates, func(i, j int) bool {
@@ -946,7 +951,10 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 				pathProximityRanks[pc.id] = r + 1
 			}
 		}
-		applyCandidateRankFusion(candidates, primaryCandidateRanks, queryPathCandidateRanks, bm25CandidateRanks, structuredPathRanks, structuralRerankRanks, pathProximityRanks)
+		applyCandidateRankFusion(candidates, primaryCandidateRanks, queryPathCandidateRanks, bm25CandidateRanks, bm25FCandidateRanks, structuredPathRanks, structuralRerankRanks, pathProximityRanks)
+		if usedFTS && len(primaryCandidateIDs) > 0 {
+			protectedCandidateID = topCandidateIDByRankedOrder(candidates, primaryCandidateIDs)
+		}
 	}
 
 	if usedFTS && len(primaryCandidateIDs) > 0 {
@@ -969,14 +977,14 @@ func queryKnowledgeFTS(db *sql.DB, ftsQuery string, candidateLimit int) (*sql.Ro
 		LIMIT ?`, ftsQuery, candidateLimit)
 }
 
-func applyCandidateRankFusion(candidates []Snippet, primaryRanks map[int]int, queryPathRanks map[int]int, bm25Ranks map[int]int, structuredPathRanks map[string]int, structuralRanks map[int]int, pathProximityRanks map[int]int) {
+func applyCandidateRankFusion(candidates []Snippet, primaryRanks map[int]int, queryPathRanks map[int]int, bm25Ranks map[int]int, bm25FRanks map[int]int, structuredPathRanks map[string]int, structuralRanks map[int]int, pathProximityRanks map[int]int) {
 	if len(candidates) < 2 {
 		return
 	}
 
 	window := min(rankFusionWindow, len(candidates))
 	fusionWindow := candidates[:window]
-	fusionScores := candidateRankFusionScores(fusionWindow, primaryRanks, queryPathRanks, bm25Ranks, structuredPathRanks, structuralRanks, pathProximityRanks)
+	fusionScores := candidateRankFusionScores(fusionWindow, primaryRanks, queryPathRanks, bm25Ranks, bm25FRanks, structuredPathRanks, structuralRanks, pathProximityRanks)
 	maxScore := 0.0
 	for _, score := range fusionScores {
 		if score > maxScore {
@@ -998,7 +1006,7 @@ func applyCandidateRankFusion(candidates []Snippet, primaryRanks map[int]int, qu
 	})
 }
 
-func candidateRankFusionScores(candidates []Snippet, primaryRanks map[int]int, queryPathRanks map[int]int, bm25Ranks map[int]int, structuredPathRanks map[string]int, structuralRanks map[int]int, pathProximityRanks map[int]int) map[int]float64 {
+func candidateRankFusionScores(candidates []Snippet, primaryRanks map[int]int, queryPathRanks map[int]int, bm25Ranks map[int]int, bm25FRanks map[int]int, structuredPathRanks map[string]int, structuralRanks map[int]int, pathProximityRanks map[int]int) map[int]float64 {
 	scores := make(map[int]float64, len(candidates))
 	for idx, candidate := range candidates {
 		if candidate.ID == 0 {
@@ -1013,6 +1021,9 @@ func candidateRankFusionScores(candidates []Snippet, primaryRanks map[int]int, q
 		}
 		if rank := bm25Ranks[candidate.ID]; rank > 0 {
 			addRankFusionScore(scores, candidate.ID, rank, bm25RankFusionWeight)
+		}
+		if rank := bm25FRanks[candidate.ID]; rank > 0 {
+			addRankFusionScore(scores, candidate.ID, rank, bm25FRankFusionWeight)
 		}
 		if rank := structuredPathRanks[normalizeIndexedPath(candidate.Path)]; rank > 0 {
 			addRankFusionScore(scores, candidate.ID, rank, structuredRankFusionWeight)
@@ -1136,7 +1147,7 @@ func applyTailRankCoverage(candidates []Snippet, lexicalRanks map[int]int, limit
 	return covered
 }
 
-func combinedLexicalCoverageRankMap(jaccardRanks, bm25Ranks map[int]int) map[int]int {
+func combinedLexicalCoverageRankMap(jaccardRanks, bm25Ranks map[int]int, extraRankMaps ...map[int]int) map[int]int {
 	scores := map[int]float64{}
 	bestRanks := map[int]int{}
 	add := func(ranks map[int]int, weight float64) {
@@ -1152,6 +1163,9 @@ func combinedLexicalCoverageRankMap(jaccardRanks, bm25Ranks map[int]int) map[int
 	}
 	add(jaccardRanks, lexicalCoverageJaccardWeight)
 	add(bm25Ranks, lexicalCoverageBM25Weight)
+	for _, ranks := range extraRankMaps {
+		add(ranks, lexicalCoverageBM25Weight)
+	}
 	if len(scores) == 0 {
 		return nil
 	}
@@ -1215,17 +1229,14 @@ func diversifyRankedSearchCandidates(candidates []Snippet, limit int) []Snippet 
 	return selected
 }
 
-func topCandidateIDByBaseScore(candidates []Snippet, baseScores []float64, primaryCandidateIDs map[int]bool) int {
+func topCandidateIDByRankedOrder(candidates []Snippet, primaryCandidateIDs map[int]bool) int {
 	protectedID := 0
-	bestScore := 0.0
-	for idx, candidate := range candidates {
+	for _, candidate := range candidates {
 		if !primaryCandidateIDs[candidate.ID] {
 			continue
 		}
-		if protectedID == 0 || baseScores[idx] < bestScore {
-			protectedID = candidate.ID
-			bestScore = baseScores[idx]
-		}
+		protectedID = candidate.ID
+		break
 	}
 	return protectedID
 }
@@ -1405,6 +1416,17 @@ func backfillSearchCandidates(db *sql.DB, candidates []Snippet, candidateLimit i
 		return nil, err
 	}
 	return candidates, nil
+}
+
+func appendSmallCorpusSearchCandidates(db *sql.DB, candidates []Snippet, candidateLimit int) ([]Snippet, error) {
+	rowCount, err := tableRowCount(db, "knowledge")
+	if err != nil {
+		return nil, err
+	}
+	if rowCount == 0 || rowCount > candidateLimit || len(candidates) >= rowCount {
+		return candidates, nil
+	}
+	return backfillSearchCandidates(db, candidates, candidateLimit)
 }
 
 func appendStructuredSearchCandidates(db *sql.DB, prompt string, candidates []Snippet, candidateLimit int) ([]Snippet, error) {
@@ -2001,6 +2023,165 @@ func candidateBM25Boosts(queryTokens []string, candidates []Snippet) []float64 {
 		boosts[idx] = lexicalBM25Blend * score / maxScore
 	}
 	return boosts
+}
+
+type candidateBM25FDocument struct {
+	fields [][]string
+}
+
+func candidateBM25FBoosts(queryTokens []string, candidates []Snippet) []float64 {
+	boosts := make([]float64, len(candidates))
+	if len(queryTokens) == 0 || len(candidates) == 0 {
+		return boosts
+	}
+
+	documents := candidateBM25FDocuments(candidates)
+	if len(documents) == 0 {
+		return boosts
+	}
+
+	fieldWeights := []float64{3.0, 1.4, 2.5, 1.0}
+	fieldB := []float64{0.20, 0.40, 0.55, 0.75}
+	avgFieldLens := make([]float64, len(fieldWeights))
+	for _, document := range documents {
+		for fieldIdx, tokens := range document.fields {
+			avgFieldLens[fieldIdx] += float64(len(tokens))
+		}
+	}
+	for idx := range avgFieldLens {
+		avgFieldLens[idx] /= float64(len(documents))
+	}
+
+	querySet := stringSet(queryTokens...)
+	docFreq := make(map[string]int, len(querySet))
+	for _, document := range documents {
+		seen := map[string]bool{}
+		for _, field := range document.fields {
+			for _, token := range field {
+				if !querySet[token] || seen[token] {
+					continue
+				}
+				seen[token] = true
+				docFreq[token]++
+			}
+		}
+	}
+
+	const k1 = 1.2
+	rawScores := make([]float64, len(candidates))
+	maxScore := 0.0
+	for docIdx, document := range documents {
+		fieldCounts := make([]map[string]int, len(document.fields))
+		for fieldIdx, field := range document.fields {
+			counts := make(map[string]int, len(field))
+			for _, token := range field {
+				counts[token]++
+			}
+			fieldCounts[fieldIdx] = counts
+		}
+
+		for _, token := range queryTokens {
+			df := float64(docFreq[token])
+			if df == 0 {
+				continue
+			}
+			weightedTF := 0.0
+			for fieldIdx := range document.fields {
+				freq := float64(fieldCounts[fieldIdx][token])
+				if freq == 0 || avgFieldLens[fieldIdx] == 0 {
+					continue
+				}
+				fieldLen := float64(len(document.fields[fieldIdx]))
+				norm := 1 - fieldB[fieldIdx] + fieldB[fieldIdx]*fieldLen/avgFieldLens[fieldIdx]
+				if norm <= 0 {
+					norm = 1
+				}
+				weightedTF += fieldWeights[fieldIdx] * freq / norm
+			}
+			if weightedTF == 0 {
+				continue
+			}
+			idf := math.Log(1 + (float64(len(candidates))-df+0.5)/(df+0.5))
+			rawScores[docIdx] += idf * (weightedTF * (k1 + 1)) / (weightedTF + k1)
+		}
+		if rawScores[docIdx] > maxScore {
+			maxScore = rawScores[docIdx]
+		}
+	}
+	if maxScore == 0 {
+		return boosts
+	}
+	for idx, score := range rawScores {
+		boosts[idx] = lexicalBM25FBlend * score / maxScore
+	}
+	return boosts
+}
+
+func candidateBM25FDocuments(candidates []Snippet) []candidateBM25FDocument {
+	documents := make([]candidateBM25FDocument, len(candidates))
+	for idx, candidate := range candidates {
+		documents[idx] = candidateBM25FDocument{
+			fields: [][]string{
+				documentSearchTokens(candidate.Path),
+				documentSearchTokens(candidate.Topic),
+				codeDeclarationTokens(candidate.Content),
+				documentSearchTokens(candidate.Content),
+			},
+		}
+	}
+	return documents
+}
+
+func codeDeclarationTokens(content string) []string {
+	var tokens []string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if !looksLikeDeclarationLine(line) {
+			continue
+		}
+		tokens = append(tokens, documentSearchTokens(line)...)
+	}
+	return tokens
+}
+
+func looksLikeDeclarationLine(line string) bool {
+	if line == "" ||
+		strings.HasPrefix(line, "#") ||
+		strings.HasPrefix(line, "//") ||
+		strings.HasPrefix(line, "/*") ||
+		strings.HasPrefix(line, "*") ||
+		strings.HasPrefix(line, "import ") ||
+		strings.HasPrefix(line, "from ") ||
+		strings.HasPrefix(line, "package ") {
+		return false
+	}
+	lower := strings.ToLower(line)
+	if startsWithAny(lower, "if ", "for ", "while ", "switch ", "catch ", "return ", "throw ") {
+		return false
+	}
+	if startsWithAny(lower,
+		"def ",
+		"class ",
+		"func ",
+		"function ",
+		"interface ",
+		"struct ",
+		"enum ",
+		"record ",
+		"type ",
+		"const ",
+		"let ",
+		"var ",
+		"public ",
+		"private ",
+		"protected ",
+		"static ",
+		"final ",
+	) {
+		return true
+	}
+	return strings.Contains(line, "(") && strings.Contains(line, ")") &&
+		(strings.Contains(line, "{") || strings.HasSuffix(line, ":"))
 }
 
 func candidateJaccardRankMap(queryTokens []string, candidates []Snippet) map[int]int {

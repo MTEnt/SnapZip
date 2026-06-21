@@ -613,6 +613,9 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 	commandsExtra := readRepoFile(t, repoRoot, "cmd/snapzip/commands_extra.go")
 	for _, want := range []string{
 		"repobench-p",
+		"repobench-r-matrix",
+		"repobench-matrix-configs",
+		"repobench-matrix-splits",
 		"repobench-p-data",
 		"repobench-p-sample-size",
 		"snapzip-rerank-cmd",

@@ -19,6 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK_ROOT = Path(__file__).resolve().parent
 ALGORITHM_SUITE = BENCHMARK_ROOT / "suites" / "algorithm_20"
 STRESS_RBT = BENCHMARK_ROOT / "stress_rbt.py"
+REPOBENCH_R_CONFIGS = ("python_cff", "python_cfr", "java_cff", "java_cfr")
+REPOBENCH_R_SPLITS = ("easy", "hard")
 
 
 class BenchmarkFailure(Exception):
@@ -870,27 +872,55 @@ class SessionCache:
     }
 
 
-def resolve_repobench_data(args):
+def comma_list(value, defaults):
+    items = [item.strip() for item in (value or "").split(",") if item.strip()]
+    return items or list(defaults)
+
+
+def safe_dir_name(value):
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value)
+    cleaned = cleaned.strip("._-")
+    return cleaned or "run"
+
+
+def resolve_repobench_data_path(data_root, config):
+    path = Path(data_root).expanduser()
+    if path.is_file():
+        return path
+    if path.is_dir():
+        candidates = [
+            path / f"{config}.gz",
+            path / "data" / f"{config}.gz",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        raise SystemExit(f"RepoBench-R data file not found for {config} under: {path}")
+    return path
+
+
+def resolve_repobench_data(args, config=None):
+    config = config or args.repobench_config
     if args.repobench_data:
-        path = Path(args.repobench_data).expanduser()
+        path = resolve_repobench_data_path(args.repobench_data, config)
     elif os.environ.get("REPOBENCH_R_DATA"):
-        path = Path(os.environ["REPOBENCH_R_DATA"]).expanduser()
+        path = resolve_repobench_data_path(os.environ["REPOBENCH_R_DATA"], config)
     else:
         try:
             from huggingface_hub import snapshot_download
         except ImportError as exc:
             raise SystemExit(
                 "RepoBench-R data not found. Install huggingface_hub or pass --repobench-data "
-                "pointing at data/python_cff.gz from tianyang/repobench-r."
+                "pointing at a data/<config>.gz file or data directory from tianyang/repobench-r."
             ) from exc
         snapshot = Path(
             snapshot_download(
                 repo_id="tianyang/repobench-r",
                 repo_type="dataset",
-                allow_patterns=["README.md", "repobench-r.py", f"data/{args.repobench_config}.gz"],
+                allow_patterns=["README.md", "repobench-r.py", f"data/{config}.gz"],
             )
         )
-        path = snapshot / "data" / f"{args.repobench_config}.gz"
+        path = snapshot / "data" / f"{config}.gz"
 
     if not path.exists():
         raise SystemExit(f"RepoBench-R data file not found: {path}")
@@ -904,6 +934,30 @@ def load_repobench_rows(path, split):
         return payload["test"][split]
     except KeyError as exc:
         raise SystemExit(f"RepoBench-R split not found in {path}: test/{split}") from exc
+
+
+def repobench_r_language(config):
+    if config.startswith("python_"):
+        return "python"
+    if config.startswith("java_"):
+        return "java"
+    raise SystemExit(f"unsupported RepoBench-R config: {config}")
+
+
+def repobench_r_extension(language):
+    if language == "java":
+        return ".java"
+    if language == "python":
+        return ".py"
+    raise SystemExit(f"unsupported RepoBench-R language: {language}")
+
+
+def repobench_sample_indices(row_count, sample_size, seed):
+    if row_count <= 0:
+        return []
+    if sample_size <= 0 or sample_size >= row_count:
+        return list(range(row_count))
+    return sorted(random.Random(seed).sample(range(row_count), sample_size))
 
 
 def repobench_query(row):
@@ -1135,14 +1189,19 @@ def snapzip_top5_from_search(output):
     return top5, len(snippets), receipt_count
 
 
-def run_repobench_r(parent, args, snapzip_bin):
-    data_path = resolve_repobench_data(args)
-    rows = load_repobench_rows(data_path, args.repobench_split)
-    sample_size = min(args.repobench_sample_size, len(rows))
+def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=None):
+    config = config or args.repobench_config
+    split = split or args.repobench_split
+    language = repobench_r_language(config)
+    ext = repobench_r_extension(language)
+    data_path = resolve_repobench_data(args, config)
+    rows = load_repobench_rows(data_path, split)
+    sample_indices = repobench_sample_indices(len(rows), args.repobench_sample_size, args.repobench_seed)
+    sample_size = len(sample_indices)
     if sample_size <= 0:
-        raise SystemExit("--repobench-sample-size must be greater than zero")
-    sample_indices = sorted(random.Random(args.repobench_seed).sample(range(len(rows)), sample_size))
-    work_dir = parent / "repobench_r"
+        raise SystemExit(f"RepoBench-R split has no rows: {config} test/{split}")
+    run_name = name or "repobench_r"
+    work_dir = parent / safe_dir_name(run_name)
     if work_dir.exists():
         shutil.rmtree(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1157,7 +1216,7 @@ def run_repobench_r(parent, args, snapzip_bin):
         source_dir = case_dir / "snippets"
         db_dir = case_dir / "db"
         for snippet_idx, snippet in enumerate(row["context"]):
-            write_file(source_dir / f"snippet_{snippet_idx:03d}.py", snippet.rstrip() + "\n")
+            write_file(source_dir / f"snippet_{snippet_idx:03d}{ext}", snippet.rstrip() + "\n")
 
         _, index_record = run_cmd(
             [
@@ -1169,7 +1228,7 @@ def run_repobench_r(parent, args, snapzip_bin):
                 "--crawl",
                 str(source_dir),
                 "--langs",
-                "python",
+                language,
             ],
             REPO_ROOT,
         )
@@ -1222,11 +1281,14 @@ def run_repobench_r(parent, args, snapzip_bin):
         search_times.append(search_record["elapsed_seconds"])
 
     result = {
-        "name": "repobench_r",
+        "name": run_name,
         "dataset": "tianyang/repobench-r",
-        "config": args.repobench_config,
-        "split": args.repobench_split,
+        "config": config,
+        "split": split,
+        "language": language,
         "sample_size": sample_size,
+        "sample_size_arg": args.repobench_sample_size,
+        "sample_mode": "full" if args.repobench_sample_size <= 0 or sample_size == len(rows) else "sampled",
         "sample_seed": args.repobench_seed,
         "sample_indices": sample_indices,
         "query": "last 3 lines of in-file code before target line",
@@ -1249,6 +1311,98 @@ def run_repobench_r(parent, args, snapzip_bin):
         result[f"{name}_duplicate_top5_slots"] = sum(record[f"{name}_duplicate_count@5"] for record in records)
     result["passed"] = result["snapzip_hits@1"] >= result["bm25_hits@1"]
     return result
+
+
+def validate_repobench_r_values(configs, splits):
+    unknown_configs = [config for config in configs if config not in REPOBENCH_R_CONFIGS]
+    if unknown_configs:
+        raise SystemExit(f"unsupported RepoBench-R config(s): {', '.join(unknown_configs)}")
+    unknown_splits = [split for split in splits if split not in REPOBENCH_R_SPLITS]
+    if unknown_splits:
+        raise SystemExit(f"unsupported RepoBench-R split(s): {', '.join(unknown_splits)}")
+
+
+def validate_repobench_matrix_data_source(args, configs):
+    data_source = args.repobench_data or os.environ.get("REPOBENCH_R_DATA") or ""
+    if not data_source or len(configs) <= 1:
+        return
+    path = Path(data_source).expanduser()
+    if path.is_file():
+        raise SystemExit(
+            "--repobench-data/REPOBENCH_R_DATA points at one file, but matrix mode needs multiple configs. "
+            "Pass a directory containing data/<config>.gz files or restrict --repobench-matrix-configs to one config."
+        )
+
+
+def summarize_repobench_r_matrix(runs):
+    fields = [
+        "snapzip_acc@1",
+        "snapzip_acc@3",
+        "snapzip_acc@5",
+        "snapzip_mrr@5",
+        "snapzip_ndcg@5",
+        "bm25_acc@5",
+        "jaccard_acc@5",
+        "mean_snapzip_search_elapsed_seconds",
+    ]
+    rows = []
+    for run in runs:
+        row = {
+            "config": run["config"],
+            "split": run["split"],
+            "language": run["language"],
+            "sample_size": run["sample_size"],
+            "sample_mode": run["sample_mode"],
+            "passed": run["passed"],
+        }
+        for field in fields:
+            row[field] = run.get(field)
+        row["snapzip_acc@5_over_bm25"] = round(run["snapzip_acc@5"] - run["bm25_acc@5"], 6)
+        row["snapzip_acc@5_over_jaccard"] = round(run["snapzip_acc@5"] - run["jaccard_acc@5"], 6)
+        rows.append(row)
+
+    macro = {}
+    for field in fields + ["snapzip_acc@5_over_bm25", "snapzip_acc@5_over_jaccard"]:
+        macro[field] = safe_mean([row[field] for row in rows if row.get(field) is not None])
+    macro["sample_size"] = sum(row["sample_size"] for row in rows)
+    macro["passed_runs"] = sum(1 for row in rows if row["passed"])
+    macro["total_runs"] = len(rows)
+    return {"rows": rows, "macro": macro}
+
+
+def run_repobench_r_matrix(parent, args, snapzip_bin):
+    configs = comma_list(args.repobench_matrix_configs, REPOBENCH_R_CONFIGS)
+    splits = comma_list(args.repobench_matrix_splits, REPOBENCH_R_SPLITS)
+    validate_repobench_r_values(configs, splits)
+    validate_repobench_matrix_data_source(args, configs)
+
+    runs = []
+    started = time.perf_counter()
+    for config in configs:
+        for split in splits:
+            runs.append(
+                run_repobench_r(
+                    parent,
+                    args,
+                    snapzip_bin,
+                    config=config,
+                    split=split,
+                    name=f"repobench_r_{config}_{split}",
+                )
+            )
+
+    return {
+        "name": "repobench_r_matrix",
+        "dataset": "tianyang/repobench-r",
+        "configs": configs,
+        "splits": splits,
+        "sample_size_arg": args.repobench_sample_size,
+        "sample_seed": args.repobench_seed,
+        "elapsed_seconds": round(time.perf_counter() - started, 6),
+        "summary": summarize_repobench_r_matrix(runs),
+        "runs": runs,
+        "passed": all(run["passed"] for run in runs),
+    }
 
 
 def evaluate_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, args):
@@ -1453,6 +1607,8 @@ def snapzip_passed(result):
     if result["name"] == "context_quality":
         return bool(result.get("passed"))
     if result["name"] == "repobench_r":
+        return bool(result.get("passed"))
+    if result["name"] == "repobench_r_matrix":
         return bool(result.get("passed"))
     if result["name"] == "repobench_p":
         return bool(result.get("passed"))
@@ -1669,6 +1825,7 @@ def main():
             "repair-retrieval",
             "context-quality",
             "repobench-r",
+            "repobench-r-matrix",
             "repobench-p",
             "all",
         ],
@@ -1678,11 +1835,13 @@ def main():
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--json", default="", help="Optional path to write the JSON report")
     parser.add_argument("--keep-workdir", default="", help="Optional directory to keep generated benchmark files")
-    parser.add_argument("--repobench-data", default="", help="Path to RepoBench-R data/python_cff.gz")
+    parser.add_argument("--repobench-data", default="", help="Path to a RepoBench-R data/<config>.gz file or data directory")
     parser.add_argument("--repobench-config", default="python_cff")
     parser.add_argument("--repobench-split", choices=["easy", "hard"], default="hard")
-    parser.add_argument("--repobench-sample-size", type=int, default=100)
+    parser.add_argument("--repobench-sample-size", type=int, default=100, help="RepoBench-R sample size; use 0 for the full split")
     parser.add_argument("--repobench-seed", type=int, default=42)
+    parser.add_argument("--repobench-matrix-configs", default=",".join(REPOBENCH_R_CONFIGS), help="Comma-separated RepoBench-R configs for matrix mode")
+    parser.add_argument("--repobench-matrix-splits", default=",".join(REPOBENCH_R_SPLITS), help="Comma-separated RepoBench-R splits for matrix mode")
     parser.add_argument("--repobench-p-data", default="", help="Path to a RepoBench v1.1 parquet file or split directory")
     parser.add_argument("--repobench-p-language", choices=["python", "java"], default="python")
     parser.add_argument(
@@ -1745,6 +1904,8 @@ def main():
             result["runs"].append(run_algorithm_20(work_parent, args, snapzip_bin))
         if args.suite in ("repobench-r", "all"):
             result["runs"].append(run_repobench_r(work_parent, args, snapzip_bin))
+        if args.suite == "repobench-r-matrix":
+            result["runs"].append(run_repobench_r_matrix(work_parent, args, snapzip_bin))
         if args.suite in ("repobench-p", "all"):
             result["runs"].append(run_repobench_p(work_parent, args, snapzip_bin))
 

@@ -498,6 +498,16 @@ The same suite can be run through the CLI wrapper:
 snapzip eval --suite repobench-r --snapzip-bin ./snapzip --repobench-sample-size 100 --json /tmp/snapzip-repobench-r.json
 ```
 
+Run the public Python/Java, easy/hard matrix:
+
+```bash
+python3 benchmarks/run.py --suite repobench-r-matrix --snapzip-bin ./snapzip \
+  --repobench-sample-size 25 \
+  --json /tmp/snapzip-repobench-r-matrix-smoke.json
+```
+
+Use `--repobench-sample-size 0` for a full split sweep. If you pass local RepoBench-R data for matrix mode, pass a directory containing the public `data/<config>.gz` files rather than one `.gz` file.
+
 Current 100-sample `python_cff` / `test_hard` readout, seed `42`:
 
 - Jaccard: 10/100 acc@1, 32/100 acc@3, 48/100 acc@5, 0.2315 MRR@5, 0.292862 nDCG@5

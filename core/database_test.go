@@ -507,6 +507,71 @@ func TestCandidateBM25BoostsPrioritizeSpecificTermOverlap(t *testing.T) {
 	}
 }
 
+func TestCandidateBM25FBoostsUseCodeFields(t *testing.T) {
+	tokens := []string{"payment", "gateway"}
+	candidates := []Snippet{
+		{Path: "app/payment_gateway.py", Topic: "", Content: "shared helper\n"},
+		{Path: "app/noise.py", Topic: "", Content: "shared helper payment\n"},
+	}
+
+	boosts := candidateBM25FBoosts(tokens, candidates)
+	if len(boosts) != len(candidates) {
+		t.Fatalf("boost count = %d, want %d", len(boosts), len(candidates))
+	}
+	if boosts[0] <= boosts[1] {
+		t.Fatalf("path field boost=%f, content-only boost=%f; want path match higher", boosts[0], boosts[1])
+	}
+}
+
+func TestCodeDeclarationTokensCaptureDeclarations(t *testing.T) {
+	tokens := codeDeclarationTokens(strings.Join([]string{
+		"if payment_gateway:",
+		"    return payment_gateway",
+		"def authorize_payment(self, amount):",
+		"public PaymentGateway createGateway() {",
+	}, "\n"))
+
+	for _, want := range []string{"authorize", "payment", "paymentgateway", "gateway"} {
+		if !stringSliceContains(tokens, want) {
+			t.Fatalf("declaration tokens missing %q: %+v", want, tokens)
+		}
+	}
+	if stringSliceContains(tokens, "return") || stringSliceContains(tokens, "if") {
+		t.Fatalf("control-flow tokens leaked into declaration field: %+v", tokens)
+	}
+}
+
+func TestAppendSmallCorpusSearchCandidatesBackfillsBoundedCorpus(t *testing.T) {
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for idx := 0; idx < 4; idx++ {
+		if err := AddKnowledge(db, "py", fmt.Sprintf("Source file: candidate_%d.py", idx), fmt.Sprintf("def candidate_%d():\n    return %d\n", idx, idx)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	candidates := []Snippet{{ID: 2, Topic: "Source file: candidate_1.py"}}
+	backfilled, err := appendSmallCorpusSearchCandidates(db, candidates, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backfilled) != 4 {
+		t.Fatalf("backfilled %d candidates, want all 4: %+v", len(backfilled), backfilled)
+	}
+
+	capped, err := appendSmallCorpusSearchCandidates(db, candidates, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != len(candidates) {
+		t.Fatalf("candidate set changed for corpus above cap: %+v", capped)
+	}
+}
+
 func TestCandidateExactIdentifierBoostsPrioritizeImportedSymbol(t *testing.T) {
 	prompt := strings.Join([]string{
 		"from app.constants import DATA_COORDINATORS, DATA_CLIENT",
@@ -581,6 +646,7 @@ func TestCandidateRankFusionCombinesIndependentSignals(t *testing.T) {
 	}
 	applyCandidateRankFusion(
 		candidates,
+		map[int]int{2: 1},
 		map[int]int{2: 1},
 		map[int]int{2: 1},
 		map[int]int{2: 1},
@@ -737,7 +803,7 @@ func TestCandidateJaccardRankMapUsesTokenOverlap(t *testing.T) {
 	}
 }
 
-func TestApplyTailRankCoveragePreservesTopThreeAndFillsTail(t *testing.T) {
+func TestApplyTailRankCoveragePreservesTopFourAndFillsFinalSlot(t *testing.T) {
 	candidates := []Snippet{
 		{ID: 1, Path: "one.py", Score: 0.1},
 		{ID: 2, Path: "two.py", Score: 0.2},
@@ -752,13 +818,13 @@ func TestApplyTailRankCoveragePreservesTopThreeAndFillsTail(t *testing.T) {
 	if len(ranked) < 5 {
 		t.Fatalf("ranked count = %d, want at least 5: %+v", len(ranked), ranked)
 	}
-	for idx, want := range []int{1, 2, 3} {
+	for idx, want := range []int{1, 2, 3, 4} {
 		if ranked[idx].ID != want {
-			t.Fatalf("ranked[%d] = %d, want preserved top-three ID %d: %+v", idx, ranked[idx].ID, want, ranked)
+			t.Fatalf("ranked[%d] = %d, want preserved top-four ID %d: %+v", idx, ranked[idx].ID, want, ranked)
 		}
 	}
-	if ranked[3].ID != 6 || ranked[4].ID != 5 {
-		t.Fatalf("tail coverage IDs = %d,%d; want 6,5: %+v", ranked[3].ID, ranked[4].ID, ranked)
+	if ranked[4].ID != 6 {
+		t.Fatalf("tail coverage ID = %d; want lexical candidate 6: %+v", ranked[4].ID, ranked)
 	}
 }
 
@@ -792,6 +858,19 @@ func TestRankSearchCandidatesPreservesProtectedPrimaryCandidate(t *testing.T) {
 	}
 	if ranked[1].ID == ranked[0].ID {
 		t.Fatalf("protected candidate was duplicated: %+v", ranked)
+	}
+}
+
+func TestTopCandidateIDByRankedOrderUsesHybridOrder(t *testing.T) {
+	candidates := []Snippet{
+		{ID: 4, Path: "structured.py", Score: 0.01},
+		{ID: 2, Path: "bm25.py", Score: 0.02},
+		{ID: 1, Path: "base.py", Score: 0.03},
+	}
+
+	got := topCandidateIDByRankedOrder(candidates, map[int]bool{1: true, 2: true})
+	if got != 2 {
+		t.Fatalf("protected candidate = %d, want first primary candidate in hybrid rank order", got)
 	}
 }
 
