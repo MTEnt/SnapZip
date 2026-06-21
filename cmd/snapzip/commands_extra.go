@@ -1096,7 +1096,7 @@ Do not assume SnapZip memory exists on fresh installs; index first with ` + "`sn
 
 func handleEval() {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
-	suite := fs.String("suite", "smoke", "Benchmark suite: smoke, algorithm-20, hard-rbt, repair-retrieval, context-quality, repobench-r, repobench-r-matrix, repobench-p, all")
+	suite := fs.String("suite", "smoke", "Benchmark suite: smoke, algorithm-20, hard-rbt, repair-retrieval, context-quality, repobench-r, repobench-r-matrix, repobench-p, repobench-live, all")
 	snapzipBin := fs.String("snapzip-bin", "", "Path to built snapzip binary")
 	iterations := fs.Int("iterations", 100, "Optimizer iterations for benchmark harness")
 	jsonPath := fs.String("json", "", "Optional path to write JSON report")
@@ -1131,6 +1131,14 @@ func handleEval() {
 	minRepobenchPIdentifierHit5 := fs.String("min-repobench-p-snapzip-identifier-hit5", "", "Minimum SnapZip gold-identifier hit@5 for RepoBench v1.1")
 	minRepobenchPGoldHit5OverBM25 := fs.String("min-repobench-p-snapzip-gold-hit5-over-bm25", "", "Minimum SnapZip gold hit@5 delta over BM25 for RepoBench v1.1")
 	minRepobenchPNewTokenCoverage5OverBM25 := fs.String("min-repobench-p-snapzip-new-token-coverage5-over-bm25", "", "Minimum SnapZip new-token coverage@5 delta over BM25 for RepoBench v1.1")
+	liveCLICmd := fs.String("live-cli-cmd", "", "Local model CLI command for live completion eval; receives prompt on stdin unless it uses {prompt} or {prompt_file}")
+	liveModel := fs.String("live-model", "", "Model label for reports; defaults to SNAPZIP_LIVE_MODEL or cli")
+	liveSampleSize := fs.Int("live-sample-size", 20, "RepoBench live completion sample size")
+	liveSeed := fs.Int("live-seed", 42, "RepoBench live completion sample seed")
+	liveContextTopK := fs.Int("live-context-top-k", 5, "SnapZip context snippets to include in assisted prompt")
+	liveTimeoutSeconds := fs.String("live-timeout-seconds", "120.0", "Timeout for each live model CLI call")
+	liveCache := fs.String("live-cache", "", "Optional JSON cache path for live model calls")
+	liveNoCache := fs.Bool("live-no-cache", false, "Disable live model response cache")
 	_ = fs.Parse(os.Args[2:])
 
 	runPy := filepath.Join("benchmarks", "run.py")
@@ -1187,6 +1195,16 @@ func handleEval() {
 	appendOptionalStringFlag("--min-repobench-p-snapzip-identifier-hit5", *minRepobenchPIdentifierHit5)
 	appendOptionalStringFlag("--min-repobench-p-snapzip-gold-hit5-over-bm25", *minRepobenchPGoldHit5OverBM25)
 	appendOptionalStringFlag("--min-repobench-p-snapzip-new-token-coverage5-over-bm25", *minRepobenchPNewTokenCoverage5OverBM25)
+	appendOptionalStringFlag("--live-cli-cmd", *liveCLICmd)
+	appendOptionalStringFlag("--live-model", *liveModel)
+	appendIntFlag("--live-sample-size", *liveSampleSize)
+	appendIntFlag("--live-seed", *liveSeed)
+	appendIntFlag("--live-context-top-k", *liveContextTopK)
+	appendOptionalStringFlag("--live-timeout-seconds", *liveTimeoutSeconds)
+	appendOptionalStringFlag("--live-cache", *liveCache)
+	if *liveNoCache {
+		args = append(args, "--live-no-cache")
+	}
 	cmd := exec.Command("python3", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

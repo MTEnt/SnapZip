@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import gzip
+import hashlib
 import json
 import math
 import os
 import pickle
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1091,6 +1093,19 @@ def safe_relative_path_parts(value):
     return parts
 
 
+def report_path(value):
+    path = Path(value or "")
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except (OSError, ValueError):
+        pass
+    return path.name or str(value)
+
+
+def report_paths(values):
+    return [report_path(value) for value in values]
+
+
 def completion_support_tokens(text):
     stop = {
         "and", "as", "async", "await", "break", "case", "catch", "class", "const", "continue",
@@ -1112,6 +1127,31 @@ def token_coverage(target_tokens, context_text):
         return 0.0
     available = set(completion_support_tokens(context_text))
     return len(target & available) / len(target)
+
+
+def token_f1(predicted, expected):
+    predicted_tokens = completion_support_tokens(predicted)
+    expected_tokens = completion_support_tokens(expected)
+    if not predicted_tokens and not expected_tokens:
+        return 1.0
+    if not predicted_tokens or not expected_tokens:
+        return 0.0
+
+    predicted_counts = {}
+    for token in predicted_tokens:
+        predicted_counts[token] = predicted_counts.get(token, 0) + 1
+    expected_counts = {}
+    for token in expected_tokens:
+        expected_counts[token] = expected_counts.get(token, 0) + 1
+
+    overlap = 0
+    for token, count in predicted_counts.items():
+        overlap += min(count, expected_counts.get(token, 0))
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(predicted_tokens)
+    recall = overlap / len(expected_tokens)
+    return 2 * precision * recall / (precision + recall)
 
 
 def deterministic_random_top5(candidate_count, seed):
@@ -1405,7 +1445,7 @@ def run_repobench_r_matrix(parent, args, snapzip_bin):
     }
 
 
-def evaluate_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, args):
+def prepare_repobench_p_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, args):
     context = row.get("context") or []
     if not context:
         return None
@@ -1450,10 +1490,6 @@ def evaluate_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, a
     search_cmd.extend(["--query", injected_query])
 
     _, search_record = run_cmd(search_cmd, REPO_ROOT)
-
-    jaccard_top = jaccard_top5(query, candidate_texts)
-    bm25_top = bm25_top5(query, candidate_texts)
-    random_top = deterministic_random_top5(len(candidate_texts), args.repobench_p_seed + row_idx)
     snapzip_top, snapzip_return_count, snapzip_receipt_count = snapzip_top5_from_search(search_record["stdout"])
     gold = int(row.get("gold_snippet_index", -1))
     raw_prompt = repobench_p_raw_prompt(row)
@@ -1464,26 +1500,60 @@ def evaluate_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, a
     if 0 <= gold < len(context):
         gold_identifier = context[gold].get("identifier") or ""
 
+    return {
+        "case": case_no,
+        "dataset_row_index": row_idx,
+        "row": row,
+        "context": context,
+        "candidate_texts": candidate_texts,
+        "query": query,
+        "raw_prompt": raw_prompt,
+        "next_line_tokens": next_line_tokens,
+        "new_next_line_tokens": new_next_line_tokens,
+        "gold": gold,
+        "gold_identifier": gold_identifier,
+        "snapzip_top5": snapzip_top,
+        "snapzip_return_count": snapzip_return_count,
+        "snapzip_receipt_count": snapzip_receipt_count,
+        "index_record": index_record,
+        "search_record": search_record,
+    }
+
+
+def evaluate_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, args):
+    prepared = prepare_repobench_p_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, args)
+    if prepared is None:
+        return None
+
+    candidate_texts = prepared["candidate_texts"]
+    query = prepared["query"]
+    jaccard_top = jaccard_top5(query, candidate_texts)
+    bm25_top = bm25_top5(query, candidate_texts)
+    random_top = deterministic_random_top5(len(candidate_texts), args.repobench_p_seed + row_idx)
+    snapzip_top = prepared["snapzip_top5"]
+    gold = prepared["gold"]
+    row = prepared["row"]
+
     record = {
         "case": case_no,
         "dataset_row_index": row_idx,
         "repo_name": row.get("repo_name", ""),
         "file_path": row.get("file_path", ""),
-        "candidate_count": len(context),
+        "candidate_count": len(prepared["context"]),
         "query_imports_and_last_3_lines": query,
         "next_line": row.get("next_line", ""),
         "gold_snippet_index": gold,
-        "gold_identifier": gold_identifier,
-        "new_next_line_tokens": new_next_line_tokens,
+        "gold_identifier": prepared["gold_identifier"],
+        "new_next_line_tokens": prepared["new_next_line_tokens"],
         "jaccard_top5": jaccard_top,
         "bm25_top5": bm25_top,
         "random_top5": random_top,
         "snapzip_top5": snapzip_top,
-        "snapzip_return_count": snapzip_return_count,
-        "snapzip_receipt_count": snapzip_receipt_count,
+        "snapzip_return_count": prepared["snapzip_return_count"],
+        "snapzip_receipt_count": prepared["snapzip_receipt_count"],
         "raw_new_token_coverage@5": 0.0,
-        "index_elapsed_seconds": index_record["elapsed_seconds"],
-        "search_elapsed_seconds": search_record["elapsed_seconds"],
+        "index_elapsed_seconds": prepared["index_record"]["elapsed_seconds"],
+        "search_elapsed_seconds": prepared["search_record"]["elapsed_seconds"],
     }
     for name in ("random", "jaccard", "bm25", "snapzip"):
         top = record[f"{name}_top5"]
@@ -1492,8 +1562,8 @@ def evaluate_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, a
         record[f"{name}_rr@5"] = round(reciprocal_rank(gold, top, 5), 6) if gold >= 0 else 0.0
         record[f"{name}_ndcg@5"] = round(ndcg_at_k(gold, top, 5), 6) if gold >= 0 else 0.0
         record[f"{name}_duplicate_count@5"] = duplicate_result_count(top[:5])
-        record[f"{name}_new_token_coverage@5"] = round(token_coverage(new_next_line_tokens, selected_text), 6)
-        record[f"{name}_identifier_hit@5"] = bool(gold_identifier and gold_identifier in selected_text)
+        record[f"{name}_new_token_coverage@5"] = round(token_coverage(prepared["new_next_line_tokens"], selected_text), 6)
+        record[f"{name}_identifier_hit@5"] = bool(prepared["gold_identifier"] and prepared["gold_identifier"] in selected_text)
         for k in (1, 3, 5):
             record[f"{name}_gold_hit@{k}"] = gold >= 0 and gold in top[:k]
     return record
@@ -1555,7 +1625,7 @@ def run_repobench_p(parent, args, snapzip_bin):
         "name": "repobench_p",
         "dataset": "RepoBench v1.1",
         "data_source": data_source,
-        "data_paths": data_paths,
+        "data_paths": report_paths(data_paths),
         "language": language,
         "split": repobench_p_split_name(args.repobench_p_split),
         "sample_size": len(records),
@@ -1596,6 +1666,314 @@ def run_repobench_p(parent, args, snapzip_bin):
     return result
 
 
+def live_cache_path(args):
+    if args.live_cache:
+        return Path(args.live_cache).expanduser()
+    return REPO_ROOT / "benchmarks" / ".work" / "live-model-cache.json"
+
+
+def load_live_cache(args):
+    path = live_cache_path(args)
+    if not path.exists():
+        return {}, path
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), path
+    except json.JSONDecodeError:
+        return {}, path
+
+
+def save_live_cache(cache, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def live_completion_cache_key(cli_cmd, model, system_prompt, user_prompt):
+    payload = {
+        "provider": "cli",
+        "model": model,
+        "cli_cmd": cli_cmd,
+        "system": system_prompt,
+        "user": user_prompt,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def live_cli_command(args):
+    cli_cmd = args.live_cli_cmd or os.environ.get("SNAPZIP_LIVE_CLI_CMD") or ""
+    if not cli_cmd.strip():
+        raise SystemExit(
+            "--live-cli-cmd is required for --suite repobench-live. "
+            "Pass a local model CLI command that reads the prompt from stdin, "
+            "or set SNAPZIP_LIVE_CLI_CMD."
+        )
+    return cli_cmd
+
+
+def run_live_cli(cli_cmd, system_prompt, user_prompt, timeout):
+    prompt = system_prompt + "\n\n" + user_prompt
+    input_text = prompt
+    command = cli_cmd
+    temp_context = None
+    if "{prompt_file}" in command:
+        temp_context = tempfile.TemporaryDirectory(prefix="snapzip-live-prompt-")
+        prompt_path = Path(temp_context.name) / "prompt.txt"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        command = command.replace("{prompt_file}", shlex.quote(str(prompt_path)))
+        input_text = None
+    elif "{prompt}" in command:
+        command = command.replace("{prompt}", shlex.quote(prompt))
+        input_text = None
+
+    try:
+        started = time.perf_counter()
+        proc = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            shell=True,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        elapsed = time.perf_counter() - started
+    finally:
+        if temp_context is not None:
+            temp_context.cleanup()
+
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        detail = stderr or stdout or f"exit code {proc.returncode}"
+        if len(detail) > 1200:
+            detail = detail[:1200] + "...<truncated>"
+        raise SystemExit(f"live model CLI command failed: {detail}")
+
+    return {
+        "text": proc.stdout or "",
+        "elapsed_seconds": round(elapsed, 6),
+        "stderr": proc.stderr or "",
+        "cached": False,
+    }
+
+
+def live_complete(args, cache, cli_cmd, model, system_prompt, user_prompt):
+    key = live_completion_cache_key(
+        cli_cmd,
+        model,
+        system_prompt,
+        user_prompt,
+    )
+    if not args.live_no_cache and key in cache:
+        cached = dict(cache[key])
+        cached["cached"] = True
+        cached["elapsed_seconds"] = 0.0
+        return cached
+
+    result = run_live_cli(cli_cmd, system_prompt, user_prompt, args.live_timeout_seconds)
+
+    if not args.live_no_cache:
+        cache[key] = {
+            "text": result["text"],
+            "provider": "cli",
+            "model": model,
+        }
+    return result
+
+
+def live_completion_system_prompt():
+    return (
+        "You are evaluating code completion. Predict the single next line of code at the cursor. "
+        "Return only that next line. Preserve indentation when it is clear. Do not explain. "
+        "Do not use Markdown fences."
+    )
+
+
+def live_raw_prompt(row, language):
+    file_path = row.get("file_path") or ""
+    return "\n".join(
+        part
+        for part in [
+            f"Language: {language}",
+            f"File: {file_path}",
+            "Code before cursor:",
+            "```",
+            repobench_p_raw_prompt(row),
+            "```",
+            "Return only the next line.",
+        ]
+        if part != ""
+    )
+
+
+def live_assisted_prompt(row, language, context_text):
+    file_path = row.get("file_path") or ""
+    return "\n".join(
+        part
+        for part in [
+            f"Language: {language}",
+            f"File: {file_path}",
+            "Relevant cross-file context selected by SnapZip:",
+            "```",
+            context_text.rstrip(),
+            "```",
+            "Code before cursor:",
+            "```",
+            repobench_p_raw_prompt(row),
+            "```",
+            "Return only the next line.",
+        ]
+        if part != ""
+    )
+
+
+def first_completion_line(text):
+    cleaned = (text or "").strip("\n")
+    lines = []
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            continue
+        lines.append(line.rstrip())
+    if not lines:
+        return ""
+    return lines[0].rstrip()
+
+
+def score_completion(predicted, expected):
+    first_line = first_completion_line(predicted)
+    expected_line = (expected or "").rstrip()
+    return {
+        "prediction": first_line,
+        "exact": first_line == expected_line,
+        "trimmed_exact": first_line.strip() == expected_line.strip(),
+        "token_f1": round(token_f1(first_line, expected_line), 6),
+    }
+
+
+def run_repobench_live(parent, args, snapzip_bin):
+    cli_cmd = live_cli_command(args)
+    rows, data_source, data_paths = load_repobench_p_rows(args)
+    sample_size = min(args.live_sample_size, len(rows))
+    if sample_size <= 0:
+        raise SystemExit("--live-sample-size must be greater than zero")
+    sample_indices = sorted(random.Random(args.live_seed).sample(range(len(rows)), sample_size))
+    work_dir = parent / "repobench_live"
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    language = args.repobench_p_language
+    ext = ".py" if language == "python" else ".java"
+    model = args.live_model or os.environ.get("SNAPZIP_LIVE_MODEL") or "cli"
+    system_prompt = live_completion_system_prompt()
+    cache, cache_path = load_live_cache(args)
+
+    records = []
+    index_times = []
+    search_times = []
+    raw_call_times = []
+    assisted_call_times = []
+    started = time.perf_counter()
+    for case_no, row_idx in enumerate(sample_indices):
+        row = rows[row_idx]
+        prepared = prepare_repobench_p_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, args)
+        if prepared is None:
+            continue
+
+        context_text = selected_context_text(prepared["snapzip_top5"][: args.live_context_top_k], prepared["candidate_texts"])
+        raw_prompt = live_raw_prompt(row, language)
+        assisted_prompt = live_assisted_prompt(row, language, context_text)
+        raw_result = live_complete(args, cache, cli_cmd, model, system_prompt, raw_prompt)
+        assisted_result = live_complete(args, cache, cli_cmd, model, system_prompt, assisted_prompt)
+        if not args.live_no_cache:
+            save_live_cache(cache, cache_path)
+
+        raw_score = score_completion(raw_result["text"], row.get("next_line") or "")
+        assisted_score = score_completion(assisted_result["text"], row.get("next_line") or "")
+        record = {
+            "case": case_no,
+            "dataset_row_index": row_idx,
+            "repo_name": row.get("repo_name", ""),
+            "file_path": row.get("file_path", ""),
+            "candidate_count": len(prepared["context"]),
+            "gold_snippet_index": prepared["gold"],
+            "gold_identifier": prepared["gold_identifier"],
+            "snapzip_top5": prepared["snapzip_top5"],
+            "snapzip_gold_rank": gold_rank(prepared["gold"], prepared["snapzip_top5"]),
+            "snapzip_receipt_count": prepared["snapzip_receipt_count"],
+            "expected_next_line": (row.get("next_line") or "").rstrip(),
+            "raw_prediction": raw_score["prediction"],
+            "assisted_prediction": assisted_score["prediction"],
+            "raw_exact": raw_score["exact"],
+            "assisted_exact": assisted_score["exact"],
+            "raw_trimmed_exact": raw_score["trimmed_exact"],
+            "assisted_trimmed_exact": assisted_score["trimmed_exact"],
+            "raw_token_f1": raw_score["token_f1"],
+            "assisted_token_f1": assisted_score["token_f1"],
+            "raw_cached": raw_result.get("cached", False),
+            "assisted_cached": assisted_result.get("cached", False),
+            "index_elapsed_seconds": prepared["index_record"]["elapsed_seconds"],
+            "search_elapsed_seconds": prepared["search_record"]["elapsed_seconds"],
+            "raw_model_elapsed_seconds": raw_result.get("elapsed_seconds", 0.0),
+            "assisted_model_elapsed_seconds": assisted_result.get("elapsed_seconds", 0.0),
+        }
+        records.append(record)
+        index_times.append(record["index_elapsed_seconds"])
+        search_times.append(record["search_elapsed_seconds"])
+        raw_call_times.append(record["raw_model_elapsed_seconds"])
+        assisted_call_times.append(record["assisted_model_elapsed_seconds"])
+
+    if not records:
+        raise SystemExit("RepoBench live sample produced no usable rows")
+
+    raw_exact = safe_mean([1.0 if record["raw_exact"] else 0.0 for record in records])
+    assisted_exact = safe_mean([1.0 if record["assisted_exact"] else 0.0 for record in records])
+    raw_trimmed = safe_mean([1.0 if record["raw_trimmed_exact"] else 0.0 for record in records])
+    assisted_trimmed = safe_mean([1.0 if record["assisted_trimmed_exact"] else 0.0 for record in records])
+    raw_f1 = safe_mean([record["raw_token_f1"] for record in records])
+    assisted_f1 = safe_mean([record["assisted_token_f1"] for record in records])
+    result = {
+        "name": "repobench_live",
+        "dataset": "RepoBench v1.1",
+        "data_source": data_source,
+        "data_paths": report_paths(data_paths),
+        "language": language,
+        "split": repobench_p_split_name(args.repobench_p_split),
+        "sample_size": len(records),
+        "sample_seed": args.live_seed,
+        "sample_indices": sample_indices,
+        "provider": "cli",
+        "model": model,
+        "cli_command_configured": True,
+        "cache_path": report_path(cache_path),
+        "query": "live model next-line completion, raw prompt versus SnapZip-assisted prompt",
+        "elapsed_seconds": round(time.perf_counter() - started, 6),
+        "mean_candidate_count": safe_mean([record["candidate_count"] for record in records]),
+        "mean_snapzip_index_elapsed_seconds": safe_mean(index_times),
+        "mean_snapzip_search_elapsed_seconds": safe_mean(search_times),
+        "mean_raw_model_elapsed_seconds": safe_mean(raw_call_times),
+        "mean_assisted_model_elapsed_seconds": safe_mean(assisted_call_times),
+        "raw_exact": raw_exact,
+        "assisted_exact": assisted_exact,
+        "assisted_exact_delta": round(assisted_exact - raw_exact, 6),
+        "raw_trimmed_exact": raw_trimmed,
+        "assisted_trimmed_exact": assisted_trimmed,
+        "assisted_trimmed_exact_delta": round(assisted_trimmed - raw_trimmed, 6),
+        "raw_token_f1": raw_f1,
+        "assisted_token_f1": assisted_f1,
+        "assisted_token_f1_delta": round(assisted_f1 - raw_f1, 6),
+        "raw_cached_calls": sum(1 for record in records if record["raw_cached"]),
+        "assisted_cached_calls": sum(1 for record in records if record["assisted_cached"]),
+        "records": records,
+    }
+    result["passed"] = (
+        result["assisted_trimmed_exact"] >= result["raw_trimmed_exact"]
+        and result["assisted_token_f1"] >= result["raw_token_f1"]
+    )
+    return result
+
+
 def snapzip_passed(result):
     if result["name"] == "algorithm_20":
         harness = result["snapzip"]["harness"]
@@ -1611,6 +1989,8 @@ def snapzip_passed(result):
     if result["name"] == "repobench_r_matrix":
         return bool(result.get("passed"))
     if result["name"] == "repobench_p":
+        return bool(result.get("passed"))
+    if result["name"] == "repobench_live":
         return bool(result.get("passed"))
     return False
 
@@ -1827,6 +2207,7 @@ def main():
             "repobench-r",
             "repobench-r-matrix",
             "repobench-p",
+            "repobench-live",
             "all",
         ],
         default="smoke",
@@ -1874,13 +2255,21 @@ def main():
     parser.add_argument("--min-repobench-p-snapzip-identifier-hit5", type=float, default=None, help="Minimum SnapZip gold-identifier hit@5 for RepoBench v1.1")
     parser.add_argument("--min-repobench-p-snapzip-gold-hit5-over-bm25", type=float, default=None, help="Minimum SnapZip gold hit@5 delta over BM25 for RepoBench v1.1")
     parser.add_argument("--min-repobench-p-snapzip-new-token-coverage5-over-bm25", type=float, default=None, help="Minimum SnapZip new-token coverage@5 delta over BM25 for RepoBench v1.1")
+    parser.add_argument("--live-cli-cmd", default="", help="Local model CLI command; receives the prompt on stdin unless it uses {prompt} or {prompt_file}")
+    parser.add_argument("--live-model", default="", help="Model label for reports; defaults to SNAPZIP_LIVE_MODEL or cli")
+    parser.add_argument("--live-sample-size", type=int, default=20, help="RepoBench live completion sample size")
+    parser.add_argument("--live-seed", type=int, default=42, help="RepoBench live completion sample seed")
+    parser.add_argument("--live-context-top-k", type=int, default=5, help="SnapZip context snippets to include in assisted prompt")
+    parser.add_argument("--live-timeout-seconds", type=float, default=120.0, help="Timeout for each live model CLI call")
+    parser.add_argument("--live-cache", default="", help="Optional JSON cache path for live model calls")
+    parser.add_argument("--live-no-cache", action="store_true", help="Disable live model response cache")
     args = parser.parse_args()
 
     snapzip_bin = resolve_snapzip_bin(args.snapzip_bin)
     started = time.perf_counter()
     result = {
         "suite": args.suite,
-        "snapzip_bin": snapzip_bin,
+        "snapzip_bin": report_path(snapzip_bin),
         "iterations": args.iterations,
         "runs": [],
     }
@@ -1908,6 +2297,8 @@ def main():
             result["runs"].append(run_repobench_r_matrix(work_parent, args, snapzip_bin))
         if args.suite in ("repobench-p", "all"):
             result["runs"].append(run_repobench_p(work_parent, args, snapzip_bin))
+        if args.suite == "repobench-live":
+            result["runs"].append(run_repobench_live(work_parent, args, snapzip_bin))
 
         result["elapsed_seconds"] = round(time.perf_counter() - started, 6)
         result["passed"] = all(snapzip_passed(run) for run in result["runs"])

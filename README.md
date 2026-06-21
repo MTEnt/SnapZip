@@ -560,6 +560,18 @@ python3 benchmarks/run.py --suite repobench-p --snapzip-bin ./snapzip --repobenc
   --min-repobench-p-snapzip-new-token-coverage5-over-bm25 0.006
 ```
 
+Run a live-model raw vs SnapZip-assisted completion sample:
+```bash
+export SNAPZIP_LIVE_CLI_CMD='your-model-cli-command'
+python3 benchmarks/run.py --suite repobench-live --snapzip-bin ./snapzip \
+  --live-cli-cmd "$SNAPZIP_LIVE_CLI_CMD" \
+  --live-model your-model-label \
+  --live-sample-size 20 \
+  --json /tmp/snapzip-repobench-live.json
+```
+
+This suite uses the same public RepoBench v1.1 completion rows, calls the selected local model CLI twice per case, and compares exact next-line completion from the raw in-file prompt against the same prompt with SnapZip-selected cross-file context. The CLI command receives the prompt on stdin by default; commands may also use `{prompt}` or `{prompt_file}` placeholders. It reports exact match, trimmed exact match, token F1, model latency, and SnapZip indexing/search latency. It is intentionally not part of `--suite all` so routine local benchmark runs do not call an external model accidentally.
+
 Run all benchmark suites and write a JSON report:
 ```bash
 python3 benchmarks/run.py --suite all --snapzip-bin ./snapzip --json /tmp/snapzip-benchmark.json

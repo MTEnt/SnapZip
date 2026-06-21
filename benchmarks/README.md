@@ -123,6 +123,38 @@ python3 benchmarks/run.py --suite repobench-p --snapzip-bin ./snapzip --repobenc
   --min-repobench-p-snapzip-new-token-coverage5-over-bm25 0.006
 ```
 
+## RepoBench v1.1 Live Completion
+
+The `repobench-live` suite runs a local model CLI on the public RepoBench v1.1 completion rows. Each case makes two model calls:
+
+- raw: import statements plus cropped in-file code before the cursor
+- SnapZip-assisted: the same prompt plus top-k cross-file context selected by SnapZip
+
+The suite scores the first returned line against RepoBench's `next_line` with exact match, trimmed exact match, and token F1. It is not included in `--suite all` because it calls an external model.
+
+```bash
+export SNAPZIP_LIVE_CLI_CMD='your-model-cli-command'
+python3 benchmarks/run.py --suite repobench-live --snapzip-bin ./snapzip \
+  --live-cli-cmd "$SNAPZIP_LIVE_CLI_CMD" \
+  --live-model your-model-label \
+  --live-sample-size 20 \
+  --json /tmp/snapzip-repobench-live.json
+```
+
+Equivalent CLI wrapper:
+
+```bash
+snapzip eval --suite repobench-live --snapzip-bin ./snapzip \
+  --live-cli-cmd "$SNAPZIP_LIVE_CLI_CMD" \
+  --live-model your-model-label \
+  --live-sample-size 20 \
+  --json /tmp/snapzip-repobench-live.json
+```
+
+The model command receives the full prompt on stdin by default. If your CLI cannot read stdin, use `{prompt}` for an inline shell-quoted prompt or `{prompt_file}` for a temporary prompt file path.
+
+By default, live responses are cached under `benchmarks/.work/live-model-cache.json` to avoid paying for repeated identical calls. Use `--live-no-cache` for a fresh uncached run.
+
 ## Full Algorithm Benchmark
 
 The 20-task suite covers common algorithm exercises such as LRU cache, trie wildcard search, graph shortest paths, dynamic programming, heapsort, A*, and Red-Black Tree insertion/deletion.
