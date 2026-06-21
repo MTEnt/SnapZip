@@ -88,7 +88,7 @@ func searchMemoryWithMode(db *sql.DB, comp Compressor, query, mode string, limit
 		Feedback:      feedback,
 	}
 	if includeGraph {
-		result = addGraphContextToSearchResult(db, result, limit)
+		result = addGraphContextToSearchResult(db, result, limit, false)
 	}
 	return result, nil
 }
@@ -110,7 +110,7 @@ func BuildContextPackWithMode(db *sql.DB, comp Compressor, query, mode string, l
 	if err != nil {
 		return ContextPack{}, err
 	}
-	result = addGraphContextToSearchResult(db, result, finalLimit)
+	result = addGraphContextToSearchResult(db, result, finalLimit, true)
 	result = selectContextPackSnippets(result, finalLimit)
 
 	return buildContextPackFromResult(query, mode, budgetBytes, result), nil
@@ -668,7 +668,7 @@ type graphContextCandidate struct {
 	priority int
 }
 
-func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int) SearchResult {
+func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int, includeDependentTypes bool) SearchResult {
 	limit = normalizeResultLimit(limit, 5)
 	if db == nil || limit <= 0 || len(result.Snippets) == 0 {
 		return result
@@ -678,7 +678,7 @@ func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int) S
 	}
 
 	graphBudget := graphContextBudget(result.Mode, limit)
-	candidates := graphContextCandidates(db, result.Snippets, graphBudget, result.Mode)
+	candidates := graphContextCandidates(db, result.Snippets, graphBudget, result.Mode, includeDependentTypes)
 	if len(candidates) == 0 {
 		if len(result.Snippets) > limit {
 			result.Snippets = result.Snippets[:limit]
@@ -801,7 +801,7 @@ func graphContextBudget(mode string, limit int) int {
 	}
 }
 
-func graphContextCandidates(db *sql.DB, seeds []Snippet, budget int, mode string) []graphContextCandidate {
+func graphContextCandidates(db *sql.DB, seeds []Snippet, budget int, mode string, includeDependentTypes bool) []graphContextCandidate {
 	if budget <= 0 {
 		return nil
 	}
@@ -811,7 +811,9 @@ func graphContextCandidates(db *sql.DB, seeds []Snippet, budget int, mode string
 		if seed.Path == "" {
 			continue
 		}
-		candidates = append(candidates, dependentTypeContextCandidates(db, seed)...)
+		if includeDependentTypes {
+			candidates = append(candidates, dependentTypeContextCandidates(db, seed)...)
+		}
 		candidates = append(candidates, outgoingGraphContextCandidates(db, seed)...)
 		candidates = append(candidates, incomingGraphContextCandidates(db, seed)...)
 		if includeSymbolReferenceGraph(mode) {
