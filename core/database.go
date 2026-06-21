@@ -1207,7 +1207,7 @@ func addRankFusionScore(scores map[int]float64, id int, rank int, weight float64
 }
 
 func rankSearchCandidates(candidates []Snippet, primaryCandidateIDs map[int]bool, protectedID int, lexicalRanks map[int]int, limit int) []Snippet {
-	if len(candidates) <= limit {
+	if len(candidates) == 0 || limit <= 0 {
 		return candidates
 	}
 

@@ -861,6 +861,22 @@ func TestRankSearchCandidatesPreservesProtectedPrimaryCandidate(t *testing.T) {
 	}
 }
 
+func TestRankSearchCandidatesAppliesProtectionWhenAllCandidatesFit(t *testing.T) {
+	candidates := []Snippet{
+		{ID: 2, Path: "second.py", Score: 0.1},
+		{ID: 1, Path: "protected.py", Score: 0.3},
+		{ID: 3, Path: "third.py", Score: 0.4},
+	}
+	ranked := rankSearchCandidates(candidates, map[int]bool{1: true, 2: true, 3: true}, 1, nil, 5)
+
+	if len(ranked) != len(candidates) {
+		t.Fatalf("ranked %d candidates, want all candidates: %+v", len(ranked), ranked)
+	}
+	if ranked[0].ID != 1 {
+		t.Fatalf("first ranked candidate ID = %d, want protected ID 1 even when all candidates fit: %+v", ranked[0].ID, ranked)
+	}
+}
+
 func TestTopCandidateIDByBaseScoreUsesCompressionAwareOrder(t *testing.T) {
 	candidates := []Snippet{
 		{ID: 4, Path: "structured.py", Score: 0.01},
