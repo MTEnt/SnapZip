@@ -1246,6 +1246,30 @@ def snapzip_diagnostics_from_search(output, limit=5):
     return diagnostics
 
 
+def snapzip_eval_search_command(snapzip_bin, db_dir, query, limit, diagnostics=False, rerank_cmd=""):
+    cmd = [
+        snapzip_bin,
+        "search",
+        "--json",
+        "--limit",
+        str(limit),
+        "--db-dir",
+        str(db_dir),
+    ]
+    if rerank_cmd:
+        cmd.extend(["--rerank-cmd", rerank_cmd])
+    if diagnostics:
+        cmd.append("--diagnostics")
+    cmd.extend(["--query", query])
+    return cmd
+
+
+def requested_snapzip_diagnostics_limit(args):
+    if not args.snapzip_diagnostics:
+        return 0
+    return args.snapzip_diagnostics_limit or args.snapzip_search_limit
+
+
 def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=None):
     config = config or args.repobench_config
     split = split or args.repobench_split
@@ -1266,6 +1290,7 @@ def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=Non
     records = []
     index_times = []
     search_times = []
+    diagnostics_search_times = []
     started = time.perf_counter()
     for case_no, row_idx in enumerate(sample_indices):
         row = rows[row_idx]
@@ -1290,23 +1315,33 @@ def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=Non
             REPO_ROOT,
         )
         query = repobench_query(row)
-        search_cmd = [
+        diagnostics_limit = requested_snapzip_diagnostics_limit(args)
+        main_search_includes_diagnostics = args.snapzip_diagnostics and diagnostics_limit <= args.snapzip_search_limit
+        search_cmd = snapzip_eval_search_command(
             snapzip_bin,
-            "search",
-            "--json",
-            "--limit",
-            str(args.snapzip_search_limit),
-            "--db-dir",
-            str(db_dir),
-        ]
-        if args.snapzip_diagnostics:
-            search_cmd.append("--diagnostics")
-        search_cmd.extend(["--query", query])
+            db_dir,
+            query,
+            args.snapzip_search_limit,
+            diagnostics=main_search_includes_diagnostics,
+        )
         _, search_record = run_cmd(search_cmd, REPO_ROOT)
+        diagnostics_record = search_record
+        if args.snapzip_diagnostics and diagnostics_limit > args.snapzip_search_limit:
+            diagnostics_cmd = snapzip_eval_search_command(
+                snapzip_bin,
+                db_dir,
+                query,
+                diagnostics_limit,
+                diagnostics=True,
+            )
+            _, diagnostics_record = run_cmd(diagnostics_cmd, REPO_ROOT)
 
         jaccard_top = jaccard_top5(query, row["context"])
         bm25_top = bm25_top5(query, row["context"])
         snapzip_top, snapzip_return_count, snapzip_receipt_count = snapzip_top5_from_search(search_record["stdout"])
+        _, snapzip_diagnostics_return_count, snapzip_diagnostics_receipt_count = snapzip_top5_from_search(
+            diagnostics_record["stdout"]
+        )
         gold = row["golden_snippet_index"]
         record = {
             "case": case_no,
@@ -1333,7 +1368,12 @@ def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=Non
             for k in (1, 3, 5):
                 record[f"{name}_hit@{k}"] = gold in top[:k]
         if args.snapzip_diagnostics:
-            record["snapzip_diagnostics"] = snapzip_diagnostics_from_search(search_record["stdout"], args.snapzip_search_limit)
+            record["snapzip_diagnostics_limit"] = diagnostics_limit
+            record["snapzip_diagnostics_return_count"] = snapzip_diagnostics_return_count
+            record["snapzip_diagnostics_receipt_count"] = snapzip_diagnostics_receipt_count
+            record["snapzip_diagnostics_elapsed_seconds"] = diagnostics_record["elapsed_seconds"]
+            record["snapzip_diagnostics"] = snapzip_diagnostics_from_search(diagnostics_record["stdout"], diagnostics_limit)
+            diagnostics_search_times.append(diagnostics_record["elapsed_seconds"])
         records.append(record)
         index_times.append(index_record["elapsed_seconds"])
         search_times.append(search_record["elapsed_seconds"])
@@ -1350,12 +1390,15 @@ def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=Non
         "sample_seed": args.repobench_seed,
         "sample_indices": sample_indices,
         "query": "last 3 lines of in-file code before target line",
+        "snapzip_search_limit": args.snapzip_search_limit,
+        "snapzip_diagnostics_limit": requested_snapzip_diagnostics_limit(args),
         "snapzip_command": f"snapzip search --json --limit {args.snapzip_search_limit} over official candidate snippets; metrics evaluate top 5",
         "raw_baselines": ["token Jaccard", "BM25"],
         "elapsed_seconds": round(time.perf_counter() - started, 6),
         "mean_candidate_count": round(sum(r["candidate_count"] for r in records) / len(records), 6),
         "mean_snapzip_index_elapsed_seconds": round(sum(index_times) / len(index_times), 6),
         "mean_snapzip_search_elapsed_seconds": round(sum(search_times) / len(search_times), 6),
+        "mean_snapzip_diagnostics_elapsed_seconds": safe_mean(diagnostics_search_times),
         "records": records,
     }
     for name in ("jaccard", "bm25", "snapzip"):
@@ -1494,23 +1537,33 @@ def prepare_repobench_p_case(case_no, row_idx, row, work_dir, language, ext, sna
     query = repobench_p_query(row)
     file_path = row.get("file_path") or ""
     injected_query = f"--current-path:{file_path}\n{query}" if file_path else query
-    search_cmd = [
+    diagnostics_limit = requested_snapzip_diagnostics_limit(args)
+    main_search_includes_diagnostics = args.snapzip_diagnostics and diagnostics_limit <= args.snapzip_search_limit
+    search_cmd = snapzip_eval_search_command(
         snapzip_bin,
-        "search",
-        "--json",
-        "--limit",
-        str(args.snapzip_search_limit),
-        "--db-dir",
-        str(db_dir),
-    ]
-    if args.snapzip_rerank_cmd:
-        search_cmd.extend(["--rerank-cmd", args.snapzip_rerank_cmd])
-    if args.snapzip_diagnostics:
-        search_cmd.append("--diagnostics")
-    search_cmd.extend(["--query", injected_query])
+        db_dir,
+        injected_query,
+        args.snapzip_search_limit,
+        diagnostics=main_search_includes_diagnostics,
+        rerank_cmd=args.snapzip_rerank_cmd,
+    )
 
     _, search_record = run_cmd(search_cmd, REPO_ROOT)
+    diagnostics_record = search_record
+    if args.snapzip_diagnostics and diagnostics_limit > args.snapzip_search_limit:
+        diagnostics_cmd = snapzip_eval_search_command(
+            snapzip_bin,
+            db_dir,
+            injected_query,
+            diagnostics_limit,
+            diagnostics=True,
+            rerank_cmd=args.snapzip_rerank_cmd,
+        )
+        _, diagnostics_record = run_cmd(diagnostics_cmd, REPO_ROOT)
     snapzip_top, snapzip_return_count, snapzip_receipt_count = snapzip_top5_from_search(search_record["stdout"])
+    _, snapzip_diagnostics_return_count, snapzip_diagnostics_receipt_count = snapzip_top5_from_search(
+        diagnostics_record["stdout"]
+    )
     gold = int(row.get("gold_snippet_index", -1))
     raw_prompt = repobench_p_raw_prompt(row)
     next_line_tokens = completion_support_tokens(row.get("next_line") or "")
@@ -1535,9 +1588,14 @@ def prepare_repobench_p_case(case_no, row_idx, row, work_dir, language, ext, sna
         "snapzip_top5": snapzip_top,
         "snapzip_return_count": snapzip_return_count,
         "snapzip_receipt_count": snapzip_receipt_count,
-        "snapzip_diagnostics": snapzip_diagnostics_from_search(search_record["stdout"], args.snapzip_search_limit) if args.snapzip_diagnostics else [],
+        "snapzip_diagnostics_limit": diagnostics_limit if args.snapzip_diagnostics else 0,
+        "snapzip_diagnostics_return_count": snapzip_diagnostics_return_count if args.snapzip_diagnostics else 0,
+        "snapzip_diagnostics_receipt_count": snapzip_diagnostics_receipt_count if args.snapzip_diagnostics else 0,
+        "snapzip_diagnostics_elapsed_seconds": diagnostics_record["elapsed_seconds"] if args.snapzip_diagnostics else 0.0,
+        "snapzip_diagnostics": snapzip_diagnostics_from_search(diagnostics_record["stdout"], diagnostics_limit) if args.snapzip_diagnostics else [],
         "index_record": index_record,
         "search_record": search_record,
+        "diagnostics_record": diagnostics_record,
     }
 
 
@@ -1572,6 +1630,10 @@ def evaluate_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, a
         "snapzip_top5": snapzip_top,
         "snapzip_return_count": prepared["snapzip_return_count"],
         "snapzip_receipt_count": prepared["snapzip_receipt_count"],
+        "snapzip_diagnostics_limit": prepared["snapzip_diagnostics_limit"],
+        "snapzip_diagnostics_return_count": prepared["snapzip_diagnostics_return_count"],
+        "snapzip_diagnostics_receipt_count": prepared["snapzip_diagnostics_receipt_count"],
+        "snapzip_diagnostics_elapsed_seconds": prepared["snapzip_diagnostics_elapsed_seconds"],
         "raw_new_token_coverage@5": 0.0,
         "index_elapsed_seconds": prepared["index_record"]["elapsed_seconds"],
         "search_elapsed_seconds": prepared["search_record"]["elapsed_seconds"],
@@ -1655,6 +1717,8 @@ def run_repobench_p(parent, args, snapzip_bin):
         "sample_seed": args.repobench_p_seed,
         "sample_indices": sample_indices,
         "query": "import statements plus last 3 lines of cropped in-file code",
+        "snapzip_search_limit": args.snapzip_search_limit,
+        "snapzip_diagnostics_limit": requested_snapzip_diagnostics_limit(args),
         "snapzip_command": f"snapzip search --json --limit {args.snapzip_search_limit} over public cross-file context snippets; metrics evaluate top 5",
         "proxy_metric": "gold cross-file snippet retrieval and coverage of next-line tokens absent from raw prompt",
         "raw_baselines": ["no cross-file context", "random top-5", "token Jaccard", "BM25"],
@@ -1662,6 +1726,9 @@ def run_repobench_p(parent, args, snapzip_bin):
         "mean_candidate_count": safe_mean([record["candidate_count"] for record in records]),
         "mean_snapzip_index_elapsed_seconds": safe_mean(index_times),
         "mean_snapzip_search_elapsed_seconds": safe_mean(search_times),
+        "mean_snapzip_diagnostics_elapsed_seconds": safe_mean(
+            [record["snapzip_diagnostics_elapsed_seconds"] for record in records if record["snapzip_diagnostics_elapsed_seconds"] > 0]
+        ),
         "records": records,
     }
     for name in ("random", "jaccard", "bm25", "snapzip"):
@@ -2259,6 +2326,12 @@ def main():
     parser.add_argument("--snapzip-diagnostics", action="store_true", help="Include compact snapzip search score diagnostics in RepoBench records")
     parser.add_argument("--snapzip-search-limit", type=int, default=5, help="SnapZip search result count for RepoBench runs; metrics still evaluate top 5")
     parser.add_argument(
+        "--snapzip-diagnostics-limit",
+        type=int,
+        default=0,
+        help="Separate SnapZip diagnostic search result count; defaults to --snapzip-search-limit",
+    )
+    parser.add_argument(
         "--repobench-p-max-shards",
         type=int,
         default=1,
@@ -2291,6 +2364,10 @@ def main():
     args = parser.parse_args()
     if args.snapzip_search_limit < 5:
         raise SystemExit("--snapzip-search-limit must be at least 5 because RepoBench metrics evaluate top-5 results")
+    if args.snapzip_diagnostics_limit < 0:
+        raise SystemExit("--snapzip-diagnostics-limit must be zero or greater")
+    if args.snapzip_diagnostics and 0 < args.snapzip_diagnostics_limit < 5:
+        raise SystemExit("--snapzip-diagnostics-limit must be at least 5 when diagnostics are enabled")
 
     snapzip_bin = resolve_snapzip_bin(args.snapzip_bin)
     started = time.perf_counter()

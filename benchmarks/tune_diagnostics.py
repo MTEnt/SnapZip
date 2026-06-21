@@ -275,13 +275,24 @@ def evaluate_records(records, weights=None):
     }
 
 
-def metric_key(metrics, primary):
+def parse_metric_list(value):
+    if not value or value.strip().lower() == "none":
+        return ()
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def acceptable_metrics(candidate, incumbent, guardrails):
+    return all(candidate.get(metric, 0.0) >= incumbent.get(metric, 0.0) for metric in guardrails)
+
+
+def metric_key(metrics, primary, guardrails=()):
     return (
         metrics.get(primary, 0.0),
         metrics.get("hit@1", 0.0),
         metrics.get("hit@3", 0.0),
         metrics.get("mrr@5", 0.0),
         metrics.get("ndcg@5", 0.0),
+        *(metrics.get(metric, 0.0) for metric in guardrails),
     )
 
 
@@ -301,6 +312,8 @@ def split_records(records, validation_fraction):
 
 
 def clean_weights(weights):
+    if not weights:
+        return {}
     return {feature: round(weight, 6) for feature, weight in sorted(weights.items()) if abs(weight) > 1e-9}
 
 
@@ -327,21 +340,25 @@ def starter_profiles():
     }
 
 
-def choose_initial_profile(records, metric):
-    best_name = "baseline_runtime"
-    best_weights = {"runtime_score": 1.0}
-    best_metrics = evaluate_records(records, best_weights)
+def choose_initial_profile(records, metric, guardrails):
+    floor_metrics = evaluate_records(records)
+    best_name = "baseline"
+    best_weights = None
+    best_metrics = floor_metrics
     for name, weights in starter_profiles().items():
         metrics = evaluate_records(records, weights)
-        if metric_key(metrics, metric) > metric_key(best_metrics, metric):
+        if acceptable_metrics(metrics, floor_metrics, guardrails) and metric_key(metrics, metric, guardrails) > metric_key(
+            best_metrics, metric, guardrails
+        ):
             best_name = name
             best_weights = dict(weights)
             best_metrics = metrics
     return best_name, best_weights, best_metrics
 
 
-def tune_weights(records, feature_names, metric, passes, grid):
-    profile_name, current_weights, current_metrics = choose_initial_profile(records, metric)
+def tune_weights(records, feature_names, metric, guardrails, passes, grid):
+    floor_metrics = evaluate_records(records)
+    profile_name, current_weights, current_metrics = choose_initial_profile(records, metric, guardrails)
     history = [
         {
             "profile": profile_name,
@@ -352,19 +369,23 @@ def tune_weights(records, feature_names, metric, passes, grid):
     for pass_index in range(1, passes + 1):
         improved = False
         for feature in feature_names:
-            best_feature_weights = dict(current_weights)
+            best_feature_weights = dict(current_weights or {})
             best_feature_metrics = current_metrics
             for value in grid:
-                trial_weights = dict(current_weights)
+                trial_weights = dict(current_weights or {})
                 if abs(value) <= 1e-12:
                     trial_weights.pop(feature, None)
                 else:
                     trial_weights[feature] = value
                 trial_metrics = evaluate_records(records, trial_weights)
-                if metric_key(trial_metrics, metric) > metric_key(best_feature_metrics, metric):
+                if acceptable_metrics(trial_metrics, floor_metrics, guardrails) and metric_key(
+                    trial_metrics, metric, guardrails
+                ) > metric_key(best_feature_metrics, metric, guardrails):
                     best_feature_weights = trial_weights
                     best_feature_metrics = trial_metrics
-            if metric_key(best_feature_metrics, metric) > metric_key(current_metrics, metric):
+            if acceptable_metrics(best_feature_metrics, floor_metrics, guardrails) and metric_key(
+                best_feature_metrics, metric, guardrails
+            ) > metric_key(current_metrics, metric, guardrails):
                 current_weights = best_feature_weights
                 current_metrics = best_feature_metrics
                 improved = True
@@ -378,7 +399,7 @@ def tune_weights(records, feature_names, metric, passes, grid):
         )
         if not improved:
             break
-    return clean_weights(current_weights), current_metrics, history
+    return current_weights, current_metrics, history
 
 
 def metrics_delta(after, before):
@@ -386,24 +407,30 @@ def metrics_delta(after, before):
     return {field: round(after.get(field, 0.0) - before.get(field, 0.0), 6) for field in fields}
 
 
-def validation_summary(metric, baseline_validation, tuned_validation):
+def validation_summary(metric, guardrails, baseline_validation, tuned_validation):
     if not baseline_validation:
         return {
             "status": "not_run",
             "metric": metric,
+            "guardrails": list(guardrails),
             "passes": None,
             "delta_vs_baseline": {},
         }
     delta = metrics_delta(tuned_validation, baseline_validation)
+    guardrail_passes = all(delta.get(metric_name, 0.0) >= 0 for metric_name in guardrails)
+    metric_passes = delta.get(metric, 0.0) >= 0
     return {
-        "status": "pass" if delta.get(metric, 0.0) >= 0 else "hold",
+        "status": "pass" if metric_passes and guardrail_passes else "hold",
         "metric": metric,
-        "passes": delta.get(metric, 0.0) >= 0,
+        "guardrails": list(guardrails),
+        "passes": metric_passes and guardrail_passes,
         "delta_vs_baseline": delta,
     }
 
 
 def changed_cases(records, weights, limit):
+    if weights is None:
+        return []
     changes = []
     for record in records:
         baseline = baseline_top5(record)
@@ -438,6 +465,7 @@ def changed_cases(records, weights, limit):
 def build_report(args, payload):
     raw_records = list(iter_benchmark_records(payload))
     feature_names = tuple(feature.strip() for feature in args.features.split(",") if feature.strip()) if args.features else DEFAULT_FEATURES
+    guardrails = parse_metric_list(args.guardrails)
     prepared, skipped = prepare_records(raw_records, feature_names)
     if not prepared:
         raise SystemExit("no benchmark records with snapzip_diagnostics were found")
@@ -448,6 +476,7 @@ def build_report(args, payload):
         tune_set,
         feature_names,
         args.metric,
+        guardrails,
         args.passes,
         [float(value) for value in args.grid.split(",")] if args.grid else (NEGATIVE_GRID + DEFAULT_GRID if args.allow_negative else DEFAULT_GRID),
     )
@@ -457,12 +486,13 @@ def build_report(args, payload):
     baseline_train = evaluate_records(train) if train else {}
     baseline_validation = evaluate_records(validation) if validation else {}
     tuned_validation = evaluate_records(validation, tuned_weights) if validation else {}
-    validation_decision = validation_summary(args.metric, baseline_validation, tuned_validation)
+    validation_decision = validation_summary(args.metric, guardrails, baseline_validation, tuned_validation)
 
     gold_in_candidates = sum(1 for record in prepared if record["gold"] in [candidate["index"] for candidate in record["candidates"]])
     report = {
         "input": str(args.input),
         "metric": args.metric,
+        "guardrails": list(guardrails),
         "feature_count": len(feature_names),
         "features": list(feature_names),
         "record_counts": {
@@ -478,7 +508,7 @@ def build_report(args, payload):
             "validation": baseline_validation,
         },
         "tuned": {
-            "weights": tuned_weights,
+            "weights": clean_weights(tuned_weights),
             "train": train_metrics,
             "validation": tuned_validation,
             "all": tuned_all,
@@ -537,9 +567,14 @@ def print_report(report):
         )
         decision = report["validation_decision"]
         if decision["status"] == "pass":
-            print(f"Validation decision: pass on {decision['metric']}; candidate weights can be tested in runtime.")
+            guardrail_text = ",".join(decision["guardrails"]) if decision["guardrails"] else "none"
+            print(
+                f"Validation decision: pass on {decision['metric']} with guardrails {guardrail_text}; "
+                "candidate weights can be tested in runtime."
+            )
         else:
-            print(f"Validation decision: hold on {decision['metric']}; keep these weights offline.")
+            guardrail_text = ",".join(decision["guardrails"]) if decision["guardrails"] else "none"
+            print(f"Validation decision: hold on {decision['metric']} with guardrails {guardrail_text}; keep these weights offline.")
     weights = report["tuned"]["weights"]
     if weights:
         print("Candidate nonzero weights:")
@@ -561,6 +596,7 @@ def parse_args():
     parser.add_argument("--input", required=True, type=Path, help="Benchmark JSON written by benchmarks/run.py")
     parser.add_argument("--json", type=Path, default=None, help="Optional path for the tuner report JSON")
     parser.add_argument("--metric", choices=("hit@1", "hit@3", "hit@5", "mrr@5", "ndcg@5"), default="mrr@5")
+    parser.add_argument("--guardrails", default="hit@5", help="Comma-separated validation metrics that must not regress, or none")
     parser.add_argument("--passes", type=int, default=4, help="Coordinate-search passes over score features")
     parser.add_argument("--iterations", type=int, default=None, help="Alias for --passes")
     parser.add_argument("--validation-fraction", type=float, default=0.3, help="Deterministic validation split fraction")

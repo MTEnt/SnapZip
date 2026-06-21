@@ -89,7 +89,7 @@ python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobenc
 
 The default CI workflow runs this gated public sample so retrieval changes must preserve both the current measured floor and the current measured lift over raw baselines before merging.
 
-Add `--snapzip-diagnostics` to RepoBench-R or RepoBench-P runs when tuning ranking. The JSON records will include compact score diagnostics for SnapZip's top-5 results, including QND, lexical/BM25/BM25F boosts, identifier/path/structure boosts, rank-fusion contribution, final rank, and matched query tokens.
+Add `--snapzip-diagnostics` to RepoBench-R or RepoBench-P runs when tuning ranking. The JSON records will include compact score diagnostics for SnapZip's returned results, including QND, lexical/BM25/BM25F boosts, identifier/path/structure boosts, rank-fusion contribution, final rank, and matched query tokens.
 
 Use the offline tuner to test alternate score-feature weights against those returned candidates:
 
@@ -97,16 +97,17 @@ Use the offline tuner to test alternate score-feature weights against those retu
 python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip \
   --repobench-sample-size 100 \
   --snapzip-diagnostics \
-  --snapzip-search-limit 20 \
+  --snapzip-diagnostics-limit 20 \
   --json /tmp/snapzip-repobench-r-diagnostics.json
 
 python3 benchmarks/tune_diagnostics.py \
   --input /tmp/snapzip-repobench-r-diagnostics.json \
   --metric mrr@5 \
+  --guardrails hit@5 \
   --json /tmp/snapzip-repobench-r-tuning.json
 ```
 
-The tuner only reorders candidates SnapZip already returned. Keep the default `--snapzip-search-limit 5` when reproducing published top-5 numbers, and raise it during offline diagnostics when you want to see whether lower-ranked candidates can be promoted into the top five.
+The tuner only reorders candidates SnapZip already returned. Keep the default `--snapzip-search-limit 5` when reproducing published top-5 numbers, and raise `--snapzip-diagnostics-limit` during offline diagnostics when you want to see whether lower-ranked candidates can be promoted into the top five without perturbing the measured top-5 search. The default tuner guardrail is `hit@5`, so MRR tuning does not accept candidates that lose top-5 recall against the benchmark baseline.
 
 ## RepoBench v1.1 Pipeline-Context Proxy
 

@@ -1117,6 +1117,7 @@ func handleEval() {
 	snapzipRerankCmd := fs.String("snapzip-rerank-cmd", "", "Command to run external reranker in snapzip search during benchmarks")
 	snapzipDiagnostics := fs.Bool("snapzip-diagnostics", false, "Include compact snapzip search score diagnostics in RepoBench records")
 	snapzipSearchLimit := fs.Int("snapzip-search-limit", 5, "SnapZip search result count for RepoBench runs; metrics still evaluate top 5")
+	snapzipDiagnosticsLimit := fs.Int("snapzip-diagnostics-limit", 0, "Separate SnapZip diagnostic search result count; defaults to snapzip-search-limit")
 	minRepobenchAcc1 := fs.String("min-repobench-snapzip-acc1", "", "Minimum SnapZip acc@1 for RepoBench-R")
 	minRepobenchAcc3 := fs.String("min-repobench-snapzip-acc3", "", "Minimum SnapZip acc@3 for RepoBench-R")
 	minRepobenchAcc5 := fs.String("min-repobench-snapzip-acc5", "", "Minimum SnapZip acc@5 for RepoBench-R")
@@ -1185,6 +1186,7 @@ func handleEval() {
 		args = append(args, "--snapzip-diagnostics")
 	}
 	appendIntFlag("--snapzip-search-limit", *snapzipSearchLimit)
+	appendIntFlag("--snapzip-diagnostics-limit", *snapzipDiagnosticsLimit)
 	appendOptionalStringFlag("--min-repobench-snapzip-acc1", *minRepobenchAcc1)
 	appendOptionalStringFlag("--min-repobench-snapzip-acc3", *minRepobenchAcc3)
 	appendOptionalStringFlag("--min-repobench-snapzip-acc5", *minRepobenchAcc5)
