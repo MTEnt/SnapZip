@@ -885,6 +885,7 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 		if err != nil {
 			return nil, err
 		}
+		baseScores := make([]float64, len(candidates))
 		var recentWeights map[string]float64
 		if currentPath != "" {
 			if root, err := getDBDir(db); err == nil && root != "" {
@@ -916,6 +917,7 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 						}
 					}
 					baseScore := relevanceScore(qnd, uniqueTokens, tokenWeights, 0, structuralBoost, candidates[idx], detectedLang, structureIntent, structureWeight) - gitBoost
+					baseScores[idx] = baseScore
 					candidates[idx].Score = baseScore - bm25Boosts[idx] - bm25FBoosts[idx]
 				}
 			}()
@@ -926,6 +928,10 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 		}
 		close(jobs)
 		wg.Wait()
+
+		if usedFTS && len(primaryCandidateIDs) > 0 {
+			protectedCandidateID = topCandidateIDByBaseScore(candidates, baseScores, primaryCandidateIDs)
+		}
 
 		// Sort candidates by score (lower QND score = higher similarity)
 		sort.Slice(candidates, func(i, j int) bool {
@@ -952,9 +958,6 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 			}
 		}
 		applyCandidateRankFusion(candidates, primaryCandidateRanks, queryPathCandidateRanks, bm25CandidateRanks, bm25FCandidateRanks, structuredPathRanks, structuralRerankRanks, pathProximityRanks)
-		if usedFTS && len(primaryCandidateIDs) > 0 {
-			protectedCandidateID = topCandidateIDByRankedOrder(candidates, primaryCandidateIDs)
-		}
 	}
 
 	if usedFTS && len(primaryCandidateIDs) > 0 {
@@ -1229,14 +1232,17 @@ func diversifyRankedSearchCandidates(candidates []Snippet, limit int) []Snippet 
 	return selected
 }
 
-func topCandidateIDByRankedOrder(candidates []Snippet, primaryCandidateIDs map[int]bool) int {
+func topCandidateIDByBaseScore(candidates []Snippet, baseScores []float64, primaryCandidateIDs map[int]bool) int {
 	protectedID := 0
-	for _, candidate := range candidates {
+	bestScore := 0.0
+	for idx, candidate := range candidates {
 		if !primaryCandidateIDs[candidate.ID] {
 			continue
 		}
-		protectedID = candidate.ID
-		break
+		if protectedID == 0 || baseScores[idx] < bestScore {
+			protectedID = candidate.ID
+			bestScore = baseScores[idx]
+		}
 	}
 	return protectedID
 }

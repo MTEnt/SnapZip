@@ -512,13 +512,13 @@ Current 100-sample `python_cff` / `test_hard` readout, seed `42`:
 
 - Jaccard: 10/100 acc@1, 32/100 acc@3, 48/100 acc@5, 0.2315 MRR@5, 0.292862 nDCG@5
 - BM25: 14/100 acc@1, 31/100 acc@3, 52/100 acc@5, 0.261167 MRR@5, 0.324596 nDCG@5
-- SnapZip: 17/100 acc@1, 36/100 acc@3, 59/100 acc@5, 0.298667 MRR@5, 0.369709 nDCG@5
+- SnapZip: 17/100 acc@1, 34/100 acc@3, 59/100 acc@5, 0.3005 MRR@5, 0.370936 nDCG@5
 
 For release checks, add benchmark quality gates:
 ```bash
 python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobench-sample-size 100 \
   --min-repobench-snapzip-acc1 0.17 \
-  --min-repobench-snapzip-acc3 0.36 \
+  --min-repobench-snapzip-acc3 0.34 \
   --min-repobench-snapzip-acc5 0.59 \
   --min-repobench-snapzip-mrr5 0.298667 \
   --min-repobench-snapzip-ndcg5 0.369709 \

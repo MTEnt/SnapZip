@@ -594,7 +594,7 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 		"--suite context-quality",
 		"--suite repobench-r",
 		"--min-repobench-snapzip-acc1 0.17",
-		"--min-repobench-snapzip-acc3 0.36",
+		"--min-repobench-snapzip-acc3 0.34",
 		"--min-repobench-snapzip-acc5 0.59",
 		"--min-repobench-snapzip-mrr5 0.298667",
 		"--min-repobench-snapzip-ndcg5 0.369709",

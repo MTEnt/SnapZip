@@ -861,16 +861,17 @@ func TestRankSearchCandidatesPreservesProtectedPrimaryCandidate(t *testing.T) {
 	}
 }
 
-func TestTopCandidateIDByRankedOrderUsesHybridOrder(t *testing.T) {
+func TestTopCandidateIDByBaseScoreUsesCompressionAwareOrder(t *testing.T) {
 	candidates := []Snippet{
 		{ID: 4, Path: "structured.py", Score: 0.01},
 		{ID: 2, Path: "bm25.py", Score: 0.02},
 		{ID: 1, Path: "base.py", Score: 0.03},
 	}
+	baseScores := []float64{0.50, 0.30, 0.10}
 
-	got := topCandidateIDByRankedOrder(candidates, map[int]bool{1: true, 2: true})
-	if got != 2 {
-		t.Fatalf("protected candidate = %d, want first primary candidate in hybrid rank order", got)
+	got := topCandidateIDByBaseScore(candidates, baseScores, map[int]bool{1: true, 2: true})
+	if got != 1 {
+		t.Fatalf("protected candidate = %d, want best primary candidate by base score", got)
 	}
 }
 
