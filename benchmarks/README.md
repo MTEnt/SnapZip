@@ -123,6 +123,16 @@ python3 benchmarks/run.py --suite repobench-p --snapzip-bin ./snapzip --repobenc
   --min-repobench-p-snapzip-new-token-coverage5-over-bm25 0.006
 ```
 
+The default CI workflow runs a lighter 50-sample proxy gate:
+
+```bash
+python3 benchmarks/run.py --suite repobench-p --snapzip-bin ./snapzip --repobench-p-sample-size 50 \
+  --min-repobench-p-snapzip-gold-hit5 0.90 \
+  --min-repobench-p-snapzip-new-token-coverage5 0.26 \
+  --min-repobench-p-snapzip-identifier-hit5 0.95 \
+  --min-repobench-p-snapzip-new-token-coverage5-over-bm25 0.00
+```
+
 ## RepoBench v1.1 Live Completion
 
 The `repobench-live` suite runs a local model CLI on the public RepoBench v1.1 completion rows. Each case makes two model calls:

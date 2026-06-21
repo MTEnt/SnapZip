@@ -68,7 +68,7 @@ jobs:
         run: python3 benchmarks/run.py --suite context-quality --snapzip-bin ./snapzip --json /tmp/snapzip-context-quality.json
 
       - name: Install public benchmark dependencies
-        run: python3 -m pip install --upgrade "huggingface_hub>=0.23"
+        run: python3 -m pip install --upgrade "huggingface_hub>=0.23" "pyarrow>=15"
 
       - name: Run public retrieval quality gate
         run: |
@@ -85,3 +85,12 @@ jobs:
             --min-repobench-snapzip-ndcg5-over-bm25 0.04 \
             --min-repobench-snapzip-acc5-over-jaccard 0.10 \
             --json /tmp/snapzip-repobench-r-quality-gate.json
+
+      - name: Run public pipeline-context proxy gate
+        run: |
+          python3 benchmarks/run.py --suite repobench-p --snapzip-bin ./snapzip --repobench-p-sample-size 50 \
+            --min-repobench-p-snapzip-gold-hit5 0.90 \
+            --min-repobench-p-snapzip-new-token-coverage5 0.26 \
+            --min-repobench-p-snapzip-identifier-hit5 0.95 \
+            --min-repobench-p-snapzip-new-token-coverage5-over-bm25 0.00 \
+            --json /tmp/snapzip-repobench-p-quality-gate.json

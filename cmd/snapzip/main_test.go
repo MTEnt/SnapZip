@@ -591,6 +591,7 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 	}
 	for _, want := range []string{
 		"huggingface_hub>=0.23",
+		"pyarrow>=15",
 		"--suite context-quality",
 		"--suite repobench-r",
 		"--min-repobench-snapzip-acc1 0.17",
@@ -604,6 +605,12 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 		"--min-repobench-snapzip-mrr5-over-bm25 0.03",
 		"--min-repobench-snapzip-ndcg5-over-bm25 0.04",
 		"--min-repobench-snapzip-acc5-over-jaccard 0.10",
+		"--suite repobench-p",
+		"--repobench-p-sample-size 50",
+		"--min-repobench-p-snapzip-gold-hit5 0.90",
+		"--min-repobench-p-snapzip-new-token-coverage5 0.26",
+		"--min-repobench-p-snapzip-identifier-hit5 0.95",
+		"--min-repobench-p-snapzip-new-token-coverage5-over-bm25 0.00",
 	} {
 		if !strings.Contains(ciWorkflow, want) {
 			t.Fatalf("CI workflow missing public retrieval quality gate fragment %q:\n%s", want, ciWorkflow)
