@@ -22,16 +22,17 @@ import (
 )
 
 type Snippet struct {
-	ID          int     `json:"id"`
-	Language    string  `json:"language"`
-	Topic       string  `json:"topic"`
-	Path        string  `json:"path,omitempty"`
-	StartLine   int     `json:"start_line,omitempty"`
-	EndLine     int     `json:"end_line,omitempty"`
-	Content     string  `json:"content"`
-	ContentHash string  `json:"content_hash,omitempty"`
-	SourceMTime int64   `json:"source_mtime,omitempty"`
-	Score       float64 `json:"score"`
+	ID          int                   `json:"id"`
+	Language    string                `json:"language"`
+	Topic       string                `json:"topic"`
+	Path        string                `json:"path,omitempty"`
+	StartLine   int                   `json:"start_line,omitempty"`
+	EndLine     int                   `json:"end_line,omitempty"`
+	Content     string                `json:"content"`
+	ContentHash string                `json:"content_hash,omitempty"`
+	SourceMTime int64                 `json:"source_mtime,omitempty"`
+	Score       float64               `json:"score"`
+	Diagnostics *RetrievalDiagnostics `json:"diagnostics,omitempty"`
 }
 
 type KnowledgeEntry struct {
@@ -43,6 +44,43 @@ type KnowledgeEntry struct {
 	Content     string
 	ContentHash string
 	SourceMTime int64
+}
+
+type RetrieveOptions struct {
+	IncludeDiagnostics bool
+}
+
+type RetrievalDiagnostics struct {
+	FinalRank             int      `json:"final_rank,omitempty"`
+	QND                   float64  `json:"qnd"`
+	BaseScore             float64  `json:"base_score"`
+	FinalScore            float64  `json:"final_score"`
+	LexicalBoost          float64  `json:"lexical_boost,omitempty"`
+	BM25Boost             float64  `json:"bm25_boost,omitempty"`
+	BM25Rank              int      `json:"bm25_rank,omitempty"`
+	BM25FBoost            float64  `json:"bm25f_boost,omitempty"`
+	BM25FRank             int      `json:"bm25f_rank,omitempty"`
+	ExactIdentifierBoost  float64  `json:"exact_identifier_boost,omitempty"`
+	StructuredPathBoost   float64  `json:"structured_path_boost,omitempty"`
+	StructuredPathRank    int      `json:"structured_path_rank,omitempty"`
+	StructuralRerankBoost float64  `json:"structural_rerank_boost,omitempty"`
+	StructuralRerankRank  int      `json:"structural_rerank_rank,omitempty"`
+	PathTokenBoost        float64  `json:"path_token_boost,omitempty"`
+	PathProximityBoost    float64  `json:"path_proximity_boost,omitempty"`
+	PathProximityRank     int      `json:"path_proximity_rank,omitempty"`
+	GitRecencyBoost       float64  `json:"git_recency_boost,omitempty"`
+	LanguageBoost         float64  `json:"language_boost,omitempty"`
+	StructureBoost        float64  `json:"structure_boost,omitempty"`
+	TopicPenalty          float64  `json:"topic_penalty,omitempty"`
+	RankFusionScore       float64  `json:"rank_fusion_score,omitempty"`
+	RankFusionBoost       float64  `json:"rank_fusion_boost,omitempty"`
+	PrimaryFTSRank        int      `json:"primary_fts_rank,omitempty"`
+	QueryPathRank         int      `json:"query_path_rank,omitempty"`
+	LexicalCoverageRank   int      `json:"lexical_coverage_rank,omitempty"`
+	ProtectedCandidate    bool     `json:"protected_candidate,omitempty"`
+	ExternalRerankRank    int      `json:"external_rerank_rank,omitempty"`
+	ExternalRRFScore      float64  `json:"external_rrf_score,omitempty"`
+	MatchedQueryTokens    []string `json:"matched_query_tokens,omitempty"`
 }
 
 var DBPath string
@@ -664,6 +702,11 @@ func calculatePathProximityBoost(currentPath, candidatePath string) float64 {
 
 // RetrieveSimilarSnippets executes FTS5 full-text lookup and then parallel compression-aware re-ranking.
 func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit int) ([]Snippet, error) {
+	return RetrieveSimilarSnippetsWithOptions(db, comp, prompt, limit, RetrieveOptions{})
+}
+
+// RetrieveSimilarSnippetsWithOptions executes FTS5 full-text lookup and then parallel compression-aware re-ranking.
+func RetrieveSimilarSnippetsWithOptions(db *sql.DB, comp Compressor, prompt string, limit int, options RetrieveOptions) ([]Snippet, error) {
 	if RerankCmd != "" {
 		originalRerankCmd := RerankCmd
 		RerankCmd = ""
@@ -673,7 +716,7 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 		if fetchLimit < 15 {
 			fetchLimit = 15
 		}
-		snippets, err := RetrieveSimilarSnippets(db, comp, prompt, fetchLimit)
+		snippets, err := RetrieveSimilarSnippetsWithOptions(db, comp, prompt, fetchLimit, options)
 		if err != nil {
 			return nil, err
 		}
@@ -711,6 +754,10 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 				rerankRank = len(snippets) + 1
 			}
 			score := 1.0/(20.0+float64(baseRank)) + 1.0/(20.0+float64(rerankRank))
+			if options.IncludeDiagnostics && s.Diagnostics != nil {
+				s.Diagnostics.ExternalRerankRank = rerankRank
+				s.Diagnostics.ExternalRRFScore = score
+			}
 			rrfList = append(rrfList, rrfSnippet{snippet: s, score: score})
 		}
 
@@ -726,6 +773,7 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 		if len(finalSnippets) > limit {
 			finalSnippets = finalSnippets[:limit]
 		}
+		annotateFinalRanks(finalSnippets)
 		return finalSnippets, nil
 	}
 	var currentPath string
@@ -916,9 +964,36 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 							}
 						}
 					}
-					baseScore := relevanceScore(qnd, uniqueTokens, tokenWeights, 0, structuralBoost, candidates[idx], detectedLang, structureIntent, structureWeight) - gitBoost
+					components := candidateScoreComponents(uniqueTokens, tokenWeights, 0, structuralBoost, candidates[idx], detectedLang, structureIntent, structureWeight)
+					baseScore := components.score(qnd) - gitBoost
 					baseScores[idx] = baseScore
 					candidates[idx].Score = baseScore - bm25Boosts[idx] - bm25FBoosts[idx]
+					if options.IncludeDiagnostics {
+						candidates[idx].Diagnostics = &RetrievalDiagnostics{
+							QND:                   qnd,
+							BaseScore:             baseScore,
+							FinalScore:            candidates[idx].Score,
+							LexicalBoost:          components.LexicalBoost,
+							BM25Boost:             bm25Boosts[idx],
+							BM25Rank:              bm25CandidateRanks[candidates[idx].ID],
+							BM25FBoost:            bm25FBoosts[idx],
+							BM25FRank:             bm25FCandidateRanks[candidates[idx].ID],
+							ExactIdentifierBoost:  exactIdentifierBoosts[idx],
+							StructuredPathBoost:   structuredBoosts[idx],
+							StructuredPathRank:    structuredPathRanks[normalizeIndexedPath(candidates[idx].Path)],
+							StructuralRerankBoost: structuralRerankBoosts[idx],
+							StructuralRerankRank:  structuralRerankRanks[candidates[idx].ID],
+							PathTokenBoost:        components.PathTokenBoost,
+							PathProximityBoost:    pathProximityBoost,
+							GitRecencyBoost:       gitBoost,
+							LanguageBoost:         components.LanguageBoost,
+							StructureBoost:        components.StructureBoost,
+							TopicPenalty:          components.TopicPenalty,
+							PrimaryFTSRank:        primaryCandidateRanks[candidates[idx].ID],
+							QueryPathRank:         queryPathCandidateRanks[candidates[idx].ID],
+							MatchedQueryTokens:    matchedDiagnosticQueryTokens(uniqueTokens, candidates[idx]),
+						}
+					}
 				}
 			}()
 		}
@@ -931,6 +1006,14 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 
 		if usedFTS && len(primaryCandidateIDs) > 0 {
 			protectedCandidateID = topCandidateIDByBaseScore(candidates, baseScores, primaryCandidateIDs)
+			if options.IncludeDiagnostics {
+				for idx := range candidates {
+					if candidates[idx].ID == protectedCandidateID && candidates[idx].Diagnostics != nil {
+						candidates[idx].Diagnostics.ProtectedCandidate = true
+						break
+					}
+				}
+			}
 		}
 
 		// Sort candidates by score (lower QND score = higher similarity)
@@ -956,17 +1039,80 @@ func RetrieveSimilarSnippets(db *sql.DB, comp Compressor, prompt string, limit i
 			for r, pc := range pathCands {
 				pathProximityRanks[pc.id] = r + 1
 			}
+			if options.IncludeDiagnostics {
+				for idx := range candidates {
+					if candidates[idx].Diagnostics != nil {
+						candidates[idx].Diagnostics.PathProximityRank = pathProximityRanks[candidates[idx].ID]
+					}
+				}
+			}
 		}
-		applyCandidateRankFusion(candidates, primaryCandidateRanks, queryPathCandidateRanks, bm25CandidateRanks, bm25FCandidateRanks, structuredPathRanks, structuralRerankRanks, pathProximityRanks)
+		fusionDiagnostics := applyCandidateRankFusion(candidates, primaryCandidateRanks, queryPathCandidateRanks, bm25CandidateRanks, bm25FCandidateRanks, structuredPathRanks, structuralRerankRanks, pathProximityRanks)
+		if options.IncludeDiagnostics {
+			for idx := range candidates {
+				diagnostics := candidates[idx].Diagnostics
+				if diagnostics == nil {
+					continue
+				}
+				if fusion := fusionDiagnostics[candidates[idx].ID]; fusion.Score > 0 {
+					diagnostics.RankFusionScore = fusion.Score
+					diagnostics.RankFusionBoost = fusion.Boost
+				}
+				diagnostics.FinalScore = candidates[idx].Score
+			}
+		}
 	}
 
 	if usedFTS && len(primaryCandidateIDs) > 0 {
-		return rankSearchCandidates(candidates, primaryCandidateIDs, protectedCandidateID, lexicalCoverageRanks, limit), nil
+		ranked := rankSearchCandidates(candidates, primaryCandidateIDs, protectedCandidateID, lexicalCoverageRanks, limit)
+		if options.IncludeDiagnostics {
+			for idx := range ranked {
+				if ranked[idx].Diagnostics != nil {
+					ranked[idx].Diagnostics.LexicalCoverageRank = lexicalCoverageRanks[ranked[idx].ID]
+				}
+			}
+		}
+		annotateFinalRanks(ranked)
+		return ranked, nil
 	}
 	if len(candidates) > limit {
-		return candidates[:limit], nil
+		candidates = candidates[:limit]
 	}
+	annotateFinalRanks(candidates)
 	return candidates, nil
+}
+
+func annotateFinalRanks(snippets []Snippet) {
+	for idx := range snippets {
+		if snippets[idx].Diagnostics == nil {
+			continue
+		}
+		snippets[idx].Diagnostics.FinalRank = idx + 1
+		snippets[idx].Diagnostics.FinalScore = snippets[idx].Score
+	}
+}
+
+func matchedDiagnosticQueryTokens(queryTokens []string, candidate Snippet) []string {
+	if len(queryTokens) == 0 {
+		return nil
+	}
+	candidateTokens := stringSet(documentSearchTokens(candidate.Path)...)
+	for _, token := range documentSearchTokens(candidate.Topic) {
+		candidateTokens[token] = true
+	}
+	for _, token := range documentSearchTokens(candidate.Content) {
+		candidateTokens[token] = true
+	}
+	var matched []string
+	seen := map[string]bool{}
+	for _, token := range queryTokens {
+		if token == "" || seen[token] || !candidateTokens[token] {
+			continue
+		}
+		matched = append(matched, token)
+		seen[token] = true
+	}
+	return matched
 }
 
 func queryKnowledgeFTS(db *sql.DB, ftsQuery string, candidateLimit int) (*sql.Rows, error) {
@@ -980,9 +1126,14 @@ func queryKnowledgeFTS(db *sql.DB, ftsQuery string, candidateLimit int) (*sql.Ro
 		LIMIT ?`, ftsQuery, candidateLimit)
 }
 
-func applyCandidateRankFusion(candidates []Snippet, primaryRanks map[int]int, queryPathRanks map[int]int, bm25Ranks map[int]int, bm25FRanks map[int]int, structuredPathRanks map[string]int, structuralRanks map[int]int, pathProximityRanks map[int]int) {
+type rankFusionDiagnostic struct {
+	Score float64
+	Boost float64
+}
+
+func applyCandidateRankFusion(candidates []Snippet, primaryRanks map[int]int, queryPathRanks map[int]int, bm25Ranks map[int]int, bm25FRanks map[int]int, structuredPathRanks map[string]int, structuralRanks map[int]int, pathProximityRanks map[int]int) map[int]rankFusionDiagnostic {
 	if len(candidates) < 2 {
-		return
+		return nil
 	}
 
 	window := min(rankFusionWindow, len(candidates))
@@ -995,11 +1146,17 @@ func applyCandidateRankFusion(candidates []Snippet, primaryRanks map[int]int, qu
 		}
 	}
 	if maxScore == 0 {
-		return
+		return nil
 	}
 
+	diagnostics := make(map[int]rankFusionDiagnostic, len(fusionScores))
 	for idx := range fusionWindow {
-		fusionWindow[idx].Score -= rankFusionBlend * fusionScores[fusionWindow[idx].ID] / maxScore
+		boost := rankFusionBlend * fusionScores[fusionWindow[idx].ID] / maxScore
+		fusionWindow[idx].Score -= boost
+		diagnostics[fusionWindow[idx].ID] = rankFusionDiagnostic{
+			Score: fusionScores[fusionWindow[idx].ID],
+			Boost: boost,
+		}
 	}
 	sort.SliceStable(fusionWindow, func(i, j int) bool {
 		if fusionWindow[i].Score == fusionWindow[j].Score {
@@ -1007,6 +1164,7 @@ func applyCandidateRankFusion(candidates []Snippet, primaryRanks map[int]int, qu
 		}
 		return fusionWindow[i].Score < fusionWindow[j].Score
 	})
+	return diagnostics
 }
 
 func candidateRankFusionScores(candidates []Snippet, primaryRanks map[int]int, queryPathRanks map[int]int, bm25Ranks map[int]int, bm25FRanks map[int]int, structuredPathRanks map[string]int, structuralRanks map[int]int, pathProximityRanks map[int]int) map[int]float64 {
@@ -1948,16 +2106,41 @@ func pathTokenBoost(queryTokens []string, path string) float64 {
 	return score
 }
 
-func relevanceScore(qnd float64, queryTokens []string, tokenWeights map[string]float64, bm25Boost float64, structuredBoost float64, snippet Snippet, detectedLang, structureIntent string, structureWeight float64) float64 {
-	boost := lexicalBoost(queryTokens, tokenWeights, snippet)
-	boost += bm25Boost
-	boost += structuredBoost
-	boost += pathTokenBoost(queryTokens, snippet.Path)
-	if detectedLang != "" && NormalizeLanguage(snippet.Language) == detectedLang {
-		boost += 0.08
+type retrievalScoreComponents struct {
+	LexicalBoost    float64
+	BM25Boost       float64
+	StructuredBoost float64
+	PathTokenBoost  float64
+	LanguageBoost   float64
+	StructureBoost  float64
+	TopicPenalty    float64
+}
+
+func candidateScoreComponents(queryTokens []string, tokenWeights map[string]float64, bm25Boost float64, structuredBoost float64, snippet Snippet, detectedLang, structureIntent string, structureWeight float64) retrievalScoreComponents {
+	components := retrievalScoreComponents{
+		LexicalBoost:    lexicalBoost(queryTokens, tokenWeights, snippet),
+		BM25Boost:       bm25Boost,
+		StructuredBoost: structuredBoost,
+		PathTokenBoost:  pathTokenBoost(queryTokens, snippet.Path),
+		StructureBoost:  structureBoost(structureIntent, snippet.Content, structureWeight),
+		TopicPenalty:    topicTypePenalty(queryTokens, snippet.Topic),
 	}
-	boost += structureBoost(structureIntent, snippet.Content, structureWeight)
-	return qnd - boost + topicTypePenalty(queryTokens, snippet.Topic)
+	if detectedLang != "" && NormalizeLanguage(snippet.Language) == detectedLang {
+		components.LanguageBoost = 0.08
+	}
+	return components
+}
+
+func (components retrievalScoreComponents) totalBoost() float64 {
+	return components.LexicalBoost + components.BM25Boost + components.StructuredBoost + components.PathTokenBoost + components.LanguageBoost + components.StructureBoost
+}
+
+func (components retrievalScoreComponents) score(qnd float64) float64 {
+	return qnd - components.totalBoost() + components.TopicPenalty
+}
+
+func relevanceScore(qnd float64, queryTokens []string, tokenWeights map[string]float64, bm25Boost float64, structuredBoost float64, snippet Snippet, detectedLang, structureIntent string, structureWeight float64) float64 {
+	return candidateScoreComponents(queryTokens, tokenWeights, bm25Boost, structuredBoost, snippet, detectedLang, structureIntent, structureWeight).score(qnd)
 }
 
 func candidateBM25Boosts(queryTokens []string, candidates []Snippet) []float64 {

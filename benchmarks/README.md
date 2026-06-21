@@ -89,6 +89,8 @@ python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobenc
 
 The default CI workflow runs this gated public sample so retrieval changes must preserve both the current measured floor and the current measured lift over raw baselines before merging.
 
+Add `--snapzip-diagnostics` to RepoBench-R or RepoBench-P runs when tuning ranking. The JSON records will include compact score diagnostics for SnapZip's top-5 results, including QND, lexical/BM25/BM25F boosts, identifier/path/structure boosts, rank-fusion contribution, final rank, and matched query tokens.
+
 ## RepoBench v1.1 Pipeline-Context Proxy
 
 The `repobench-p` suite uses the public RepoBench v1.1 parquet dataset. It materializes each row's cross-file context snippets, indexes them with SnapZip, and compares top-5 context selection against random, token Jaccard, and BM25 baselines.

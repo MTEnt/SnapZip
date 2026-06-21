@@ -26,6 +26,10 @@ type SearchResult struct {
 	Feedback      []Feedback       `json:"feedback,omitempty"`
 }
 
+type SearchOptions struct {
+	IncludeDiagnostics bool
+}
+
 type ContextPack struct {
 	Query         string           `json:"query"`
 	ExpandedQuery string           `json:"expanded_query,omitempty"`
@@ -57,16 +61,20 @@ func SearchMemory(db *sql.DB, comp Compressor, query string, limit int, feedback
 }
 
 func SearchMemoryWithMode(db *sql.DB, comp Compressor, query, mode string, limit int, feedbackLimit int) (SearchResult, error) {
-	return searchMemoryWithMode(db, comp, query, mode, limit, feedbackLimit, true)
+	return SearchMemoryWithOptions(db, comp, query, mode, limit, feedbackLimit, SearchOptions{})
 }
 
-func searchMemoryWithMode(db *sql.DB, comp Compressor, query, mode string, limit int, feedbackLimit int, includeGraph bool) (SearchResult, error) {
+func SearchMemoryWithOptions(db *sql.DB, comp Compressor, query, mode string, limit int, feedbackLimit int, options SearchOptions) (SearchResult, error) {
+	return searchMemoryWithMode(db, comp, query, mode, limit, feedbackLimit, true, options)
+}
+
+func searchMemoryWithMode(db *sql.DB, comp Compressor, query, mode string, limit int, feedbackLimit int, includeGraph bool, options SearchOptions) (SearchResult, error) {
 	limit = normalizeResultLimit(limit, 3)
 	feedbackLimit = normalizeResultLimit(feedbackLimit, 0)
 	mode = normalizePackMode(mode)
 	expandedQuery := ExpandQueryForPackMode(query, mode)
 
-	snippets, err := RetrieveSimilarSnippets(db, comp, expandedQuery, limit)
+	snippets, err := RetrieveSimilarSnippetsWithOptions(db, comp, expandedQuery, limit, RetrieveOptions{IncludeDiagnostics: options.IncludeDiagnostics})
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -106,7 +114,7 @@ func BuildContextPackWithMode(db *sql.DB, comp Compressor, query, mode string, l
 		searchLimit = min(finalLimit*2, 100)
 	}
 
-	result, err := searchMemoryWithMode(db, comp, query, mode, searchLimit, feedbackLimit, false)
+	result, err := searchMemoryWithMode(db, comp, query, mode, searchLimit, feedbackLimit, false, SearchOptions{})
 	if err != nil {
 		return ContextPack{}, err
 	}

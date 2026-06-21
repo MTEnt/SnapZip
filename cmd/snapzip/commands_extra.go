@@ -1115,6 +1115,7 @@ func handleEval() {
 	repobenchPSeed := fs.Int("repobench-p-seed", 42, "RepoBench v1.1 sample seed")
 	repobenchPMaxShards := fs.Int("repobench-p-max-shards", 1, "Maximum RepoBench v1.1 parquet shards to load from Hugging Face; use 0 for all matching shards")
 	snapzipRerankCmd := fs.String("snapzip-rerank-cmd", "", "Command to run external reranker in snapzip search during benchmarks")
+	snapzipDiagnostics := fs.Bool("snapzip-diagnostics", false, "Include compact snapzip search score diagnostics in RepoBench records")
 	minRepobenchAcc1 := fs.String("min-repobench-snapzip-acc1", "", "Minimum SnapZip acc@1 for RepoBench-R")
 	minRepobenchAcc3 := fs.String("min-repobench-snapzip-acc3", "", "Minimum SnapZip acc@3 for RepoBench-R")
 	minRepobenchAcc5 := fs.String("min-repobench-snapzip-acc5", "", "Minimum SnapZip acc@5 for RepoBench-R")
@@ -1179,6 +1180,9 @@ func handleEval() {
 	appendIntFlag("--repobench-p-seed", *repobenchPSeed)
 	appendIntFlag("--repobench-p-max-shards", *repobenchPMaxShards)
 	appendOptionalStringFlag("--snapzip-rerank-cmd", *snapzipRerankCmd)
+	if *snapzipDiagnostics {
+		args = append(args, "--snapzip-diagnostics")
+	}
 	appendOptionalStringFlag("--min-repobench-snapzip-acc1", *minRepobenchAcc1)
 	appendOptionalStringFlag("--min-repobench-snapzip-acc3", *minRepobenchAcc3)
 	appendOptionalStringFlag("--min-repobench-snapzip-acc5", *minRepobenchAcc5)

@@ -193,6 +193,12 @@ Plain-text search output includes context receipts when receipts are available, 
 snapzip search --query "python lru cache" --limit 3 --json
 ```
 
+For ranking analysis, add `--diagnostics` to JSON search output. Each snippet then includes score components such as QND, lexical boost, BM25/BM25F boost, identifier/path/structure boosts, rank-fusion contribution, final rank, and matched query tokens:
+
+```bash
+snapzip search --query "python lru cache" --limit 3 --json --diagnostics
+```
+
 ### C. Context Packs
 Build a bounded Markdown context pack with ranked snippets and relevant feedback memory:
 ```bash
@@ -529,6 +535,8 @@ python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobenc
   --min-repobench-snapzip-ndcg5-over-bm25 0.04 \
   --min-repobench-snapzip-acc5-over-jaccard 0.10
 ```
+
+When tuning ranking, add `--snapzip-diagnostics` to RepoBench-R or RepoBench-P benchmark runs. The JSON records then include compact score diagnostics for SnapZip's top-5 results without changing retrieval behavior.
 
 Run the public RepoBench v1.1 pipeline-context proxy:
 ```bash

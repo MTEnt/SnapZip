@@ -1229,6 +1229,23 @@ def snapzip_top5_from_search(output):
     return top5, len(snippets), receipt_count
 
 
+def snapzip_diagnostics_from_search(output):
+    payload = json.loads(output)
+    if not isinstance(payload, dict):
+        return []
+    diagnostics = []
+    for rank, snippet in enumerate((payload.get("snippets") or payload.get("results") or [])[:5], start=1):
+        item = {
+            "rank": rank,
+            "path": snippet.get("path") or "",
+            "score": snippet.get("score"),
+        }
+        if snippet.get("diagnostics"):
+            item["diagnostics"] = snippet["diagnostics"]
+        diagnostics.append(item)
+    return diagnostics
+
+
 def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=None):
     config = config or args.repobench_config
     split = split or args.repobench_split
@@ -1273,20 +1290,19 @@ def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=Non
             REPO_ROOT,
         )
         query = repobench_query(row)
-        _, search_record = run_cmd(
-            [
-                snapzip_bin,
-                "search",
-                "--json",
-                "--limit",
-                "5",
-                "--db-dir",
-                str(db_dir),
-                "--query",
-                query,
-            ],
-            REPO_ROOT,
-        )
+        search_cmd = [
+            snapzip_bin,
+            "search",
+            "--json",
+            "--limit",
+            "5",
+            "--db-dir",
+            str(db_dir),
+        ]
+        if args.snapzip_diagnostics:
+            search_cmd.append("--diagnostics")
+        search_cmd.extend(["--query", query])
+        _, search_record = run_cmd(search_cmd, REPO_ROOT)
 
         jaccard_top = jaccard_top5(query, row["context"])
         bm25_top = bm25_top5(query, row["context"])
@@ -1316,6 +1332,8 @@ def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=Non
             record[f"{name}_duplicate_count@5"] = duplicate_result_count(top[:5])
             for k in (1, 3, 5):
                 record[f"{name}_hit@{k}"] = gold in top[:k]
+        if args.snapzip_diagnostics:
+            record["snapzip_diagnostics"] = snapzip_diagnostics_from_search(search_record["stdout"])
         records.append(record)
         index_times.append(index_record["elapsed_seconds"])
         search_times.append(search_record["elapsed_seconds"])
@@ -1487,6 +1505,8 @@ def prepare_repobench_p_case(case_no, row_idx, row, work_dir, language, ext, sna
     ]
     if args.snapzip_rerank_cmd:
         search_cmd.extend(["--rerank-cmd", args.snapzip_rerank_cmd])
+    if args.snapzip_diagnostics:
+        search_cmd.append("--diagnostics")
     search_cmd.extend(["--query", injected_query])
 
     _, search_record = run_cmd(search_cmd, REPO_ROOT)
@@ -1515,6 +1535,7 @@ def prepare_repobench_p_case(case_no, row_idx, row, work_dir, language, ext, sna
         "snapzip_top5": snapzip_top,
         "snapzip_return_count": snapzip_return_count,
         "snapzip_receipt_count": snapzip_receipt_count,
+        "snapzip_diagnostics": snapzip_diagnostics_from_search(search_record["stdout"]) if args.snapzip_diagnostics else [],
         "index_record": index_record,
         "search_record": search_record,
     }
@@ -1555,6 +1576,8 @@ def evaluate_case(case_no, row_idx, row, work_dir, language, ext, snapzip_bin, a
         "index_elapsed_seconds": prepared["index_record"]["elapsed_seconds"],
         "search_elapsed_seconds": prepared["search_record"]["elapsed_seconds"],
     }
+    if args.snapzip_diagnostics:
+        record["snapzip_diagnostics"] = prepared["snapzip_diagnostics"]
     for name in ("random", "jaccard", "bm25", "snapzip"):
         top = record[f"{name}_top5"]
         selected_text = selected_context_text(top[:5], candidate_texts)
@@ -2233,6 +2256,7 @@ def main():
     parser.add_argument("--repobench-p-sample-size", type=int, default=100)
     parser.add_argument("--repobench-p-seed", type=int, default=42)
     parser.add_argument("--snapzip-rerank-cmd", default="", help="Command to run external reranker in snapzip search")
+    parser.add_argument("--snapzip-diagnostics", action="store_true", help="Include compact snapzip search score diagnostics in RepoBench records")
     parser.add_argument(
         "--repobench-p-max-shards",
         type=int,

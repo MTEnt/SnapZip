@@ -194,6 +194,7 @@ func handleSearch() {
 	limit := fs.Int("limit", 3, "Number of snippets to return")
 	rerankCmd := fs.String("rerank-cmd", "", "Command to run external reranker (e.g. 'python rerank.py')")
 	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
+	diagnostics := fs.Bool("diagnostics", false, "Include retrieval score diagnostics in JSON output")
 	_ = fs.Parse(os.Args[2:])
 
 	if *query == "" {
@@ -217,7 +218,7 @@ func handleSearch() {
 		os.Exit(1)
 	}
 
-	result, err := core.SearchMemory(db, comp, *query, *limit, 5)
+	result, err := core.SearchMemoryWithOptions(db, comp, *query, "", *limit, 5, core.SearchOptions{IncludeDiagnostics: *diagnostics && *jsonOutput})
 	if err != nil {
 		fmt.Printf("Search failed: %v\n", err)
 		os.Exit(1)

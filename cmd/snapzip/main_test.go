@@ -77,6 +77,31 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 	if searchPayload.Query == "" || len(searchPayload.Snippets) != 1 || !strings.Contains(searchPayload.Snippets[0].Content, "CacheStore") {
 		t.Fatalf("search --json did not include expected snippet:\n%s", searchJSON)
 	}
+	if searchPayload.Snippets[0].Diagnostics != nil {
+		t.Fatalf("search --json unexpectedly included diagnostics without --diagnostics: %+v", searchPayload.Snippets[0].Diagnostics)
+	}
+
+	searchDiagnosticsJSON := runSnapZip(t, repoRoot,
+		"search",
+		"--db-dir", dbDir,
+		"--query", "ruby error handling CacheStore",
+		"--limit", "1",
+		"--json",
+		"--diagnostics",
+	)
+	var searchDiagnosticsPayload struct {
+		Snippets []core.Snippet `json:"snippets"`
+	}
+	if err := json.Unmarshal([]byte(searchDiagnosticsJSON), &searchDiagnosticsPayload); err != nil {
+		t.Fatalf("search --json --diagnostics returned invalid JSON: %v\n%s", err, searchDiagnosticsJSON)
+	}
+	if len(searchDiagnosticsPayload.Snippets) != 1 || searchDiagnosticsPayload.Snippets[0].Diagnostics == nil {
+		t.Fatalf("search --json --diagnostics did not include snippet diagnostics:\n%s", searchDiagnosticsJSON)
+	}
+	diagnostics := searchDiagnosticsPayload.Snippets[0].Diagnostics
+	if diagnostics.FinalRank != 1 || diagnostics.QND <= 0 || len(diagnostics.MatchedQueryTokens) == 0 {
+		t.Fatalf("search diagnostics missing rank, QND, or matched query tokens: %+v", diagnostics)
+	}
 
 	packOutput := runSnapZip(t, repoRoot,
 		"pack",
@@ -630,6 +655,7 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 		"live-model",
 		"live-sample-size",
 		"snapzip-rerank-cmd",
+		"snapzip-diagnostics",
 		"min-repobench-p-snapzip-new-token-coverage5-over-bm25",
 		"min-repobench-snapzip-ndcg5-over-bm25",
 	} {

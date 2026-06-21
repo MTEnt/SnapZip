@@ -25,7 +25,7 @@ func BuildRepairContextPack(db *sql.DB, comp Compressor, failureOutput, extraQue
 	if searchLimit < 12 {
 		searchLimit = 12
 	}
-	result, err := searchMemoryWithMode(db, comp, query, mode, searchLimit, feedbackLimit, false)
+	result, err := searchMemoryWithMode(db, comp, query, mode, searchLimit, feedbackLimit, false, SearchOptions{})
 	if err != nil {
 		return ContextPack{}, err
 	}
