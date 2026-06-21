@@ -16,6 +16,7 @@ type Symbol struct {
 	Language  string `json:"language"`
 	Path      string `json:"path"`
 	Line      int    `json:"line"`
+	Docstring string `json:"docstring,omitempty"`
 }
 
 type SymbolReference struct {
@@ -120,11 +121,12 @@ func ReplaceSymbolsForFile(db *sql.DB, language, path string, content []byte) er
 	}
 	for _, symbol := range symbols {
 		_, err := tx.Exec(`
-			INSERT INTO symbols (name, kind, signature, language, path, line)
-			VALUES (?, ?, ?, ?, ?, ?)
+			INSERT INTO symbols (name, kind, signature, language, path, line, docstring)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(path, name, kind, line) DO UPDATE SET
 				signature = excluded.signature,
 				language = excluded.language,
+				docstring = excluded.docstring,
 				created_at = CURRENT_TIMESTAMP`,
 			symbol.Name,
 			symbol.Kind,
@@ -132,6 +134,7 @@ func ReplaceSymbolsForFile(db *sql.DB, language, path string, content []byte) er
 			symbol.Language,
 			symbol.Path,
 			symbol.Line,
+			symbol.Docstring,
 		)
 		if err != nil {
 			return err
@@ -148,14 +151,15 @@ func ReplaceSymbolsForFile(db *sql.DB, language, path string, content []byte) er
 			return err
 		}
 		if _, err := tx.Exec(`
-			INSERT INTO symbols_fts(rowid, name, kind, signature, language, path)
-			VALUES (?, ?, ?, ?, ?, ?)`,
+			INSERT INTO symbols_fts(rowid, name, kind, signature, language, path, docstring)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			rowID,
 			symbol.Name,
 			symbol.Kind,
 			symbol.Signature,
 			symbol.Language,
 			symbol.Path,
+			symbol.Docstring,
 		); err != nil {
 			return err
 		}
@@ -256,6 +260,7 @@ func ExtractSymbols(language, path, content string) []Symbol {
 				Language:  language,
 				Path:      path,
 				Line:      idx + 1,
+				Docstring: jsDocstringLookbehind(lines, idx),
 			})
 			break
 		}
@@ -295,6 +300,7 @@ func extractPythonSymbols(path, content string) []Symbol {
 				Language:  "py",
 				Path:      path,
 				Line:      idx + 1,
+				Docstring: pythonDocstringLookahead(lines, idx, indent),
 			})
 			classStack = append(classStack, pythonClassScope{name: name, indent: indent})
 			continue
@@ -318,10 +324,124 @@ func extractPythonSymbols(path, content string) []Symbol {
 				Language:  "py",
 				Path:      path,
 				Line:      idx + 1,
+				Docstring: pythonDocstringLookahead(lines, idx, indent),
 			})
 		}
 	}
 	return symbols
+}
+
+func jsDocstringLookbehind(lines []string, declIdx int) string {
+	if declIdx <= 0 {
+		return ""
+	}
+	idx := declIdx - 1
+	for idx >= 0 && strings.TrimSpace(lines[idx]) == "" {
+		idx--
+	}
+	if idx < 0 {
+		return ""
+	}
+	trimmed := strings.TrimSpace(lines[idx])
+	if !strings.HasSuffix(trimmed, "*/") {
+		if strings.HasPrefix(trimmed, "//") {
+			var docLines []string
+			for idx >= 0 {
+				lineTrimmed := strings.TrimSpace(lines[idx])
+				if strings.HasPrefix(lineTrimmed, "//") {
+					docLines = append([]string{strings.TrimSpace(strings.TrimPrefix(lineTrimmed, "//"))}, docLines...)
+					idx--
+				} else {
+					break
+				}
+			}
+			return strings.Join(docLines, "\n")
+		}
+		return ""
+	}
+	var docLines []string
+	if strings.HasPrefix(trimmed, "/*") {
+		content := strings.TrimPrefix(trimmed, "/*")
+		content = strings.TrimSuffix(content, "*/")
+		content = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(content), "*"))
+		return content
+	}
+	docLines = append([]string{strings.TrimSuffix(trimmed, "*/")}, docLines...)
+	idx--
+	foundStart := false
+	for idx >= 0 {
+		line := lines[idx]
+		lineTrimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(lineTrimmed, "/*") {
+			content := strings.TrimPrefix(lineTrimmed, "/*")
+			content = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(content), "*"))
+			docLines = append([]string{content}, docLines...)
+			foundStart = true
+			break
+		}
+		content := lineTrimmed
+		if strings.HasPrefix(content, "*") {
+			content = strings.TrimSpace(strings.TrimPrefix(content, "*"))
+		}
+		docLines = append([]string{content}, docLines...)
+		idx--
+	}
+	if !foundStart {
+		return ""
+	}
+	return strings.TrimSpace(strings.Join(docLines, "\n"))
+}
+
+func pythonDocstringLookahead(lines []string, declIdx int, declIndent int) string {
+	docLines := []string(nil)
+	foundDoc := false
+	var closingQuote string
+	for i := declIdx + 1; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := leadingIndentWidth(line)
+		if indent <= declIndent {
+			break
+		}
+		if !foundDoc {
+			if strings.HasPrefix(trimmed, `"""`) {
+				closingQuote = `"""`
+				foundDoc = true
+				content := strings.TrimPrefix(trimmed, `"""`)
+				if strings.HasSuffix(content, `"""`) && len(content) >= 3 {
+					return strings.TrimSpace(strings.TrimSuffix(content, `"""`))
+				}
+				docLines = append(docLines, content)
+			} else if strings.HasPrefix(trimmed, `'''`) {
+				closingQuote = `'''`
+				foundDoc = true
+				content := strings.TrimPrefix(trimmed, `'''`)
+				if strings.HasSuffix(content, `'''`) && len(content) >= 3 {
+					return strings.TrimSpace(strings.TrimSuffix(content, `'''`))
+				}
+				docLines = append(docLines, content)
+			} else {
+				break
+			}
+		} else {
+			if strings.Contains(trimmed, closingQuote) {
+				idx := strings.Index(line, closingQuote)
+				docLines = append(docLines, line[:idx])
+				break
+			}
+			docLines = append(docLines, line)
+		}
+	}
+	if len(docLines) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(strings.Join(docLines, "\n"))
 }
 
 func leadingIndentWidth(line string) int {
@@ -405,7 +525,7 @@ func SearchSymbols(db *sql.DB, query string, limit int) ([]Symbol, error) {
 			FROM symbols s
 			JOIN symbols_fts f ON s.id = f.rowid
 			WHERE symbols_fts MATCH ?
-			ORDER BY bm25(symbols_fts, 8.0, 1.0, 4.0, 1.0, 2.0)
+			ORDER BY bm25(symbols_fts, 8.0, 1.0, 4.0, 1.0, 2.0, 0.5)
 			LIMIT ?`, ftsQuery, metadataFTSCandidateLimit(limit))
 		if err != nil {
 			return nil, err

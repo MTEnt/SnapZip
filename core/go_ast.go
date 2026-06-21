@@ -9,7 +9,7 @@ import (
 )
 
 func extractGoSymbolsAST(path, content string) ([]Symbol, bool) {
-	fileSet, file, ok := parseGoFile(path, content, parser.SkipObjectResolution)
+	fileSet, file, ok := parseGoFile(path, content, parser.SkipObjectResolution|parser.ParseComments)
 	if !ok {
 		return nil, false
 	}
@@ -25,6 +25,10 @@ func extractGoSymbolsAST(path, content string) ([]Symbol, bool) {
 			if node.Recv != nil {
 				kind = "method"
 			}
+			var docstring string
+			if node.Doc != nil {
+				docstring = node.Doc.Text()
+			}
 			symbols = append(symbols, Symbol{
 				Name:      node.Name.Name,
 				Kind:      kind,
@@ -32,6 +36,7 @@ func extractGoSymbolsAST(path, content string) ([]Symbol, bool) {
 				Language:  "go",
 				Path:      path,
 				Line:      fileSet.Position(node.Pos()).Line,
+				Docstring: docstring,
 			})
 		case *ast.GenDecl:
 			if node.Tok != token.TYPE {
@@ -42,6 +47,12 @@ func extractGoSymbolsAST(path, content string) ([]Symbol, bool) {
 				if !ok || typeSpec.Name == nil || protectedIdentifier(typeSpec.Name.Name) {
 					continue
 				}
+				var docstring string
+				if typeSpec.Doc != nil {
+					docstring = typeSpec.Doc.Text()
+				} else if node.Doc != nil {
+					docstring = node.Doc.Text()
+				}
 				symbols = append(symbols, Symbol{
 					Name:      typeSpec.Name.Name,
 					Kind:      "type",
@@ -49,6 +60,7 @@ func extractGoSymbolsAST(path, content string) ([]Symbol, bool) {
 					Language:  "go",
 					Path:      path,
 					Line:      fileSet.Position(typeSpec.Pos()).Line,
+					Docstring: docstring,
 				})
 			}
 		}

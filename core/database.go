@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -149,6 +150,7 @@ func InitDB(dir string) (*sql.DB, error) {
 		language TEXT,
 		path TEXT,
 		line INTEGER,
+		docstring TEXT DEFAULT '',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE(path, name, kind, line)
 	);`)
@@ -188,6 +190,11 @@ func InitDB(dir string) (*sql.DB, error) {
 		return nil, err
 	}
 
+	hasDoc, err := hasColumn(db, "symbols_fts", "docstring")
+	if err == nil && !hasDoc {
+		_, _ = db.Exec("DROP TABLE IF EXISTS symbols_fts")
+	}
+
 	if err := ensureMetadataFTSTables(db); err != nil {
 		return nil, err
 	}
@@ -195,6 +202,9 @@ func InitDB(dir string) (*sql.DB, error) {
 		return nil, err
 	}
 	if err := migrateImportRefs(db); err != nil {
+		return nil, err
+	}
+	if err := migrateSymbols(db); err != nil {
 		return nil, err
 	}
 	if err := ensureSearchIndexes(db); err != nil {
@@ -430,7 +440,7 @@ func ensureSearchIndexes(db *sql.DB) error {
 
 func ensureMetadataFTSTables(db *sql.DB) error {
 	statements := []string{
-		`CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(name, kind, signature, language, path)`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(name, kind, signature, language, path, docstring)`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS symbol_refs_fts USING fts5(name, language, path, context)`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS import_refs_fts USING fts5(import_path, alias, language, path, target_path, context)`,
 	}
@@ -470,8 +480,8 @@ func syncMetadataFTS(db *sql.DB) error {
 func rebuildMetadataFTS(db *sql.DB) error {
 	statements := []string{
 		`DELETE FROM symbols_fts`,
-		`INSERT INTO symbols_fts(rowid, name, kind, signature, language, path)
-		 SELECT id, name, kind, signature, language, path FROM symbols`,
+		`INSERT INTO symbols_fts(rowid, name, kind, signature, language, path, docstring)
+		 SELECT id, name, kind, signature, language, path, docstring FROM symbols`,
 		`DELETE FROM symbol_refs_fts`,
 		`INSERT INTO symbol_refs_fts(rowid, name, language, path, context)
 		 SELECT id, name, language, path, context FROM symbol_refs`,
@@ -485,6 +495,31 @@ func rebuildMetadataFTS(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func migrateSymbols(db *sql.DB) error {
+	return ensureTableColumn(db, "symbols", "docstring", "TEXT DEFAULT ''")
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var columnName, columnType string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if strings.ToLower(columnName) == strings.ToLower(column) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func tableRowCount(db *sql.DB, table string) (int, error) {

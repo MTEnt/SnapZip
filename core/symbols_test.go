@@ -132,3 +132,71 @@ func build() CacheStore {
 		t.Fatalf("unexpected self definition reference in %+v", refs)
 	}
 }
+
+func TestExtractSymbolsDocstrings(t *testing.T) {
+	// 1. Go AST comments test
+	goContent := `package pkg
+
+// Foo does something cool.
+// It is a multiline comment.
+func Foo() {}
+
+type (
+	// Bar is a type.
+	Bar struct{}
+)
+`
+	goSymbols := ExtractSymbols("go", "main.go", goContent)
+	goByName := map[string]Symbol{}
+	for _, s := range goSymbols {
+		goByName[s.Name] = s
+	}
+	if !strings.Contains(goByName["Foo"].Docstring, "Foo does something cool.") {
+		t.Errorf("Foo Docstring missing: %q", goByName["Foo"].Docstring)
+	}
+	if !strings.Contains(goByName["Bar"].Docstring, "Bar is a type.") {
+		t.Errorf("Bar Docstring missing: %q", goByName["Bar"].Docstring)
+	}
+
+	// 2. Python lookahead docstring test
+	pyContent := `class Calculator:
+    """
+    Calculator class handles addition.
+    """
+    def add(a, b):
+        """Adds a and b."""
+        return a + b
+`
+	pySymbols := ExtractSymbols("py", "calc.py", pyContent)
+	pyByName := map[string]Symbol{}
+	for _, s := range pySymbols {
+		pyByName[s.Name] = s
+	}
+	if !strings.Contains(pyByName["Calculator"].Docstring, "Calculator class handles addition.") {
+		t.Errorf("Calculator Docstring missing: %q", pyByName["Calculator"].Docstring)
+	}
+	if pyByName["add"].Docstring != "Adds a and b." {
+		t.Errorf("add Docstring = %q, want 'Adds a and b.'", pyByName["add"].Docstring)
+	}
+
+	// 3. JS lookbehind docstring test
+	jsContent := `/**
+ * Connection session validator.
+ */
+function validateSession() {}
+
+// Single line comment
+function helper() {}
+`
+	jsSymbols := ExtractSymbols("js", "auth.js", jsContent)
+	jsByName := map[string]Symbol{}
+	for _, s := range jsSymbols {
+		jsByName[s.Name] = s
+	}
+	if !strings.Contains(jsByName["validateSession"].Docstring, "Connection session validator.") {
+		t.Errorf("validateSession Docstring missing: %q", jsByName["validateSession"].Docstring)
+	}
+	if !strings.Contains(jsByName["helper"].Docstring, "Single line comment") {
+		t.Errorf("helper Docstring missing: %q", jsByName["helper"].Docstring)
+	}
+}
