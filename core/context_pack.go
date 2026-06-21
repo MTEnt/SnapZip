@@ -12,6 +12,9 @@ const MinContextPackBudgetBytes = 512
 const MaxContextPackBudgetBytes = 200 * 1024
 const maxContextPackFeedbackInputBytes = 512
 const maxContextPackFeedbackOutputBytes = 768
+const maxSymbolGraphNamesPerSeed = 8
+const maxSymbolGraphRefsPerName = 8
+const maxSymbolGraphCandidatesPerSeed = 16
 
 type SearchResult struct {
 	Query         string           `json:"query"`
@@ -53,6 +56,10 @@ func SearchMemory(db *sql.DB, comp Compressor, query string, limit int, feedback
 }
 
 func SearchMemoryWithMode(db *sql.DB, comp Compressor, query, mode string, limit int, feedbackLimit int) (SearchResult, error) {
+	return searchMemoryWithMode(db, comp, query, mode, limit, feedbackLimit, true)
+}
+
+func searchMemoryWithMode(db *sql.DB, comp Compressor, query, mode string, limit int, feedbackLimit int, includeGraph bool) (SearchResult, error) {
 	limit = normalizeResultLimit(limit, 3)
 	feedbackLimit = normalizeResultLimit(feedbackLimit, 0)
 	mode = normalizePackMode(mode)
@@ -71,14 +78,18 @@ func SearchMemoryWithMode(db *sql.DB, comp Compressor, query, mode string, limit
 		}
 	}
 
-	return SearchResult{
+	result := SearchResult{
 		Query:         query,
 		ExpandedQuery: expandedQuery,
 		Mode:          mode,
 		Snippets:      snippets,
-		Receipts:      genericReceiptsForSnippets(db, snippets, mode),
+		Receipts:      genericReceiptsForSnippets(db, snippets, expandedQuery, mode),
 		Feedback:      feedback,
-	}, nil
+	}
+	if includeGraph {
+		result = addGraphContextToSearchResult(db, result, limit)
+	}
+	return result, nil
 }
 
 func BuildContextPack(db *sql.DB, comp Compressor, query string, limit int, budgetBytes int, feedbackLimit int) (ContextPack, error) {
@@ -94,11 +105,12 @@ func BuildContextPackWithMode(db *sql.DB, comp Compressor, query, mode string, l
 		searchLimit = min(finalLimit*2, 100)
 	}
 
-	result, err := SearchMemoryWithMode(db, comp, query, mode, searchLimit, feedbackLimit)
+	result, err := searchMemoryWithMode(db, comp, query, mode, searchLimit, feedbackLimit, false)
 	if err != nil {
 		return ContextPack{}, err
 	}
 	result = addGraphContextToSearchResult(db, result, finalLimit)
+	result = selectContextPackSnippets(result, finalLimit)
 
 	return buildContextPackFromResult(query, mode, budgetBytes, result), nil
 }
@@ -162,6 +174,9 @@ func RenderSearchResult(result SearchResult) string {
 	}
 
 	fmt.Fprintf(&builder, "Found %d matching snippets:\n", len(result.Snippets))
+	if len(result.Snippets) > 0 && len(result.Receipts) > 0 {
+		renderContextReceipts(&builder, result.Receipts)
+	}
 	for _, snippet := range result.Snippets {
 		fmt.Fprintf(
 			&builder,
@@ -213,20 +228,7 @@ func RenderContextPack(pack ContextPack) string {
 	}
 
 	if len(pack.Receipts) > 0 {
-		builder.WriteString("\n## Context Receipts\n")
-		for _, receipt := range pack.Receipts {
-			fmt.Fprintf(&builder, "\n%d. %s", receipt.Rank, receiptLocation(receipt))
-			if receipt.Confidence > 0 {
-				fmt.Fprintf(&builder, " (confidence %.2f)", receipt.Confidence)
-			}
-			builder.WriteByte('\n')
-			for _, reason := range receipt.Reasons {
-				fmt.Fprintf(&builder, "   - %s\n", reason)
-			}
-			for _, evidence := range receipt.Evidence {
-				fmt.Fprintf(&builder, "   - Evidence: %s\n", evidence)
-			}
-		}
+		renderContextReceipts(&builder, pack.Receipts)
 	}
 
 	for idx, snippet := range pack.Snippets {
@@ -235,6 +237,23 @@ func RenderContextPack(pack ContextPack) string {
 		fmt.Fprintf(&builder, "```%s\n%s\n```\n", codeFenceLanguage(snippet.Language), snippet.Content)
 	}
 	return builder.String()
+}
+
+func renderContextReceipts(builder *strings.Builder, receipts []ContextReceipt) {
+	builder.WriteString("\n## Context Receipts\n")
+	for _, receipt := range receipts {
+		fmt.Fprintf(builder, "\n%d. %s", receipt.Rank, receiptLocation(receipt))
+		if receipt.Confidence > 0 {
+			fmt.Fprintf(builder, " (confidence %.2f)", receipt.Confidence)
+		}
+		builder.WriteByte('\n')
+		for _, reason := range receipt.Reasons {
+			fmt.Fprintf(builder, "   - %s\n", reason)
+		}
+		for _, evidence := range receipt.Evidence {
+			fmt.Fprintf(builder, "   - Evidence: %s\n", evidence)
+		}
+	}
 }
 
 func fitContextPackToBudget(pack ContextPack, budgetBytes int) ContextPack {
@@ -343,20 +362,35 @@ func normalizeContextPackBudget(value int) int {
 
 func ExpandQueryForPackMode(query, mode string) string {
 	query = strings.TrimSpace(query)
+	mode = normalizePackMode(mode)
+	modeTerms := ""
 	switch normalizePackMode(mode) {
 	case "debug":
-		return strings.TrimSpace(query + " error failure exception stack trace test regression")
+		modeTerms = "error failure exception stack trace test regression"
 	case "refactor":
-		return strings.TrimSpace(query + " interface implementation usage caller callee dependency")
+		modeTerms = "interface implementation usage caller callee dependency"
 	case "test":
-		return strings.TrimSpace(query + " test spec fixture assertion mock benchmark")
+		modeTerms = "test spec fixture assertion mock benchmark"
 	case "docs":
-		return strings.TrimSpace(query + " readme docs documentation install setup config workflow")
+		modeTerms = "readme docs documentation install setup config workflow"
 	case "review":
-		return strings.TrimSpace(query + " code review diff change regression risk caller dependency test validation")
+		modeTerms = "code review diff change regression risk caller dependency test validation"
 	default:
 		return query
 	}
+	return strings.TrimSpace(strings.Join(expandedModeQueryParts(query, mode, modeTerms), " "))
+}
+
+func expandedModeQueryParts(query, mode, modeTerms string) []string {
+	parts := []string{query}
+	if mode != "" && looksLikeCodeContext(query) {
+		planned := strings.TrimSpace(planRetrievalQuery(query).StructuredPrompt)
+		if planned != "" && planned != query && !strings.Contains(query, planned) {
+			parts = append(parts, planned)
+		}
+	}
+	parts = append(parts, modeTerms)
+	return parts
 }
 
 func normalizePackMode(mode string) string {
@@ -370,7 +404,132 @@ func normalizePackMode(mode string) string {
 	}
 }
 
-func genericReceiptsForSnippets(db *sql.DB, snippets []Snippet, mode string) []ContextReceipt {
+func selectContextPackSnippets(result SearchResult, limit int) SearchResult {
+	limit = normalizeResultLimit(limit, 5)
+	if len(result.Snippets) <= 1 {
+		return result
+	}
+	if len(result.Snippets) > limit {
+		result.Snippets = result.Snippets[:limit]
+		result.Receipts = alignReceiptsWithSnippets(result.Snippets, result.Receipts)
+	}
+
+	topScore := result.Snippets[0].Score
+	margin := contextPackScoreMargin(result.Mode)
+	queryTokens := uniqueStrings(searchTokens(firstNonEmpty(result.ExpandedQuery, result.Query)))
+	tokenWeights := queryTokenWeights(queryTokens, result.Snippets)
+	receiptsByKey := receiptsBySnippetKey(result.Receipts)
+
+	selected := []Snippet{result.Snippets[0]}
+	selectedReceipts := []ContextReceipt{receiptsByKey[snippetReceiptKey(result.Snippets[0])]}
+	for _, snippet := range result.Snippets[1:] {
+		receipt := receiptsByKey[snippetReceiptKey(snippet)]
+		if shouldKeepContextPackSnippet(snippet, receipt, selected, selectedReceipts, topScore, margin, queryTokens, tokenWeights) {
+			selected = append(selected, snippet)
+			selectedReceipts = append(selectedReceipts, receipt)
+		}
+	}
+	result.Snippets = selected
+	result.Receipts = alignReceiptsWithSnippets(result.Snippets, result.Receipts)
+	return result
+}
+
+func shouldKeepContextPackSnippet(snippet Snippet, receipt ContextReceipt, selected []Snippet, selectedReceipts []ContextReceipt, topScore, margin float64, queryTokens []string, tokenWeights map[string]float64) bool {
+	if receiptHasRetrievalEvidence(receipt) {
+		return true
+	}
+	if snippet.Score <= topScore+0.08 {
+		return true
+	}
+
+	boost := lexicalBoost(queryTokens, tokenWeights, snippet)
+	if boost <= 0 || snippet.Score > topScore+margin {
+		return false
+	}
+	if selectedHasStrongContext(selected, selectedReceipts) && weakLexicalTailSnippet(snippet, queryTokens) {
+		return false
+	}
+	return true
+}
+
+func contextPackScoreMargin(mode string) float64 {
+	switch normalizePackMode(mode) {
+	case "debug", "refactor", "test", "review":
+		return 0.60
+	default:
+		return 0.40
+	}
+}
+
+func receiptHasRetrievalEvidence(receipt ContextReceipt) bool {
+	if len(receipt.Evidence) > 0 || receipt.Confidence >= 0.65 {
+		return true
+	}
+	for _, reason := range receipt.Reasons {
+		lower := strings.ToLower(reason)
+		if strings.Contains(lower, "resolved local import graph") ||
+			strings.Contains(lower, "failure-related") ||
+			strings.Contains(lower, "source file ranked ahead") {
+			return true
+		}
+	}
+	return false
+}
+
+func selectedHasStrongContext(snippets []Snippet, receipts []ContextReceipt) bool {
+	if len(snippets) < 2 {
+		return false
+	}
+
+	evidenceCount := 0
+	hasSource := false
+	hasTest := false
+	for idx, snippet := range snippets {
+		if isTestPath(snippet.Path) {
+			hasTest = true
+		} else if !isDependencyPath(snippet.Path) {
+			hasSource = true
+		}
+		if idx < len(receipts) && receiptHasRetrievalEvidence(receipts[idx]) {
+			evidenceCount++
+		}
+	}
+	return evidenceCount >= 2 || (evidenceCount > 0 && hasSource && hasTest)
+}
+
+func weakLexicalTailSnippet(snippet Snippet, queryTokens []string) bool {
+	if !supportsSymbolReferences(snippet.Language) {
+		return false
+	}
+	if isTestPath(snippet.Path) || isDependencyPath(snippet.Path) {
+		return false
+	}
+	lowerTopic := strings.ToLower(snippet.Topic)
+	if isDocTopic(lowerTopic) && queryWantsDocs(queryTokens) {
+		return false
+	}
+	if isWorkflowTopic(lowerTopic) && queryWantsWorkflows(queryTokens) {
+		return false
+	}
+	if len(ExtractSymbols(snippet.Language, snippet.Path, snippet.Content)) > 0 {
+		return false
+	}
+	if len(ExtractSymbolReferences(snippet.Language, snippet.Path, snippet.Content)) > 0 {
+		return false
+	}
+	return true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func genericReceiptsForSnippets(db *sql.DB, snippets []Snippet, query string, mode string) []ContextReceipt {
 	receipts := make([]ContextReceipt, 0, len(snippets))
 	for idx, snippet := range snippets {
 		reasons := []string{"retrieved by hybrid FTS5/QND ranking"}
@@ -379,6 +538,12 @@ func genericReceiptsForSnippets(db *sql.DB, snippets []Snippet, mode string) []C
 		}
 		evidence := []string(nil)
 		confidence := 0.55
+		retrievalReasons, retrievalEvidence, retrievalConfidence := retrievalReceiptDetails(query, snippet)
+		if len(retrievalReasons) > 0 {
+			reasons = append(reasons, retrievalReasons...)
+			evidence = append(evidence, retrievalEvidence...)
+			confidence = maxFloat(confidence, retrievalConfidence)
+		}
 		importReasons, importEvidence := importReceiptDetails(db, snippet.Path)
 		if len(importReasons) > 0 {
 			reasons = append(reasons, importReasons...)
@@ -388,6 +553,112 @@ func genericReceiptsForSnippets(db *sql.DB, snippets []Snippet, mode string) []C
 		receipts = append(receipts, receiptForSnippet(idx+1, snippet, confidence, reasons, evidence))
 	}
 	return receipts
+}
+
+func retrievalReceiptDetails(query string, snippet Snippet) ([]string, []string, float64) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil, 0
+	}
+	plan := planRetrievalQuery(query)
+	if len(plan.FTSPaths) <= 1 {
+		return nil, nil, 0
+	}
+
+	snippetTokens := stringSet(searchTokens(snippet.Topic + " " + snippet.Path + " " + snippet.Content)...)
+	var reasons []string
+	var evidence []string
+	confidence := 0.55
+	for idx, path := range plan.FTSPaths {
+		if idx == 0 || len(path) == 0 {
+			continue
+		}
+		matched := matchedRetrievalPathTokens(path, snippetTokens)
+		if len(matched) < minRetrievalPathMatches(path) {
+			continue
+		}
+		label := retrievalPathReceiptLabel(query, idx, path, plan)
+		if label == "expanded identifier retrieval path" {
+			matched = nonPrimaryRetrievalTokens(matched, plan.FTSTokens)
+			if len(matched) < 2 {
+				continue
+			}
+		}
+		reasons = append(reasons, "matched "+label)
+		evidence = append(evidence, label+" terms: "+strings.Join(limitSearchTokens(matched, 8), ", "))
+		confidence = maxFloat(confidence, retrievalPathConfidence(label))
+	}
+	return uniqueStrings(reasons), uniqueStrings(evidence), confidence
+}
+
+func matchedRetrievalPathTokens(path []string, snippetTokens map[string]bool) []string {
+	var matched []string
+	for _, token := range path {
+		token = strings.ToLower(strings.TrimSpace(token))
+		if token == "" || !meaningfulCodeSearchToken(token) {
+			continue
+		}
+		if snippetTokens[token] {
+			matched = append(matched, token)
+		}
+	}
+	return uniqueStrings(matched)
+}
+
+func nonPrimaryRetrievalTokens(tokens []string, primary []string) []string {
+	primarySet := stringSet(primary...)
+	var filtered []string
+	for _, token := range tokens {
+		if primarySet[token] {
+			continue
+		}
+		filtered = append(filtered, token)
+	}
+	return uniqueStrings(filtered)
+}
+
+func minRetrievalPathMatches(path []string) int {
+	meaningful := 0
+	for _, token := range path {
+		if meaningfulCodeSearchToken(token) {
+			meaningful++
+		}
+	}
+	if meaningful <= 1 {
+		return meaningful
+	}
+	return 2
+}
+
+func retrievalPathReceiptLabel(query string, idx int, path []string, plan retrievalQueryPlan) string {
+	if looksLikeCodeContext(query) && idx == 1 {
+		return "compact code-context retrieval path"
+	}
+	if retrievalPathHasExpandedIdentifierTokens(path, plan.FTSTokens) {
+		return "expanded identifier retrieval path"
+	}
+	return "expanded query retrieval path"
+}
+
+func retrievalPathHasExpandedIdentifierTokens(path []string, primary []string) bool {
+	primarySet := stringSet(primary...)
+	for _, token := range path {
+		token = strings.ToLower(strings.TrimSpace(token))
+		if token == "" || primarySet[token] || !meaningfulCodeSearchToken(token) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func retrievalPathConfidence(label string) float64 {
+	switch label {
+	case "expanded identifier retrieval path", "compact code-context retrieval path":
+		return 0.62
+	default:
+		return 0.58
+	}
 }
 
 type graphContextCandidate struct {
@@ -406,7 +677,7 @@ func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int) S
 	}
 
 	graphBudget := graphContextBudget(result.Mode, limit)
-	candidates := graphContextCandidates(db, result.Snippets, graphBudget)
+	candidates := graphContextCandidates(db, result.Snippets, graphBudget, result.Mode)
 	if len(candidates) == 0 {
 		if len(result.Snippets) > limit {
 			result.Snippets = result.Snippets[:limit]
@@ -417,23 +688,53 @@ func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int) S
 
 	receiptByKey := map[string]ContextReceipt{}
 	directSnippetByKey := map[string]Snippet{}
+	directSnippetByID := map[int]Snippet{}
 	for _, receipt := range result.Receipts {
 		key := receipt.Path + ":" + fmt.Sprint(receipt.StartLine) + ":" + fmt.Sprint(receipt.EndLine)
 		receiptByKey[key] = receipt
 	}
 	for _, snippet := range result.Snippets {
 		directSnippetByKey[snippetDedupeKey(snippet)] = snippet
+		if snippet.ID != 0 {
+			directSnippetByID[snippet.ID] = snippet
+		}
 	}
 
 	var merged []Snippet
 	var receipts []ContextReceipt
 	seen := map[string]bool{}
+	mergedIndexByKey := map[string]int{}
+	mergedIndexByID := map[int]int{}
+	mergeReceipt := func(idx int, receipt ContextReceipt) {
+		if idx < 0 || idx >= len(receipts) || receipt.Path == "" {
+			return
+		}
+		current := &receipts[idx]
+		if current.Path == "" {
+			receipt.Rank = idx + 1
+			*current = receipt
+			return
+		}
+		current.Reasons = uniqueStrings(append(current.Reasons, receipt.Reasons...))
+		current.Evidence = uniqueStrings(append(current.Evidence, receipt.Evidence...))
+		current.Confidence = maxFloat(current.Confidence, receipt.Confidence)
+	}
 	addSnippet := func(snippet Snippet, receipt ContextReceipt) bool {
 		if len(merged) >= limit {
 			return false
 		}
+		if snippet.ID != 0 {
+			if existing, ok := mergedIndexByID[snippet.ID]; ok {
+				mergeReceipt(existing, receipt)
+				return false
+			}
+			if directSnippet, ok := directSnippetByID[snippet.ID]; ok {
+				snippet = directSnippet
+			}
+		}
 		key := snippetDedupeKey(snippet)
-		if seen[key] {
+		if existing, ok := mergedIndexByKey[key]; ok {
+			mergeReceipt(existing, receipt)
 			return false
 		}
 		if directSnippet, ok := directSnippetByKey[key]; ok {
@@ -457,6 +758,10 @@ func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int) S
 		}
 		receipt.Rank = len(merged)
 		receipts = append(receipts, receipt)
+		mergedIndexByKey[key] = len(merged) - 1
+		if snippet.ID != 0 {
+			mergedIndexByID[snippet.ID] = len(merged) - 1
+		}
 		return true
 	}
 
@@ -495,7 +800,7 @@ func graphContextBudget(mode string, limit int) int {
 	}
 }
 
-func graphContextCandidates(db *sql.DB, seeds []Snippet, budget int) []graphContextCandidate {
+func graphContextCandidates(db *sql.DB, seeds []Snippet, budget int, mode string) []graphContextCandidate {
 	if budget <= 0 {
 		return nil
 	}
@@ -507,9 +812,21 @@ func graphContextCandidates(db *sql.DB, seeds []Snippet, budget int) []graphCont
 		}
 		candidates = append(candidates, outgoingGraphContextCandidates(db, seed)...)
 		candidates = append(candidates, incomingGraphContextCandidates(db, seed)...)
+		if includeSymbolReferenceGraph(mode) {
+			candidates = append(candidates, symbolGraphContextCandidates(db, seed)...)
+		}
 	}
 	sortGraphContextCandidates(candidates)
 	return dedupeGraphContextCandidates(candidates)
+}
+
+func includeSymbolReferenceGraph(mode string) bool {
+	switch normalizePackMode(mode) {
+	case "debug", "refactor", "test", "review":
+		return true
+	default:
+		return false
+	}
 }
 
 func outgoingGraphContextCandidates(db *sql.DB, seed Snippet) []graphContextCandidate {
@@ -522,16 +839,22 @@ func outgoingGraphContextCandidates(db *sql.DB, seed Snippet) []graphContextCand
 		if ref.TargetPath == "" || ref.TargetPath == seed.Path {
 			continue
 		}
-		snippet, ok, err := indexedSnippetAtLine(db, ref.TargetPath, 0, 0)
+		snippet, matchedSymbol, ok, err := importedTargetSnippet(db, ref)
 		if err != nil || !ok {
 			continue
 		}
 		snippet.Score = minFloat(snippet.Score, -0.65)
 		evidence := fmt.Sprintf("%s imports %s -> %s", seed.Path, ref.ImportPath, ref.TargetPath)
-		receipt := receiptForSnippet(0, snippet, 0.68, []string{
+		reasons := []string{
 			"included through resolved local import graph",
 			"targeted by a retrieved snippet's local import",
-		}, []string{evidence})
+		}
+		evidenceItems := []string{evidence}
+		if matchedSymbol != "" {
+			reasons = append(reasons, "focused on imported symbol definition")
+			evidenceItems = append(evidenceItems, "imported symbol "+matchedSymbol)
+		}
+		receipt := receiptForSnippet(0, snippet, 0.68, reasons, evidenceItems)
 		candidates = append(candidates, graphContextCandidate{
 			snippet:  snippet,
 			receipt:  receipt,
@@ -539,6 +862,117 @@ func outgoingGraphContextCandidates(db *sql.DB, seed Snippet) []graphContextCand
 		})
 	}
 	return candidates
+}
+
+func importedTargetSnippet(db *sql.DB, ref ImportReference) (Snippet, string, bool, error) {
+	for _, name := range importedSymbolNames(ref) {
+		symbols, err := symbolsForPathAndName(db, ref.TargetPath, name)
+		if err != nil {
+			return Snippet{}, "", false, err
+		}
+		for _, symbol := range symbols {
+			snippet, ok, err := indexedSnippetAtLine(db, symbol.Path, symbol.Line, 18)
+			if err != nil || !ok {
+				return Snippet{}, "", false, err
+			}
+			return snippet, symbol.Name, true, nil
+		}
+	}
+	snippet, ok, err := indexedSnippetAtLine(db, ref.TargetPath, 0, 0)
+	return snippet, "", ok, err
+}
+
+func importedSymbolNames(ref ImportReference) []string {
+	var names []string
+	add := func(value string) {
+		for _, token := range identifierFields(value) {
+			if token != "" && !protectedIdentifier(token) {
+				names = append(names, token)
+			}
+		}
+	}
+	add(ref.Alias)
+
+	context := stripLineComment(ref.Language, ref.Context)
+	switch NormalizeLanguage(ref.Language) {
+	case "py":
+		if match := pythonFromPattern.FindStringSubmatch(context); len(match) > 2 {
+			for _, part := range strings.Split(match[2], ",") {
+				name, alias := splitAlias(part, " as ")
+				add(name)
+				add(alias)
+			}
+		}
+	case "js", "jsx", "ts", "tsx", "mjs", "cjs":
+		addJSImportNames(&names, context)
+	}
+	if len(names) == 0 && ref.Alias != "" {
+		add(ref.Alias)
+	}
+	return uniqueStrings(names)
+}
+
+func addJSImportNames(names *[]string, context string) {
+	add := func(value string) {
+		for _, token := range identifierFields(value) {
+			if token != "" && !protectedIdentifier(token) {
+				*names = append(*names, token)
+			}
+		}
+	}
+	if start := strings.Index(context, "{"); start >= 0 {
+		if end := strings.Index(context[start+1:], "}"); end >= 0 {
+			for _, part := range strings.Split(context[start+1:start+1+end], ",") {
+				name, alias := splitAlias(part, " as ")
+				add(name)
+				add(alias)
+			}
+		}
+	}
+	if match := jsImportPattern.FindStringSubmatch(strings.TrimSpace(context)); len(match) > 2 {
+		prefix := strings.TrimSpace(match[1])
+		if idx := strings.Index(prefix, "{"); idx >= 0 {
+			prefix = strings.TrimSpace(prefix[:idx])
+		}
+		prefix = strings.Trim(prefix, ",")
+		add(prefix)
+	}
+}
+
+func symbolsForPathAndName(db *sql.DB, path, name string) ([]Symbol, error) {
+	path = normalizeIndexedPath(path)
+	name = strings.TrimSpace(name)
+	if path == "" || name == "" {
+		return nil, nil
+	}
+	rows, err := db.Query(`
+		SELECT id, name, kind, signature, language, path, line
+		FROM symbols
+		WHERE path = ? AND lower(name) = lower(?)
+		ORDER BY
+			CASE kind
+				WHEN 'class' THEN 0
+				WHEN 'type' THEN 0
+				WHEN 'function' THEN 1
+				WHEN 'method' THEN 2
+				ELSE 3
+			END,
+			line ASC
+		LIMIT 5`, path, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var symbols []Symbol
+	for rows.Next() {
+		symbol, err := scanSymbol(rows)
+		if err != nil {
+			return nil, err
+		}
+		symbols = append(symbols, symbol)
+	}
+	return symbols, rows.Err()
 }
 
 func incomingGraphContextCandidates(db *sql.DB, seed Snippet) []graphContextCandidate {
@@ -570,10 +1004,283 @@ func incomingGraphContextCandidates(db *sql.DB, seed Snippet) []graphContextCand
 	return candidates
 }
 
+func symbolGraphContextCandidates(db *sql.DB, seed Snippet) []graphContextCandidate {
+	var candidates []graphContextCandidate
+	candidates = append(candidates, symbolReferenceCandidatesForDefinitions(db, seed, maxSymbolGraphCandidatesPerSeed)...)
+	if len(candidates) < maxSymbolGraphCandidatesPerSeed {
+		candidates = append(candidates, definitionCandidatesForReferences(db, seed, maxSymbolGraphCandidatesPerSeed-len(candidates))...)
+	}
+	return candidates
+}
+
+func symbolReferenceCandidatesForDefinitions(db *sql.DB, seed Snippet, limit int) []graphContextCandidate {
+	if limit <= 0 {
+		return nil
+	}
+
+	var candidates []graphContextCandidate
+	for _, symbol := range limitSymbols(symbolsInSnippet(db, seed), maxSymbolGraphNamesPerSeed) {
+		refs, err := symbolReferencesForName(db, symbol.Name, symbol.Language, maxSymbolGraphRefsPerName)
+		if err != nil {
+			continue
+		}
+		for _, ref := range refs {
+			if len(candidates) >= limit {
+				return candidates
+			}
+			if ref.Path == "" || ref.Path == seed.Path {
+				continue
+			}
+			snippet, ok, err := indexedSnippetAtLine(db, ref.Path, ref.Line, 24)
+			if err != nil || !ok {
+				continue
+			}
+			snippet.Score = minFloat(snippet.Score, -0.66)
+			evidence := fmt.Sprintf("%s:%d references %s defined in %s", ref.Path, ref.Line, symbol.Name, seed.Path)
+			receipt := receiptForSnippet(0, snippet, 0.70, []string{
+				"included through local symbol reference graph",
+				"references a symbol defined by a retrieved snippet",
+			}, []string{evidence})
+			candidates = append(candidates, graphContextCandidate{
+				snippet:  snippet,
+				receipt:  receipt,
+				priority: graphContextPriorityForRelation(snippet, "symbol_reference"),
+			})
+		}
+	}
+	return candidates
+}
+
+func definitionCandidatesForReferences(db *sql.DB, seed Snippet, limit int) []graphContextCandidate {
+	if limit <= 0 {
+		return nil
+	}
+
+	var candidates []graphContextCandidate
+	for _, ref := range limitSymbolReferences(symbolReferencesInSnippet(db, seed), maxSymbolGraphNamesPerSeed) {
+		definitions, err := symbolsForName(db, ref.Name, ref.Language, maxSymbolGraphRefsPerName)
+		if err != nil {
+			continue
+		}
+		for _, symbol := range definitions {
+			if len(candidates) >= limit {
+				return candidates
+			}
+			if symbol.Path == "" || symbol.Path == seed.Path {
+				continue
+			}
+			snippet, ok, err := indexedSnippetAtLine(db, symbol.Path, symbol.Line, 18)
+			if err != nil || !ok {
+				continue
+			}
+			snippet.Score = minFloat(snippet.Score, -0.69)
+			evidence := fmt.Sprintf("%s:%d references %s -> %s:%d", seed.Path, ref.Line, ref.Name, symbol.Path, symbol.Line)
+			receipt := receiptForSnippet(0, snippet, 0.72, []string{
+				"included through local symbol reference graph",
+				"defines a symbol referenced by a retrieved snippet",
+			}, []string{evidence})
+			candidates = append(candidates, graphContextCandidate{
+				snippet:  snippet,
+				receipt:  receipt,
+				priority: graphContextPriorityForRelation(snippet, "symbol_definition"),
+			})
+		}
+	}
+	return candidates
+}
+
+func symbolsInSnippet(db *sql.DB, snippet Snippet) []Symbol {
+	if db != nil && snippet.Path != "" {
+		symbols, err := symbolsForPathRange(db, snippet.Path, snippet.StartLine, snippet.EndLine, 32)
+		if err == nil && len(symbols) > 0 {
+			return symbols
+		}
+	}
+	return ExtractSymbols(snippet.Language, snippet.Path, snippet.Content)
+}
+
+func symbolReferencesInSnippet(db *sql.DB, snippet Snippet) []SymbolReference {
+	if db != nil && snippet.Path != "" {
+		refs, err := symbolReferencesForPathRange(db, snippet.Path, snippet.StartLine, snippet.EndLine, 32)
+		if err == nil && len(refs) > 0 {
+			return refs
+		}
+	}
+	return ExtractSymbolReferences(snippet.Language, snippet.Path, snippet.Content)
+}
+
+func symbolsForPathRange(db *sql.DB, path string, startLine int, endLine int, limit int) ([]Symbol, error) {
+	path = normalizeIndexedPath(path)
+	limit = normalizeResultLimit(limit, 32)
+	if path == "" {
+		return nil, nil
+	}
+
+	query := `
+		SELECT id, name, kind, signature, language, path, line
+		FROM symbols
+		WHERE path = ?`
+	args := []any{path}
+	if startLine > 0 && endLine >= startLine {
+		query += " AND line >= ? AND line <= ?"
+		args = append(args, startLine, endLine)
+	}
+	query += " ORDER BY line ASC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var symbols []Symbol
+	for rows.Next() {
+		symbol, err := scanSymbol(rows)
+		if err != nil {
+			return nil, err
+		}
+		symbols = append(symbols, symbol)
+	}
+	return symbols, rows.Err()
+}
+
+func symbolReferencesForPathRange(db *sql.DB, path string, startLine int, endLine int, limit int) ([]SymbolReference, error) {
+	path = normalizeIndexedPath(path)
+	limit = normalizeResultLimit(limit, 32)
+	if path == "" {
+		return nil, nil
+	}
+
+	query := `
+		SELECT id, name, language, path, line, context
+		FROM symbol_refs
+		WHERE path = ?`
+	args := []any{path}
+	if startLine > 0 && endLine >= startLine {
+		query += " AND line >= ? AND line <= ?"
+		args = append(args, startLine, endLine)
+	}
+	query += " ORDER BY line ASC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var refs []SymbolReference
+	for rows.Next() {
+		ref, err := scanSymbolReference(rows)
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+func symbolReferencesForName(db *sql.DB, name string, language string, limit int) ([]SymbolReference, error) {
+	name = strings.TrimSpace(name)
+	language = NormalizeLanguage(language)
+	limit = normalizeResultLimit(limit, maxSymbolGraphRefsPerName)
+	if name == "" {
+		return nil, nil
+	}
+
+	rows, err := db.Query(`
+		SELECT id, name, language, path, line, context
+		FROM symbol_refs
+		WHERE name = ? COLLATE NOCASE
+		ORDER BY
+			CASE WHEN language = ? THEN 0 ELSE 1 END,
+			path ASC,
+			line ASC
+		LIMIT ?`, name, language, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var refs []SymbolReference
+	for rows.Next() {
+		ref, err := scanSymbolReference(rows)
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+func symbolsForName(db *sql.DB, name string, language string, limit int) ([]Symbol, error) {
+	name = strings.TrimSpace(name)
+	language = NormalizeLanguage(language)
+	limit = normalizeResultLimit(limit, maxSymbolGraphRefsPerName)
+	if name == "" {
+		return nil, nil
+	}
+
+	rows, err := db.Query(`
+		SELECT id, name, kind, signature, language, path, line
+		FROM symbols
+		WHERE name = ? COLLATE NOCASE
+		ORDER BY
+			CASE WHEN language = ? THEN 0 ELSE 1 END,
+			CASE kind
+				WHEN 'class' THEN 0
+				WHEN 'type' THEN 0
+				WHEN 'function' THEN 1
+				WHEN 'method' THEN 2
+				ELSE 3
+			END,
+			path ASC,
+			line ASC
+		LIMIT ?`, name, language, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var symbols []Symbol
+	for rows.Next() {
+		symbol, err := scanSymbol(rows)
+		if err != nil {
+			return nil, err
+		}
+		symbols = append(symbols, symbol)
+	}
+	return symbols, rows.Err()
+}
+
+func limitSymbols(symbols []Symbol, limit int) []Symbol {
+	if limit <= 0 || len(symbols) <= limit {
+		return symbols
+	}
+	return symbols[:limit]
+}
+
+func limitSymbolReferences(refs []SymbolReference, limit int) []SymbolReference {
+	if limit <= 0 || len(refs) <= limit {
+		return refs
+	}
+	return refs[:limit]
+}
+
 func graphContextPriority(snippet Snippet, direction string) int {
+	return graphContextPriorityForRelation(snippet, direction)
+}
+
+func graphContextPriorityForRelation(snippet Snippet, relation string) int {
 	score := 50
-	if direction == "incoming" {
+	switch relation {
+	case "incoming":
 		score += 15
+	case "symbol_reference":
+		score += 18
+	case "symbol_definition":
+		score += 22
 	}
 	if isTestPath(snippet.Path) {
 		score += 20
@@ -594,16 +1301,21 @@ func sortGraphContextCandidates(candidates []graphContextCandidate) {
 }
 
 func dedupeGraphContextCandidates(candidates []graphContextCandidate) []graphContextCandidate {
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	result := make([]graphContextCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		key := snippetDedupeKey(candidate.snippet)
-		if seen[key] {
+		if existing, ok := seen[key]; ok {
+			result[existing].priority = max(result[existing].priority, candidate.priority)
+			result[existing].receipt.Reasons = uniqueStrings(append(result[existing].receipt.Reasons, candidate.receipt.Reasons...))
+			result[existing].receipt.Evidence = uniqueStrings(append(result[existing].receipt.Evidence, candidate.receipt.Evidence...))
+			result[existing].receipt.Confidence = maxFloat(result[existing].receipt.Confidence, candidate.receipt.Confidence)
 			continue
 		}
-		seen[key] = true
+		seen[key] = len(result)
 		result = append(result, candidate)
 	}
+	sortGraphContextCandidates(result)
 	return result
 }
 
@@ -611,16 +1323,11 @@ func alignReceiptsWithSnippets(snippets []Snippet, receipts []ContextReceipt) []
 	if len(snippets) == 0 {
 		return nil
 	}
-	byKey := map[string]ContextReceipt{}
-	for _, receipt := range receipts {
-		key := receipt.Path + ":" + fmt.Sprint(receipt.StartLine) + ":" + fmt.Sprint(receipt.EndLine)
-		byKey[key] = receipt
-	}
+	byKey := receiptsBySnippetKey(receipts)
 
 	aligned := make([]ContextReceipt, 0, len(snippets))
 	for idx, snippet := range snippets {
-		key := snippet.Path + ":" + fmt.Sprint(snippet.StartLine) + ":" + fmt.Sprint(snippet.EndLine)
-		receipt, ok := byKey[key]
+		receipt, ok := byKey[snippetReceiptKey(snippet)]
 		if !ok {
 			receipt = receiptForSnippet(idx+1, snippet, 0.45, []string{"included in final context pack"}, nil)
 		}
@@ -628,6 +1335,18 @@ func alignReceiptsWithSnippets(snippets []Snippet, receipts []ContextReceipt) []
 		aligned = append(aligned, receipt)
 	}
 	return aligned
+}
+
+func receiptsBySnippetKey(receipts []ContextReceipt) map[string]ContextReceipt {
+	byKey := make(map[string]ContextReceipt, len(receipts))
+	for _, receipt := range receipts {
+		byKey[receipt.Path+":"+fmt.Sprint(receipt.StartLine)+":"+fmt.Sprint(receipt.EndLine)] = receipt
+	}
+	return byKey
+}
+
+func snippetReceiptKey(snippet Snippet) string {
+	return snippet.Path + ":" + fmt.Sprint(snippet.StartLine) + ":" + fmt.Sprint(snippet.EndLine)
 }
 
 func receiptForSnippet(rank int, snippet Snippet, confidence float64, reasons []string, evidence []string) ContextReceipt {

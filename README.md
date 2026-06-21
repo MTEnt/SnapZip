@@ -29,10 +29,12 @@ It combines SQLite FTS5 search, path-aware relevance, compression-distance re-ra
 ## Key Features
 
 *   **Local code search**: SQLite FTS5 keyword search with path-aware lexical weighting and Query-Normalized Distance (QND) compression re-ranking.
-*   **Language-aware indexing**: Index popular source formats by default, or pass explicit extensions such as `html,css,rb,py,go,rs,zig`.
+*   **Language-aware indexing**: Index popular source formats by default, or pass explicit extensions such as `html,css,rb,py,go,rs,zig`. Go uses parser-backed top-level declaration chunks; Python, Ruby, and common brace languages such as JavaScript, TypeScript, Java, C#, C/C++, Rust, PHP, Swift, Kotlin, and Scala use structural top-level chunks when large files need splitting.
 *   **Repo maps, symbols, references, imports, and dependency graphs**: Stores file paths, line ranges, content hashes, indexed functions/classes/types, lightweight call/reference sites, and import/dependency references. Local imports are resolved to indexed target files when SnapZip can map them safely.
 *   **Task-specific context packs**: Build bounded packs for debug, refactor, test, docs, and review workflows.
-*   **Context quality scoring**: Every pack reports receipt coverage, evidence density, definition/reference/test coverage, uniqueness, budget use, and warnings.
+*   **Context quality scoring**: Every pack reports receipt coverage, structural graph receipt coverage, evidence density, definition/reference/test coverage, uniqueness, budget use, and warnings.
+*   **Multi-path retrieval planning**: Search uses primary terms, expanded identifiers, code-context terms, metadata, and graph signals as separate retrieval paths before rank fusion.
+*   **Structural reranking**: Direct symbol/task searches blend lexical/QND ranking with indexed symbols, references, and resolved import evidence so code-shaped queries can favor definitions and callers over keyword-heavy noise.
 *   **Diff-aware PR context**: Summarizes changed files, likely affected tests, suggested validation commands, and review-mode context before a branch is finalized.
 *   **Validation planning**: Finds likely affected tests, suggests validation commands, and can run a supplied command with repair context on failure.
 *   **Project profiles**: Optional `.snapzip/config.toml` lets teams share validation commands without shipping any local memory.
@@ -64,7 +66,7 @@ SnapZip is primarily a retrieval and local-memory tool. It ranks indexed snippet
 *   indexed definitions, lightweight call/reference-site matches, and resolved local import/dependency edges
 *   repair-specific stack, symbol, identifier, and file/line signals when using failure workflows
 
-Every context pack includes context receipts when budget allows. Receipts explain why each snippet was included, such as a matched stack frame, matched symbol, resolved local import edge, related test, or fallback retrieval match. When the snippet limit allows it, packs add resolved local import neighbors so agents see the source/test/dependency files that move together. Packs also include a context quality score with measurable coverage and warning signals. This makes the context auditable for humans and machine-readable for agents.
+Every context pack includes context receipts when budget allows. Receipts explain why each snippet was included, such as a matched stack frame, matched symbol, matched expanded-identifier retrieval path, resolved local import edge, related test, or fallback retrieval match. Search builds several deterministic retrieval paths from the prompt: primary terms, expanded identifiers such as camelCase/snake_case pieces, compact code-context tokens, indexed metadata, and graph edges. Direct symbol/task searches also use indexed symbols, references, and imports as a bounded structural reranking signal before pack assembly. Multi-line completion context stays on the standard lexical/QND path. When large supported source files are indexed, SnapZip uses structural spans before falling back to boundary heuristics, so snippets are less likely to merge unrelated top-level declarations. When the snippet limit allows it, packs add resolved local import neighbors so agents see the source/test/dependency files that move together. Task-mode packs (`debug`, `refactor`, `test`, and `review`) also use local symbol-reference edges to attach callers or definitions when a retrieved snippet references project code. Packs include a context quality score with measurable coverage and warning signals. This makes the context auditable for humans and machine-readable for agents.
 
 The optional optimizer is conservative. It uses local code context and Zstandard dictionary scoring, but only mutates files when a local syntax checker is available for that language. Invalid proposals are rejected, and unsupported languages return the seed draft unchanged.
 
@@ -142,6 +144,7 @@ Use `index` for repeat indexing and incremental workflows:
 snapzip index --db-dir . --langs all --crawl .
 snapzip index --db-dir . --langs all --crawl . --changed
 snapzip index --db-dir . --langs all --crawl . --since HEAD~1
+snapzip index --db-dir . --langs go --crawl . --max-content-bytes 32768
 ```
 
 `--langs` accepts presets (`popular`, `web`, `frontend`, `backend`, `mobile`, `systems`, `config`), extensions (`html,css,rb,py,js,rs,zig`), and language names (`ruby,python,javascript,rust`).
@@ -154,7 +157,7 @@ Use `--reset` to remove an existing `memory.db` before indexing a fresh project:
 snapzip init-db --db-dir . --langs all --crawl /path/to/your/codebase --reset
 ```
 
-The indexer skips common dependency/build directories such as `.git`, `node_modules`, `vendor`, `dist`, `build`, `target`, `.venv`, and `__pycache__`. It also skips `memory.db`, binary-looking files, and files larger than 1 MiB by default. Larger accepted source files are split into bounded searchable chunks to keep search reranking responsive. Override the file cap with `--max-file-bytes`.
+The indexer skips common dependency/build directories such as `.git`, `node_modules`, `vendor`, `dist`, `build`, `target`, `.venv`, and `__pycache__`. It also skips `memory.db`, binary-looking files, and files larger than 1 MiB by default. Larger accepted source files are split into bounded searchable chunks to keep search reranking responsive. Override the file cap with `--max-file-bytes` and the snippet chunk cap with `--max-content-bytes`.
 
 Add `.snapzipignore` in a project root to exclude additional local-only files or directories before indexing:
 
@@ -183,7 +186,7 @@ Search templates using keyword matching, source-path relevance, and parallel com
 snapzip search --query "python lru cache" --limit 3
 ```
 
-Use `--json` when calling SnapZip from scripts or agents:
+Plain-text search output includes context receipts when receipts are available, so graph-expanded or structure-backed results explain why they were included. Use `--json` when an agent or script needs the structured receipt fields directly:
 
 ```bash
 snapzip search --query "python lru cache" --limit 3 --json
@@ -195,7 +198,7 @@ Build a bounded Markdown context pack with ranked snippets and relevant feedback
 snapzip pack --query "python lru cache" --limit 5 --budget 12000
 ```
 
-Every pack includes a context quality section. Treat it as an evidence checklist: it highlights receipt coverage, definition/reference/test coverage, evidence density, duplicate paths, dependency snippets, and truncation. Packs can also include resolved local import neighbors, such as tests importing the source file or source files importing a local module.
+Every pack includes a context quality section. Treat it as an evidence checklist: it highlights receipt coverage, structural graph receipt coverage, definition/reference/test coverage, evidence density, duplicate paths, dependency snippets, and truncation. Packs can also include resolved local import neighbors, such as tests importing the source file or source files importing a local module. In task modes, packs can also include local symbol-reference neighbors, such as a test that calls a retrieved function or the source definition called by a retrieved test.
 
 Use a mode when the task has a clear shape:
 
@@ -225,7 +228,7 @@ snapzip graph --db-dir . --path app/cache.py --limit 10
 snapzip related --db-dir . --path core/database.go --limit 10
 ```
 
-Use these commands when an agent needs structural context before editing a file. `symbol-context` returns matching definitions plus indexed call/reference sites. `imports` returns matching module, package, dependency, and linked-asset references. `graph` shows both outgoing imports from a file and incoming indexed files that import it.
+Use these commands when an agent needs structural context before editing a file. `symbol-context` returns matching definitions plus indexed call/reference sites. `imports` returns matching module, package, dependency, and linked-asset references. `graph` shows outgoing/imported-by edges plus indexed symbols, in-file references, external callers, and external definitions referenced by the file.
 
 When an import resolves locally, `imports` shows the edge:
 
@@ -476,9 +479,74 @@ Run the context quality check:
 python3 benchmarks/run.py --suite context-quality --snapzip-bin ./snapzip
 ```
 
+This public-safe suite checks context quality metrics, verifies that task-mode packs include symbol-reference receipts for source/test caller-definition context, confirms `graph --json` exposes symbol caller/definition edges, confirms structural reranking prefers an indexed definition over keyword-heavy noise, gates multi-path retrieval and receipts for expanded identifiers, and gates Go AST-backed, Python structural, plus popular JavaScript/Ruby declaration chunking.
+
 Run the full 20-task algorithm suite:
 ```bash
 python3 benchmarks/run.py --suite algorithm-20 --snapzip-bin ./snapzip
+```
+
+Run the public RepoBench-R retrieval sample:
+```bash
+python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobench-sample-size 100 --json /tmp/snapzip-repobench-r.json
+```
+
+The same suite can be run through the CLI wrapper:
+
+```bash
+snapzip eval --suite repobench-r --snapzip-bin ./snapzip --repobench-sample-size 100 --json /tmp/snapzip-repobench-r.json
+```
+
+Current 100-sample `python_cff` / `test_hard` readout, seed `42`:
+
+- Jaccard: 10/100 acc@1, 32/100 acc@3, 48/100 acc@5, 0.2315 MRR@5, 0.292862 nDCG@5
+- BM25: 14/100 acc@1, 31/100 acc@3, 52/100 acc@5, 0.261167 MRR@5, 0.324596 nDCG@5
+- SnapZip: 17/100 acc@1, 36/100 acc@3, 59/100 acc@5, 0.298667 MRR@5, 0.369709 nDCG@5
+
+For release checks, add benchmark quality gates:
+```bash
+python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobench-sample-size 100 \
+  --min-repobench-snapzip-acc1 0.17 \
+  --min-repobench-snapzip-acc3 0.36 \
+  --min-repobench-snapzip-acc5 0.59 \
+  --min-repobench-snapzip-mrr5 0.298667 \
+  --min-repobench-snapzip-ndcg5 0.369709 \
+  --max-repobench-snapzip-duplicate-top5-records 0 \
+  --max-repobench-snapzip-duplicate-top5-slots 0 \
+  --min-repobench-snapzip-acc5-over-bm25 0.06 \
+  --min-repobench-snapzip-mrr5-over-bm25 0.03 \
+  --min-repobench-snapzip-ndcg5-over-bm25 0.04 \
+  --min-repobench-snapzip-acc5-over-jaccard 0.10
+```
+
+Run the public RepoBench v1.1 pipeline-context proxy:
+```bash
+python3 -m pip install "huggingface_hub>=0.23" "pyarrow>=15"
+python3 benchmarks/run.py --suite repobench-p --snapzip-bin ./snapzip --repobench-p-sample-size 100 --json /tmp/snapzip-repobench-p.json
+```
+
+Or through the CLI wrapper:
+
+```bash
+snapzip eval --suite repobench-p --snapzip-bin ./snapzip --repobench-p-sample-size 100 --json /tmp/snapzip-repobench-p.json
+```
+
+This suite uses the public RepoBench v1.1 Python `cross_file_first` split. It does not call a live model or report completion accuracy. It measures whether the retrieved top-5 context contains the gold cross-file snippet and covers next-line tokens that were absent from the raw in-file prompt.
+
+Current 100-sample first-shard readout, seed `42`:
+
+- Random: 84/100 gold hit@5, 0.506 MRR@5, 0.293 new-token coverage@5
+- Jaccard: 90/100 gold hit@5, 0.564333 MRR@5, 0.309667 new-token coverage@5
+- BM25: 89/100 gold hit@5, 0.569667 MRR@5, 0.300667 new-token coverage@5, 0.92 identifier hit@5
+- SnapZip: 32/100 gold hit@1, 75/100 gold hit@3, 89/100 gold hit@5, 0.544667 MRR@5, 0.307167 new-token coverage@5, 0.93 identifier hit@5
+
+Optional quality gates for this proxy:
+```bash
+python3 benchmarks/run.py --suite repobench-p --snapzip-bin ./snapzip --repobench-p-sample-size 100 \
+  --min-repobench-p-snapzip-gold-hit5 0.89 \
+  --min-repobench-p-snapzip-new-token-coverage5 0.307167 \
+  --min-repobench-p-snapzip-identifier-hit5 0.93 \
+  --min-repobench-p-snapzip-new-token-coverage5-over-bm25 0.006
 ```
 
 Run all benchmark suites and write a JSON report:

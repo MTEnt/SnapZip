@@ -34,6 +34,7 @@ func handleIndex() {
 	crawl := fs.String("crawl", ".", "Codebase directory to crawl and index")
 	reset := fs.Bool("reset", false, "Remove any existing memory.db before indexing")
 	maxFileBytes := fs.Int64("max-file-bytes", core.DefaultMaxIndexFileBytes, "Maximum individual source file size to index")
+	maxContentBytes := fs.Int("max-content-bytes", core.DefaultMaxKnowledgeContentBytes, "Maximum source bytes per indexed snippet")
 	changed := fs.Bool("changed", false, "Index files changed against HEAD")
 	since := fs.String("since", "", "Index files changed since a git ref")
 	watch := fs.Bool("watch", false, "Continuously re-run changed-file indexing")
@@ -56,7 +57,7 @@ func handleIndex() {
 	defer db.Close()
 
 	run := func() (int, error) {
-		return runIndexOnce(db, *crawl, *langs, *maxFileBytes, *changed, *since)
+		return runIndexOnce(db, *crawl, *langs, *maxFileBytes, *maxContentBytes, *changed, *since)
 	}
 
 	if !*watch {
@@ -88,7 +89,7 @@ func handleIndex() {
 	}
 }
 
-func runIndexOnce(db *sql.DB, crawl, langs string, maxFileBytes int64, changed bool, since string) (int, error) {
+func runIndexOnce(db *sql.DB, crawl, langs string, maxFileBytes int64, maxContentBytes int, changed bool, since string) (int, error) {
 	root, err := filepath.Abs(crawl)
 	if err != nil {
 		return 0, err
@@ -96,6 +97,7 @@ func runIndexOnce(db *sql.DB, crawl, langs string, maxFileBytes int64, changed b
 	filter := core.NewLanguageFilter(langs)
 	options := core.DefaultIndexOptions()
 	options.MaxFileBytes = maxFileBytes
+	options.MaxContentBytes = maxContentBytes
 
 	if changed || strings.TrimSpace(since) != "" {
 		files, err := gitChangedFiles(root, strings.TrimSpace(since))
@@ -1086,10 +1088,38 @@ Do not assume SnapZip memory exists on fresh installs; index first with ` + "`sn
 
 func handleEval() {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
-	suite := fs.String("suite", "smoke", "Benchmark suite: smoke, algorithm-20, hard-rbt, repair-retrieval, context-quality, all")
+	suite := fs.String("suite", "smoke", "Benchmark suite: smoke, algorithm-20, hard-rbt, repair-retrieval, context-quality, repobench-r, repobench-p, all")
 	snapzipBin := fs.String("snapzip-bin", "", "Path to built snapzip binary")
 	iterations := fs.Int("iterations", 100, "Optimizer iterations for benchmark harness")
 	jsonPath := fs.String("json", "", "Optional path to write JSON report")
+	keepWorkdir := fs.String("keep-workdir", "", "Optional directory to keep generated benchmark files")
+	repobenchData := fs.String("repobench-data", "", "Path to RepoBench-R data/python_cff.gz")
+	repobenchConfig := fs.String("repobench-config", "python_cff", "RepoBench-R config")
+	repobenchSplit := fs.String("repobench-split", "hard", "RepoBench-R split: easy or hard")
+	repobenchSampleSize := fs.Int("repobench-sample-size", 100, "RepoBench-R sample size")
+	repobenchSeed := fs.Int("repobench-seed", 42, "RepoBench-R sample seed")
+	repobenchPData := fs.String("repobench-p-data", "", "Path to a RepoBench v1.1 parquet file or split directory")
+	repobenchPLanguage := fs.String("repobench-p-language", "python", "RepoBench v1.1 language: python or java")
+	repobenchPSplit := fs.String("repobench-p-split", "cross_file_first", "RepoBench v1.1 split")
+	repobenchPSampleSize := fs.Int("repobench-p-sample-size", 100, "RepoBench v1.1 sample size")
+	repobenchPSeed := fs.Int("repobench-p-seed", 42, "RepoBench v1.1 sample seed")
+	repobenchPMaxShards := fs.Int("repobench-p-max-shards", 1, "Maximum RepoBench v1.1 parquet shards to load from Hugging Face; use 0 for all matching shards")
+	minRepobenchAcc1 := fs.String("min-repobench-snapzip-acc1", "", "Minimum SnapZip acc@1 for RepoBench-R")
+	minRepobenchAcc3 := fs.String("min-repobench-snapzip-acc3", "", "Minimum SnapZip acc@3 for RepoBench-R")
+	minRepobenchAcc5 := fs.String("min-repobench-snapzip-acc5", "", "Minimum SnapZip acc@5 for RepoBench-R")
+	minRepobenchMRR5 := fs.String("min-repobench-snapzip-mrr5", "", "Minimum SnapZip MRR@5 for RepoBench-R")
+	minRepobenchNDCG5 := fs.String("min-repobench-snapzip-ndcg5", "", "Minimum SnapZip nDCG@5 for RepoBench-R")
+	maxRepobenchDuplicateTop5Records := fs.String("max-repobench-snapzip-duplicate-top5-records", "", "Maximum records with duplicate SnapZip top-5 results for RepoBench-R")
+	maxRepobenchDuplicateTop5Slots := fs.String("max-repobench-snapzip-duplicate-top5-slots", "", "Maximum duplicate SnapZip top-5 result slots for RepoBench-R")
+	minRepobenchAcc5OverBM25 := fs.String("min-repobench-snapzip-acc5-over-bm25", "", "Minimum SnapZip acc@5 delta over BM25 for RepoBench-R")
+	minRepobenchMRR5OverBM25 := fs.String("min-repobench-snapzip-mrr5-over-bm25", "", "Minimum SnapZip MRR@5 delta over BM25 for RepoBench-R")
+	minRepobenchNDCG5OverBM25 := fs.String("min-repobench-snapzip-ndcg5-over-bm25", "", "Minimum SnapZip nDCG@5 delta over BM25 for RepoBench-R")
+	minRepobenchAcc5OverJaccard := fs.String("min-repobench-snapzip-acc5-over-jaccard", "", "Minimum SnapZip acc@5 delta over Jaccard for RepoBench-R")
+	minRepobenchPGoldHit5 := fs.String("min-repobench-p-snapzip-gold-hit5", "", "Minimum SnapZip gold hit@5 for RepoBench v1.1")
+	minRepobenchPNewTokenCoverage5 := fs.String("min-repobench-p-snapzip-new-token-coverage5", "", "Minimum SnapZip new-token coverage@5 for RepoBench v1.1")
+	minRepobenchPIdentifierHit5 := fs.String("min-repobench-p-snapzip-identifier-hit5", "", "Minimum SnapZip gold-identifier hit@5 for RepoBench v1.1")
+	minRepobenchPGoldHit5OverBM25 := fs.String("min-repobench-p-snapzip-gold-hit5-over-bm25", "", "Minimum SnapZip gold hit@5 delta over BM25 for RepoBench v1.1")
+	minRepobenchPNewTokenCoverage5OverBM25 := fs.String("min-repobench-p-snapzip-new-token-coverage5-over-bm25", "", "Minimum SnapZip new-token coverage@5 delta over BM25 for RepoBench v1.1")
 	_ = fs.Parse(os.Args[2:])
 
 	runPy := filepath.Join("benchmarks", "run.py")
@@ -1105,6 +1135,44 @@ func handleEval() {
 	if *jsonPath != "" {
 		args = append(args, "--json", *jsonPath)
 	}
+	if *keepWorkdir != "" {
+		args = append(args, "--keep-workdir", *keepWorkdir)
+	}
+	appendOptionalStringFlag := func(name, value string) {
+		if value != "" {
+			args = append(args, name, value)
+		}
+	}
+	appendIntFlag := func(name string, value int) {
+		args = append(args, name, fmt.Sprint(value))
+	}
+	appendOptionalStringFlag("--repobench-data", *repobenchData)
+	appendOptionalStringFlag("--repobench-config", *repobenchConfig)
+	appendOptionalStringFlag("--repobench-split", *repobenchSplit)
+	appendIntFlag("--repobench-sample-size", *repobenchSampleSize)
+	appendIntFlag("--repobench-seed", *repobenchSeed)
+	appendOptionalStringFlag("--repobench-p-data", *repobenchPData)
+	appendOptionalStringFlag("--repobench-p-language", *repobenchPLanguage)
+	appendOptionalStringFlag("--repobench-p-split", *repobenchPSplit)
+	appendIntFlag("--repobench-p-sample-size", *repobenchPSampleSize)
+	appendIntFlag("--repobench-p-seed", *repobenchPSeed)
+	appendIntFlag("--repobench-p-max-shards", *repobenchPMaxShards)
+	appendOptionalStringFlag("--min-repobench-snapzip-acc1", *minRepobenchAcc1)
+	appendOptionalStringFlag("--min-repobench-snapzip-acc3", *minRepobenchAcc3)
+	appendOptionalStringFlag("--min-repobench-snapzip-acc5", *minRepobenchAcc5)
+	appendOptionalStringFlag("--min-repobench-snapzip-mrr5", *minRepobenchMRR5)
+	appendOptionalStringFlag("--min-repobench-snapzip-ndcg5", *minRepobenchNDCG5)
+	appendOptionalStringFlag("--max-repobench-snapzip-duplicate-top5-records", *maxRepobenchDuplicateTop5Records)
+	appendOptionalStringFlag("--max-repobench-snapzip-duplicate-top5-slots", *maxRepobenchDuplicateTop5Slots)
+	appendOptionalStringFlag("--min-repobench-snapzip-acc5-over-bm25", *minRepobenchAcc5OverBM25)
+	appendOptionalStringFlag("--min-repobench-snapzip-mrr5-over-bm25", *minRepobenchMRR5OverBM25)
+	appendOptionalStringFlag("--min-repobench-snapzip-ndcg5-over-bm25", *minRepobenchNDCG5OverBM25)
+	appendOptionalStringFlag("--min-repobench-snapzip-acc5-over-jaccard", *minRepobenchAcc5OverJaccard)
+	appendOptionalStringFlag("--min-repobench-p-snapzip-gold-hit5", *minRepobenchPGoldHit5)
+	appendOptionalStringFlag("--min-repobench-p-snapzip-new-token-coverage5", *minRepobenchPNewTokenCoverage5)
+	appendOptionalStringFlag("--min-repobench-p-snapzip-identifier-hit5", *minRepobenchPIdentifierHit5)
+	appendOptionalStringFlag("--min-repobench-p-snapzip-gold-hit5-over-bm25", *minRepobenchPGoldHit5OverBM25)
+	appendOptionalStringFlag("--min-repobench-p-snapzip-new-token-coverage5-over-bm25", *minRepobenchPNewTokenCoverage5OverBM25)
 	cmd := exec.Command("python3", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

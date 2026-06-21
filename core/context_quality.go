@@ -25,6 +25,9 @@ type ContextQualityMetrics struct {
 	ReceiptCoverage        float64 `json:"receipt_coverage"`
 	EvidenceCount          int     `json:"evidence_count"`
 	EvidenceDensity        float64 `json:"evidence_density"`
+	GraphReceiptCount      int     `json:"graph_receipt_count"`
+	GraphReceiptCoverage   float64 `json:"graph_receipt_coverage"`
+	GraphEvidenceCount     int     `json:"graph_evidence_count"`
 	UniquePathCount        int     `json:"unique_path_count"`
 	UniquePathRatio        float64 `json:"unique_path_ratio"`
 	DuplicatePathCount     int     `json:"duplicate_path_count"`
@@ -102,9 +105,14 @@ func contextQualityMetrics(pack ContextPack) ContextQualityMetrics {
 
 	for _, receipt := range pack.Receipts {
 		metrics.EvidenceCount += len(receipt.Evidence)
+		if receiptHasStructuralGraphSignal(receipt) {
+			metrics.GraphReceiptCount++
+			metrics.GraphEvidenceCount += len(receipt.Evidence)
+		}
 	}
 	if metrics.SnippetCount > 0 {
 		metrics.EvidenceDensity = roundFloat(float64(metrics.EvidenceCount) / float64(metrics.SnippetCount))
+		metrics.GraphReceiptCoverage = roundFloat(cappedRatio(float64(metrics.GraphReceiptCount), float64(metrics.SnippetCount)))
 	}
 	if pack.BudgetBytes > 0 && pack.UsedBytes > 0 {
 		metrics.BudgetUtilization = roundFloat(cappedRatio(float64(pack.UsedBytes), float64(pack.BudgetBytes)))
@@ -140,6 +148,9 @@ func contextQualityNotes(pack ContextPack, metrics ContextQualityMetrics) ([]str
 		strengths = append(strengths, "receipts include direct evidence")
 	} else if pack.Mode == "debug" || pack.Mode == "review" {
 		warnings = append(warnings, pack.Mode+" context has sparse receipt evidence")
+	}
+	if metrics.GraphReceiptCount > 0 {
+		strengths = append(strengths, "receipts include structural graph evidence")
 	}
 	if metrics.DuplicatePathCount > 0 {
 		warnings = append(warnings, "multiple snippets came from the same path")
@@ -180,9 +191,10 @@ func renderContextQuality(builder *strings.Builder, quality ContextQuality) {
 	}
 	fmt.Fprintf(
 		builder,
-		"Metrics: receipts %.0f%%, evidence %.2f/snippet, unique paths %.0f%%, budget %.0f%%\n",
+		"Metrics: receipts %.0f%%, evidence %.2f/snippet, graph receipts %.0f%%, unique paths %.0f%%, budget %.0f%%\n",
 		quality.Metrics.ReceiptCoverage*100,
 		quality.Metrics.EvidenceDensity,
+		quality.Metrics.GraphReceiptCoverage*100,
 		quality.Metrics.UniquePathRatio*100,
 		quality.Metrics.BudgetUtilization*100,
 	)
@@ -206,6 +218,30 @@ func renderContextQuality(builder *strings.Builder, quality ContextQuality) {
 			fmt.Fprintf(builder, "- %s\n", warning)
 		}
 	}
+}
+
+func receiptHasStructuralGraphSignal(receipt ContextReceipt) bool {
+	for _, reason := range receipt.Reasons {
+		if textHasStructuralGraphSignal(reason) {
+			return true
+		}
+	}
+	for _, evidence := range receipt.Evidence {
+		if textHasStructuralGraphSignal(evidence) {
+			return true
+		}
+	}
+	return false
+}
+
+func textHasStructuralGraphSignal(value string) bool {
+	value = strings.ToLower(value)
+	return strings.Contains(value, "resolved local import graph") ||
+		strings.Contains(value, "local symbol reference graph") ||
+		strings.Contains(value, "resolved local import/dependency edges") ||
+		strings.Contains(value, "imports a retrieved snippet") ||
+		strings.Contains(value, "references a symbol defined") ||
+		strings.Contains(value, "defines a symbol referenced")
 }
 
 func contextQualityGrade(score float64) string {

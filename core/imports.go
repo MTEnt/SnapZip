@@ -26,10 +26,14 @@ type ImportContext struct {
 }
 
 type DependencyGraph struct {
-	Path       string            `json:"path"`
-	Language   string            `json:"language,omitempty"`
-	Imports    []ImportReference `json:"imports,omitempty"`
-	ImportedBy []ImportReference `json:"imported_by,omitempty"`
+	Path                 string            `json:"path"`
+	Language             string            `json:"language,omitempty"`
+	Imports              []ImportReference `json:"imports,omitempty"`
+	ImportedBy           []ImportReference `json:"imported_by,omitempty"`
+	Symbols              []Symbol          `json:"symbols,omitempty"`
+	References           []SymbolReference `json:"references,omitempty"`
+	ReferencedBy         []SymbolReference `json:"referenced_by,omitempty"`
+	ReferenceDefinitions []Symbol          `json:"reference_definitions,omitempty"`
 }
 
 type indexedImportFile struct {
@@ -79,6 +83,9 @@ func ReplaceImportsForFile(db *sql.DB, language, path string, content []byte) er
 	if _, err := tx.Exec("DELETE FROM import_refs WHERE path = ?", path); err != nil {
 		return err
 	}
+	if _, err := tx.Exec("DELETE FROM import_refs_fts WHERE path = ?", path); err != nil {
+		return err
+	}
 	for _, ref := range refs {
 		_, err := tx.Exec(`
 			INSERT INTO import_refs (import_path, alias, language, path, target_path, line, context)
@@ -100,6 +107,29 @@ func ReplaceImportsForFile(db *sql.DB, language, path string, content []byte) er
 		if err != nil {
 			return err
 		}
+		var rowID int64
+		if err := tx.QueryRow(`
+			SELECT id FROM import_refs
+			WHERE path = ? AND import_path = ? AND line = ?`,
+			ref.Path,
+			ref.ImportPath,
+			ref.Line,
+		).Scan(&rowID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO import_refs_fts(rowid, import_path, alias, language, path, target_path, context)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			rowID,
+			ref.ImportPath,
+			ref.Alias,
+			ref.Language,
+			ref.Path,
+			ref.TargetPath,
+			ref.Context,
+		); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -108,6 +138,11 @@ func ExtractImports(language, path, content string) []ImportReference {
 	language = NormalizeLanguage(language)
 	if !supportsImportReferences(language) {
 		return nil
+	}
+	if language == "go" {
+		if refs, ok := extractGoImportsAST(path, content); ok {
+			return refs
+		}
 	}
 
 	seen := map[string]bool{}
@@ -172,27 +207,69 @@ func ExtractImports(language, path, content string) []ImportReference {
 func SearchImports(db *sql.DB, query string, limit int) ([]ImportReference, error) {
 	limit = normalizeResultLimit(limit, 20)
 	tokens := searchTokens(query)
-	rows, err := db.Query(`
-		SELECT id, import_path, alias, language, path, target_path, line, context
-		FROM import_refs
-		ORDER BY path ASC, line ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var matches []ImportReference
-	for rows.Next() {
-		ref, err := scanImportReference(rows)
+	seen := map[int]bool{}
+
+	if ftsQuery := metadataFTSQuery(tokens); ftsQuery != "" {
+		rows, err := db.Query(`
+			SELECT r.id, r.import_path, r.alias, r.language, r.path, r.target_path, r.line, r.context
+			FROM import_refs r
+			JOIN import_refs_fts f ON r.id = f.rowid
+			WHERE import_refs_fts MATCH ?
+			ORDER BY bm25(import_refs_fts, 7.0, 4.0, 1.0, 2.0, 5.0, 3.0)
+			LIMIT ?`, ftsQuery, metadataFTSCandidateLimit(limit))
 		if err != nil {
 			return nil, err
 		}
-		if importReferenceMatches(ref, tokens) {
-			matches = append(matches, ref)
+		for rows.Next() {
+			ref, err := scanImportReference(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			seen[ref.ID] = true
+			if importReferenceMatches(ref, tokens) {
+				matches = append(matches, ref)
+			}
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+
+	if len(matches) < limit {
+		sqlText := `
+			SELECT id, import_path, alias, language, path, target_path, line, context
+			FROM import_refs`
+		args := []any(nil)
+		if where, whereArgs := metadataSearchWhere(tokens, "import_path", "alias", "language", "path", "target_path", "context"); where != "" {
+			sqlText += " WHERE " + where
+			args = append(args, whereArgs...)
+		}
+		sqlText += " ORDER BY path ASC, line ASC"
+		rows, err := db.Query(sqlText, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			ref, err := scanImportReference(rows)
+			if err != nil {
+				return nil, err
+			}
+			if seen[ref.ID] {
+				continue
+			}
+			if importReferenceMatches(ref, tokens) {
+				matches = append(matches, ref)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 
 	sort.SliceStable(matches, func(i, j int) bool {
@@ -236,13 +313,93 @@ func BuildDependencyGraph(db *sql.DB, path string, limit int) (DependencyGraph, 
 	if err != nil {
 		return DependencyGraph{}, err
 	}
+	symbols, err := symbolsForPathRange(db, path, 0, 0, limit)
+	if err != nil {
+		return DependencyGraph{}, err
+	}
+	refs, err := symbolReferencesForPathRange(db, path, 0, 0, limit)
+	if err != nil {
+		return DependencyGraph{}, err
+	}
+	referencedBy, err := symbolReferencesTargetingSymbols(db, symbols, path, limit)
+	if err != nil {
+		return DependencyGraph{}, err
+	}
+	referenceDefinitions, err := symbolDefinitionsForReferences(db, refs, path, limit)
+	if err != nil {
+		return DependencyGraph{}, err
+	}
 
 	return DependencyGraph{
-		Path:       path,
-		Language:   language,
-		Imports:    limitImportReferences(outgoing, limit),
-		ImportedBy: limitImportReferences(incoming, limit),
+		Path:                 path,
+		Language:             language,
+		Imports:              limitImportReferences(outgoing, limit),
+		ImportedBy:           limitImportReferences(incoming, limit),
+		Symbols:              limitSymbols(symbols, limit),
+		References:           limitSymbolReferences(refs, limit),
+		ReferencedBy:         limitSymbolReferences(referencedBy, limit),
+		ReferenceDefinitions: limitSymbols(referenceDefinitions, limit),
 	}, nil
+}
+
+func symbolReferencesTargetingSymbols(db *sql.DB, symbols []Symbol, sourcePath string, limit int) ([]SymbolReference, error) {
+	limit = normalizeResultLimit(limit, maxSymbolGraphRefsPerName)
+	seen := map[string]bool{}
+	var result []SymbolReference
+	for _, symbol := range symbols {
+		if len(result) >= limit {
+			break
+		}
+		refs, err := symbolReferencesForName(db, symbol.Name, symbol.Language, limit)
+		if err != nil {
+			return nil, err
+		}
+		for _, ref := range refs {
+			if ref.Path == "" || ref.Path == sourcePath {
+				continue
+			}
+			key := fmt.Sprintf("%s:%d:%s", ref.Path, ref.Line, strings.ToLower(ref.Name))
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			result = append(result, ref)
+			if len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+func symbolDefinitionsForReferences(db *sql.DB, refs []SymbolReference, sourcePath string, limit int) ([]Symbol, error) {
+	limit = normalizeResultLimit(limit, maxSymbolGraphRefsPerName)
+	seen := map[string]bool{}
+	var result []Symbol
+	for _, ref := range refs {
+		if len(result) >= limit {
+			break
+		}
+		definitions, err := symbolsForName(db, ref.Name, ref.Language, limit)
+		if err != nil {
+			return nil, err
+		}
+		for _, symbol := range definitions {
+			if symbol.Path == "" || symbol.Path == sourcePath {
+				continue
+			}
+			key := fmt.Sprintf("%s:%d:%s:%s", symbol.Path, symbol.Line, strings.ToLower(symbol.Name), symbol.Kind)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			result = append(result, symbol)
+			if len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result, nil
 }
 
 func RenderImportContext(context ImportContext) string {
@@ -296,6 +453,42 @@ func RenderDependencyGraph(graph DependencyGraph) string {
 			renderGraphImport(&builder, ref, true)
 		}
 	}
+
+	builder.WriteString("\n## Symbols\n")
+	if len(graph.Symbols) == 0 {
+		builder.WriteString("\nNo indexed symbols found for this file.\n")
+	} else {
+		for _, symbol := range graph.Symbols {
+			renderGraphSymbol(&builder, symbol, false)
+		}
+	}
+
+	builder.WriteString("\n## References\n")
+	if len(graph.References) == 0 {
+		builder.WriteString("\nNo indexed symbol references found in this file.\n")
+	} else {
+		for _, ref := range graph.References {
+			renderGraphSymbolReference(&builder, ref, false)
+		}
+	}
+
+	builder.WriteString("\n## Referenced By\n")
+	if len(graph.ReferencedBy) == 0 {
+		builder.WriteString("\nNo indexed external symbol references found.\n")
+	} else {
+		for _, ref := range graph.ReferencedBy {
+			renderGraphSymbolReference(&builder, ref, true)
+		}
+	}
+
+	builder.WriteString("\n## Definitions For References\n")
+	if len(graph.ReferenceDefinitions) == 0 {
+		builder.WriteString("\nNo indexed external definitions found for this file's references.\n")
+	} else {
+		for _, symbol := range graph.ReferenceDefinitions {
+			renderGraphSymbol(&builder, symbol, true)
+		}
+	}
 	return builder.String()
 }
 
@@ -312,6 +505,30 @@ func renderGraphImport(builder *strings.Builder, ref ImportReference, includeSou
 		fmt.Fprintf(builder, " -> %s", ref.TargetPath)
 	} else {
 		builder.WriteString(" (unresolved)")
+	}
+	if ref.Context != "" {
+		fmt.Fprintf(builder, " | %s", ref.Context)
+	}
+	builder.WriteByte('\n')
+}
+
+func renderGraphSymbol(builder *strings.Builder, symbol Symbol, includePath bool) {
+	if includePath {
+		fmt.Fprintf(builder, "- %s:%d [%s %s] %s", symbol.Path, symbol.Line, symbol.Language, symbol.Kind, symbol.Name)
+	} else {
+		fmt.Fprintf(builder, "- L%d [%s %s] %s", symbol.Line, symbol.Language, symbol.Kind, symbol.Name)
+	}
+	if symbol.Signature != "" {
+		fmt.Fprintf(builder, " | %s", symbol.Signature)
+	}
+	builder.WriteByte('\n')
+}
+
+func renderGraphSymbolReference(builder *strings.Builder, ref SymbolReference, includePath bool) {
+	if includePath {
+		fmt.Fprintf(builder, "- %s:%d [%s] %s", ref.Path, ref.Line, ref.Language, ref.Name)
+	} else {
+		fmt.Fprintf(builder, "- L%d [%s] %s", ref.Line, ref.Language, ref.Name)
 	}
 	if ref.Context != "" {
 		fmt.Fprintf(builder, " | %s", ref.Context)
@@ -599,6 +816,22 @@ func ResolveImportTargets(db *sql.DB) error {
 	for _, ref := range refs {
 		target := resolveImportTarget(ref, index)
 		if _, err := tx.Exec("UPDATE import_refs SET target_path = ? WHERE id = ?", target, ref.ID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("DELETE FROM import_refs_fts WHERE rowid = ?", ref.ID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO import_refs_fts(rowid, import_path, alias, language, path, target_path, context)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			ref.ID,
+			ref.ImportPath,
+			ref.Alias,
+			ref.Language,
+			ref.Path,
+			target,
+			ref.Context,
+		); err != nil {
 			return err
 		}
 	}

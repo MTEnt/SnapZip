@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -269,7 +270,7 @@ func relativeSourcePath(root, path string) string {
 }
 
 func AddKnowledgeContent(db *sql.DB, language, topic, path string, content []byte, maxContentBytes int, sourceMTime int64) (int, error) {
-	chunks := splitContentChunks(content, maxContentBytes)
+	chunks := splitContentChunksForLanguage(language, content, maxContentBytes)
 	for idx, chunk := range chunks {
 		chunkTopic := topic
 		if len(chunks) > 1 {
@@ -290,6 +291,608 @@ func AddKnowledgeContent(db *sql.DB, language, topic, path string, content []byt
 		}
 	}
 	return len(chunks), nil
+}
+
+func splitContentChunksForLanguage(language string, content []byte, maxBytes int) []contentChunk {
+	if maxBytes <= 0 || len(content) <= maxBytes {
+		return splitContentChunks(content, maxBytes)
+	}
+
+	language = NormalizeLanguage(language)
+	if chunks, ok := splitStructuralContentChunks(language, content, maxBytes); ok {
+		return chunks
+	}
+
+	lines := splitLinesAfter(string(content))
+	boundaries := codeBoundaryLineIndexes(language, string(content), lines)
+	if len(boundaries) == 0 {
+		return splitContentChunks(content, maxBytes)
+	}
+
+	boundaries = append([]int{0}, boundaries...)
+	boundaries = append(uniqueIndexes(boundaries, len(lines)), len(lines))
+	if len(boundaries) <= 2 {
+		return splitContentChunks(content, maxBytes)
+	}
+
+	var chunks []contentChunk
+	var current strings.Builder
+	currentStartLine := 0
+
+	flushCurrent := func() {
+		if current.Len() == 0 {
+			return
+		}
+		data := []byte(current.String())
+		chunks = append(chunks, contentChunk{
+			Data:      data,
+			StartLine: currentStartLine + 1,
+			EndLine:   currentStartLine + lineCount(data),
+		})
+		current.Reset()
+		currentStartLine = 0
+	}
+
+	for idx := 0; idx < len(boundaries)-1; idx++ {
+		start := boundaries[idx]
+		end := boundaries[idx+1]
+		if start >= end {
+			continue
+		}
+		block := strings.Join(lines[start:end], "")
+		if block == "" {
+			continue
+		}
+
+		if len([]byte(block)) > maxBytes {
+			flushCurrent()
+			for _, chunk := range splitContentChunks([]byte(block), maxBytes) {
+				chunk.StartLine += start
+				chunk.EndLine += start
+				chunks = append(chunks, chunk)
+			}
+			continue
+		}
+
+		if current.Len() > 0 && current.Len()+len([]byte(block)) > maxBytes {
+			flushCurrent()
+		}
+		if current.Len() == 0 {
+			currentStartLine = start
+		}
+		current.WriteString(block)
+	}
+	flushCurrent()
+
+	if len(chunks) == 0 {
+		return splitContentChunks(content, maxBytes)
+	}
+	return chunks
+}
+
+func splitStructuralContentChunks(language string, content []byte, maxBytes int) ([]contentChunk, bool) {
+	lines := splitLinesAfter(string(content))
+	spans, ok := codeSpansForLanguage(language, string(content))
+	if !ok || len(spans) == 0 {
+		return nil, false
+	}
+
+	blocks := codeBlocksFromSpans(lines, spans)
+	if len(blocks) <= 1 {
+		return nil, false
+	}
+	chunks := packCodeBlocks(blocks, maxBytes)
+	if len(chunks) == 0 {
+		return nil, false
+	}
+	return chunks, true
+}
+
+func splitLinesAfter(content string) []string {
+	lines := strings.SplitAfter(content, "\n")
+	if len(lines) > 1 && lines[len(lines)-1] == "" {
+		return lines[:len(lines)-1]
+	}
+	return lines
+}
+
+type codeSpan struct {
+	StartLine int
+	EndLine   int
+}
+
+func codeSpansForLanguage(language, content string) ([]codeSpan, bool) {
+	switch NormalizeLanguage(language) {
+	case "go":
+		return extractGoTopLevelSpansAST("", content)
+	case "py":
+		return extractPythonTopLevelSpans(content), true
+	case "js", "jsx", "ts", "tsx", "mjs", "cjs", "java", "cs", "c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx", "rs", "php", "swift", "kt", "kts", "scala", "sc":
+		return extractBraceTopLevelSpans(language, content), true
+	case "rb":
+		return extractRubyTopLevelSpans(content), true
+	default:
+		return nil, false
+	}
+}
+
+func extractPythonTopLevelSpans(content string) []codeSpan {
+	lines := splitLinesAfter(content)
+	var spans []codeSpan
+	for idx := 0; idx < len(lines); {
+		if !isPythonTopLevelStatement(lines[idx]) {
+			idx++
+			continue
+		}
+
+		startIdx := pythonDecoratorStartIndex(lines, idx)
+		endIdx := pythonBlockEndIndex(lines, idx)
+		spans = append(spans, codeSpan{StartLine: startIdx + 1, EndLine: endIdx + 1})
+		idx = endIdx + 1
+	}
+	return spans
+}
+
+func isPythonTopLevelStatement(line string) bool {
+	if leadingIndentWidth(line) != 0 {
+		return false
+	}
+	trimmed := strings.TrimSpace(stripLineComment("py", line))
+	if trimmed == "" || strings.HasPrefix(trimmed, "@") {
+		return false
+	}
+	return !startsWithAny(trimmed, ")", "]", "}", "else:", "elif ", "except ", "finally:")
+}
+
+func pythonDecoratorStartIndex(lines []string, idx int) int {
+	indent := leadingIndentWidth(lines[idx])
+	start := idx
+	for start > 0 {
+		prev := strings.TrimSpace(stripLineComment("py", lines[start-1]))
+		if prev == "" || !strings.HasPrefix(prev, "@") || leadingIndentWidth(lines[start-1]) != indent {
+			break
+		}
+		start--
+	}
+	return start
+}
+
+func pythonBlockEndIndex(lines []string, startIdx int) int {
+	indent := leadingIndentWidth(lines[startIdx])
+	lastContent := startIdx
+	bracketDepth := max(0, bracketDepthDelta(stripLineComment("py", lines[startIdx])))
+
+	for idx := startIdx + 1; idx < len(lines); idx++ {
+		trimmed := strings.TrimSpace(stripLineComment("py", lines[idx]))
+		if trimmed == "" {
+			continue
+		}
+
+		lineIndent := leadingIndentWidth(lines[idx])
+		if bracketDepth == 0 && lineIndent <= indent && !isPythonContinuationClause(trimmed) {
+			return lastContent
+		}
+
+		lastContent = idx
+		bracketDepth += bracketDepthDelta(stripLineComment("py", lines[idx]))
+		if bracketDepth < 0 {
+			bracketDepth = 0
+		}
+	}
+	return lastContent
+}
+
+func isPythonContinuationClause(trimmed string) bool {
+	return startsWithAny(trimmed, "else:", "elif ", "except ", "finally:")
+}
+
+func extractBraceTopLevelSpans(language, content string) []codeSpan {
+	language = NormalizeLanguage(language)
+	lines := splitLinesAfter(content)
+	var spans []codeSpan
+	for idx := 0; idx < len(lines); {
+		if !isBraceTopLevelStart(language, lines[idx]) {
+			idx++
+			continue
+		}
+
+		startIdx := codeDecorationStartIndex(language, lines, idx)
+		endIdx := braceBlockEndIndex(language, lines, idx)
+		spans = append(spans, codeSpan{StartLine: startIdx + 1, EndLine: endIdx + 1})
+		idx = endIdx + 1
+	}
+	return spans
+}
+
+func isBraceTopLevelStart(language, line string) bool {
+	trimmed := strings.TrimSpace(stripLineComment(language, line))
+	if trimmed == "" || strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, "*/") {
+		return false
+	}
+	normalized := NormalizeLanguage(language)
+	trimmed = trimCodeModifiers(trimmed, braceLanguageModifiers(normalized)...)
+
+	switch normalized {
+	case "js", "jsx", "ts", "tsx", "mjs", "cjs":
+		if startsWithAny(trimmed, "class ", "function ", "interface ", "enum ", "namespace ", "module ") {
+			return true
+		}
+		if startsWithAny(trimmed, "type ", "const ", "let ", "var ") {
+			return true
+		}
+	case "java", "cs":
+		return startsWithAny(trimmed, "class ", "interface ", "enum ", "record ", "struct ")
+	case "c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx":
+		if startsWithAny(trimmed, "class ", "struct ", "enum ", "namespace ", "template", "extern \"C\"") {
+			return true
+		}
+		return looksLikeBraceLanguageFunctionStart(trimmed)
+	case "rs":
+		return startsWithAny(trimmed, "fn ", "struct ", "enum ", "trait ", "impl ", "mod ", "type ", "const ", "static ")
+	case "php":
+		return startsWithAny(trimmed, "<?php", "class ", "interface ", "trait ", "enum ", "function ")
+	case "swift":
+		return startsWithAny(trimmed, "class ", "struct ", "enum ", "protocol ", "extension ", "func ", "actor ")
+	case "kt", "kts":
+		return startsWithAny(trimmed, "class ", "interface ", "object ", "data class ", "sealed class ", "fun ", "typealias ")
+	case "scala", "sc":
+		return startsWithAny(trimmed, "class ", "object ", "trait ", "enum ", "case class ", "def ", "type ", "given ")
+	}
+	return false
+}
+
+func braceLanguageModifiers(language string) []string {
+	switch NormalizeLanguage(language) {
+	case "js", "jsx", "ts", "tsx", "mjs", "cjs":
+		return []string{"export ", "default ", "declare ", "async "}
+	case "java":
+		return []string{"public ", "private ", "protected ", "static ", "final ", "abstract ", "sealed ", "non-sealed ", "strictfp "}
+	case "cs":
+		return []string{"public ", "private ", "protected ", "internal ", "static ", "sealed ", "abstract ", "partial ", "async ", "unsafe ", "readonly "}
+	case "c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx":
+		return []string{"inline ", "static ", "extern ", "constexpr ", "virtual ", "template<> "}
+	case "rs":
+		return []string{"pub ", "pub(crate) ", "async ", "unsafe "}
+	case "php":
+		return []string{"<?php ", "abstract ", "final ", "public ", "private ", "protected ", "static "}
+	case "swift":
+		return []string{"public ", "private ", "fileprivate ", "internal ", "open ", "static ", "final "}
+	case "kt", "kts":
+		return []string{"public ", "private ", "protected ", "internal ", "open ", "abstract ", "sealed ", "data ", "inline ", "suspend ", "operator "}
+	case "scala", "sc":
+		return []string{"private ", "protected ", "final ", "sealed ", "abstract ", "implicit ", "inline ", "case "}
+	default:
+		return nil
+	}
+}
+
+func looksLikeBraceLanguageFunctionStart(trimmed string) bool {
+	if !strings.Contains(trimmed, "(") || !strings.Contains(trimmed, ")") {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	if startsWithAny(lower, "if ", "for ", "while ", "switch ", "catch ", "return ", "sizeof ") {
+		return false
+	}
+	if strings.Contains(lower, " = ") || strings.HasPrefix(lower, "#") {
+		return false
+	}
+	return strings.Contains(trimmed, "{") || strings.HasSuffix(trimmed, ")") || strings.HasSuffix(trimmed, ") const")
+}
+
+func codeDecorationStartIndex(language string, lines []string, idx int) int {
+	start := idx
+	for start > 0 {
+		trimmed := strings.TrimSpace(stripLineComment(language, lines[start-1]))
+		if trimmed == "" {
+			break
+		}
+		if strings.HasPrefix(trimmed, "@") || strings.HasPrefix(trimmed, "#[") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
+			start--
+			continue
+		}
+		break
+	}
+	return start
+}
+
+func braceBlockEndIndex(language string, lines []string, startIdx int) int {
+	depth := 0
+	opened := false
+	lastContent := startIdx
+	for idx := startIdx; idx < len(lines); idx++ {
+		stripped := stripLineComment(language, lines[idx])
+		trimmed := strings.TrimSpace(stripped)
+		if trimmed == "" {
+			continue
+		}
+		lastContent = idx
+
+		if lineHasOpeningDelimiter(stripped) {
+			opened = true
+		}
+		depth += bracketDepthDelta(stripped)
+		if depth < 0 {
+			depth = 0
+		}
+
+		if opened && depth == 0 {
+			return idx
+		}
+		if !opened && strings.Contains(trimmed, ";") {
+			return idx
+		}
+	}
+	return lastContent
+}
+
+func lineHasOpeningDelimiter(line string) bool {
+	return strings.ContainsAny(line, "({[")
+}
+
+func extractRubyTopLevelSpans(content string) []codeSpan {
+	lines := splitLinesAfter(content)
+	var spans []codeSpan
+	for idx := 0; idx < len(lines); {
+		if !isRubyTopLevelStart(lines[idx]) {
+			idx++
+			continue
+		}
+		endIdx := rubyBlockEndIndex(lines, idx)
+		spans = append(spans, codeSpan{StartLine: idx + 1, EndLine: endIdx + 1})
+		idx = endIdx + 1
+	}
+	return spans
+}
+
+func isRubyTopLevelStart(line string) bool {
+	if leadingIndentWidth(line) != 0 {
+		return false
+	}
+	trimmed := strings.TrimSpace(stripLineComment("rb", line))
+	return startsWithAny(trimmed, "class ", "module ", "def ")
+}
+
+func rubyBlockEndIndex(lines []string, startIdx int) int {
+	depth := 0
+	lastContent := startIdx
+	for idx := startIdx; idx < len(lines); idx++ {
+		trimmed := strings.TrimSpace(stripLineComment("rb", lines[idx]))
+		if trimmed == "" {
+			continue
+		}
+		lastContent = idx
+		depth += rubyBlockStartCount(trimmed)
+		depth -= rubyEndCount(trimmed)
+		if depth <= 0 && idx > startIdx {
+			return idx
+		}
+	}
+	return lastContent
+}
+
+func rubyBlockStartCount(trimmed string) int {
+	count := 0
+	if startsWithAny(trimmed, "class ", "module ", "def ", "if ", "unless ", "case ", "begin", "while ", "until ", "for ") {
+		count++
+	}
+	if strings.HasSuffix(trimmed, " do") || strings.Contains(trimmed, " do |") {
+		count++
+	}
+	return count
+}
+
+func rubyEndCount(trimmed string) int {
+	if trimmed == "end" || strings.HasPrefix(trimmed, "end ") || strings.HasSuffix(trimmed, "; end") {
+		return 1
+	}
+	return 0
+}
+
+func bracketDepthDelta(line string) int {
+	delta := 0
+	for _, char := range line {
+		switch char {
+		case '(', '[', '{':
+			delta++
+		case ')', ']', '}':
+			delta--
+		}
+	}
+	return delta
+}
+
+func codeBlocksFromSpans(lines []string, spans []codeSpan) []contentChunk {
+	spans = normalizeCodeSpans(spans, len(lines))
+	if len(spans) == 0 {
+		return nil
+	}
+
+	var blocks []contentChunk
+	cursor := 1
+	for _, span := range spans {
+		startLine := min(cursor, span.StartLine)
+		if startLine < 1 {
+			startLine = 1
+		}
+		if span.EndLine < startLine {
+			continue
+		}
+		blocks = append(blocks, contentChunk{
+			Data:      []byte(strings.Join(lines[startLine-1:span.EndLine], "")),
+			StartLine: startLine,
+			EndLine:   span.EndLine,
+		})
+		cursor = span.EndLine + 1
+	}
+	if cursor <= len(lines) && len(blocks) > 0 {
+		last := &blocks[len(blocks)-1]
+		last.Data = append(last.Data, []byte(strings.Join(lines[cursor-1:], ""))...)
+		last.EndLine = len(lines)
+	}
+	return blocks
+}
+
+func normalizeCodeSpans(spans []codeSpan, maxLine int) []codeSpan {
+	var normalized []codeSpan
+	for _, span := range spans {
+		if span.StartLine <= 0 || span.EndLine <= 0 {
+			continue
+		}
+		if span.StartLine > maxLine {
+			continue
+		}
+		if span.EndLine > maxLine {
+			span.EndLine = maxLine
+		}
+		if span.EndLine < span.StartLine {
+			continue
+		}
+		normalized = append(normalized, span)
+	}
+	sort.SliceStable(normalized, func(i, j int) bool {
+		if normalized[i].StartLine == normalized[j].StartLine {
+			return normalized[i].EndLine < normalized[j].EndLine
+		}
+		return normalized[i].StartLine < normalized[j].StartLine
+	})
+
+	merged := normalized[:0]
+	for _, span := range normalized {
+		if len(merged) == 0 || span.StartLine > merged[len(merged)-1].EndLine {
+			merged = append(merged, span)
+			continue
+		}
+		if span.EndLine > merged[len(merged)-1].EndLine {
+			merged[len(merged)-1].EndLine = span.EndLine
+		}
+	}
+	return merged
+}
+
+func packCodeBlocks(blocks []contentChunk, maxBytes int) []contentChunk {
+	var chunks []contentChunk
+	var current strings.Builder
+	currentStartLine := 0
+	currentEndLine := 0
+
+	flushCurrent := func() {
+		if current.Len() == 0 {
+			return
+		}
+		chunks = append(chunks, contentChunk{
+			Data:      []byte(current.String()),
+			StartLine: currentStartLine,
+			EndLine:   currentEndLine,
+		})
+		current.Reset()
+		currentStartLine = 0
+		currentEndLine = 0
+	}
+
+	for _, block := range blocks {
+		if len(block.Data) == 0 {
+			continue
+		}
+		if len(block.Data) > maxBytes {
+			flushCurrent()
+			for _, chunk := range splitContentChunks(block.Data, maxBytes) {
+				chunk.StartLine += block.StartLine - 1
+				chunk.EndLine += block.StartLine - 1
+				chunks = append(chunks, chunk)
+			}
+			continue
+		}
+
+		if current.Len() > 0 && current.Len()+len(block.Data) > maxBytes {
+			flushCurrent()
+		}
+		if current.Len() == 0 {
+			currentStartLine = block.StartLine
+		}
+		current.Write(block.Data)
+		currentEndLine = block.EndLine
+	}
+	flushCurrent()
+	return chunks
+}
+
+func codeBoundaryLineIndexes(language, content string, lines []string) []int {
+	var indexes []int
+	for _, symbol := range ExtractSymbols(language, "", content) {
+		indexes = append(indexes, symbol.Line-1)
+	}
+	for idx, line := range lines {
+		if isSupplementalCodeBoundaryLine(language, line) {
+			indexes = append(indexes, idx)
+		}
+	}
+	return uniqueIndexes(indexes, len(lines))
+}
+
+func uniqueIndexes(indexes []int, maxIndex int) []int {
+	seen := make(map[int]bool, len(indexes))
+	unique := make([]int, 0, len(indexes))
+	for _, idx := range indexes {
+		if idx < 0 || idx > maxIndex || seen[idx] {
+			continue
+		}
+		seen[idx] = true
+		unique = append(unique, idx)
+	}
+	return unique
+}
+
+func isSupplementalCodeBoundaryLine(language, line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
+		return false
+	}
+
+	switch NormalizeLanguage(language) {
+	case "go":
+		return startsWithAny(trimmed, "const (", "var (")
+	case "js", "jsx", "ts", "tsx", "mjs", "cjs":
+		trimmed = trimCodeModifiers(trimmed, "export ", "default ", "declare ")
+		return startsWithAny(trimmed, "interface ", "type ", "enum ", "const ", "let ", "var ")
+	case "java", "cs":
+		trimmed = trimCodeModifiers(trimmed, "public ", "private ", "protected ", "static ", "final ", "abstract ", "async ")
+		return startsWithAny(trimmed, "enum ", "record ")
+	case "rs":
+		trimmed = trimCodeModifiers(trimmed, "pub ", "async ")
+		return startsWithAny(trimmed, "impl ")
+	case "php":
+		trimmed = trimCodeModifiers(trimmed, "public ", "private ", "protected ", "static ", "final ", "abstract ")
+		return startsWithAny(trimmed, "interface ", "trait ")
+	case "swift":
+		trimmed = trimCodeModifiers(trimmed, "public ", "private ", "internal ", "open ", "static ")
+		return startsWithAny(trimmed, "extension ")
+	default:
+		return false
+	}
+}
+
+func trimCodeModifiers(line string, modifiers ...string) string {
+	line = strings.TrimSpace(line)
+	for {
+		trimmed := line
+		for _, modifier := range modifiers {
+			trimmed = strings.TrimPrefix(trimmed, modifier)
+		}
+		if trimmed == line {
+			return line
+		}
+		line = strings.TrimSpace(trimmed)
+	}
+}
+
+func startsWithAny(value string, prefixes ...string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeIndexOptions(options IndexOptions) IndexOptions {

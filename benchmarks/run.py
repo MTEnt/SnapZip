@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 import argparse
+import gzip
 import json
+import math
 import os
+import pickle
+import random
 import re
 import shutil
 import subprocess
@@ -38,6 +42,46 @@ def run_cmd(cmd, cwd, allow_failure=False):
     if proc.returncode != 0 and not allow_failure:
         raise BenchmarkFailure(record)
     return proc, record
+
+
+def tokenize_for_retrieval(text):
+    return [token for token in re.split(r"[^A-Za-z0-9]+", text.lower()) if len(token) > 1]
+
+
+def top_k_indices(scores, k):
+    return [idx for idx, _ in sorted(enumerate(scores), key=lambda item: (-item[1], item[0]))[:k]]
+
+
+def gold_rank(gold, top):
+    try:
+        return top.index(gold) + 1
+    except ValueError:
+        return 0
+
+
+def reciprocal_rank(gold, top, k):
+    rank = gold_rank(gold, top[:k])
+    if rank == 0:
+        return 0.0
+    return 1.0 / rank
+
+
+def ndcg_at_k(gold, top, k):
+    rank = gold_rank(gold, top[:k])
+    if rank == 0:
+        return 0.0
+    return 1.0 / math.log2(rank + 1)
+
+
+def duplicate_result_count(top):
+    valid = [item for item in top if item >= 0]
+    return len(valid) - len(set(valid))
+
+
+def safe_mean(values):
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 6)
 
 
 def resolve_snapzip_bin(value):
@@ -129,6 +173,15 @@ def parse_json_stdout(record):
             "stdout": record["stdout"],
             "stderr": record["stderr"],
         }
+
+
+def receipts_contain(receipts, field, fragment):
+    fragment = fragment.lower()
+    for receipt in receipts or []:
+        for value in receipt.get(field, []) or []:
+            if fragment in value.lower():
+                return True
+    return False
 
 
 def run_rbt_candidate(parent, name, solver_cmd, allow_stress_failure):
@@ -337,7 +390,6 @@ def test_build_cache_returns_seed():
         work_dir / "notes" / "cache_noise.py",
         ("cache cache cache archive metadata seed ready\n" * 90),
     )
-
     query = "CacheStore build_cache seed test"
     _, index_record = run_cmd(
         [snapzip_bin, "index", "--reset", "--db-dir", str(work_dir), "--crawl", str(work_dir), "--langs", "python"],
@@ -362,9 +414,376 @@ def test_build_cache_returns_seed():
         ],
         work_dir,
     )
+    _, source_graph_record = run_cmd(
+        [
+            snapzip_bin,
+            "graph",
+            "--db-dir",
+            str(work_dir),
+            "--path",
+            "app/cache.py",
+            "--json",
+            "--limit",
+            "10",
+        ],
+        work_dir,
+    )
+    _, test_graph_record = run_cmd(
+        [
+            snapzip_bin,
+            "graph",
+            "--db-dir",
+            str(work_dir),
+            "--path",
+            "tests/test_cache.py",
+            "--json",
+            "--limit",
+            "10",
+        ],
+        work_dir,
+    )
+
+    rerank_dir = parent / "structural_rerank"
+    rerank_dir.mkdir(parents=True, exist_ok=True)
+    write_file(
+        rerank_dir / "app" / "payment_gateway.py",
+        """
+class PaymentGateway:
+    def authorize_payment(self, amount):
+        return amount
+""".strip()
+        + "\n",
+    )
+    write_file(
+        rerank_dir / "app" / "checkout.py",
+        """
+from app.payment_gateway import PaymentGateway
+
+
+def checkout(amount):
+    return PaymentGateway().authorize_payment(amount)
+""".strip()
+        + "\n",
+    )
+    write_file(
+        rerank_dir / "notes" / "payment_noise.py",
+        ("payment gateway authorize payment amount checkout workflow\n" * 80),
+    )
+    rerank_query = "PaymentGateway authorize_payment checkout"
+    rerank_raw_candidates = naive_file_rank(rerank_dir, rerank_query)
+    _, rerank_index_record = run_cmd(
+        [snapzip_bin, "index", "--reset", "--db-dir", str(rerank_dir), "--crawl", str(rerank_dir), "--langs", "python"],
+        rerank_dir,
+    )
+    _, rerank_record = run_cmd(
+        [
+            snapzip_bin,
+            "search",
+            "--db-dir",
+            str(rerank_dir),
+            "--query",
+            rerank_query,
+            "--json",
+            "--limit",
+            "3",
+        ],
+        rerank_dir,
+    )
+
+    ast_chunk_dir = parent / "ast_chunking"
+    ast_chunk_dir.mkdir(parents=True, exist_ok=True)
+    go_registry = (
+        "var HugeRegistry = map[string]string{\n"
+        + "\t\"feature\": \"enabled\",\n" * 18
+        + "}\n\n"
+    )
+    go_alpha = "func Alpha() string {\n\treturn \"alpha\"\n}\n"
+    go_beta = (
+        "func Beta() string {\n"
+        + "\tvalue := \"beta\"\n" * 5
+        + "\treturn value\n}\n"
+    )
+    write_file(
+        ast_chunk_dir / "pkg" / "registry.go",
+        "package pkg\n\n" + go_registry + go_alpha + "\n" + go_beta,
+    )
+    ast_chunk_query = "Alpha alpha"
+    ast_chunk_max_bytes = len(("\n" + go_alpha).encode("utf-8")) + 2
+    _, ast_chunk_index_record = run_cmd(
+        [
+            snapzip_bin,
+            "index",
+            "--reset",
+            "--db-dir",
+            str(ast_chunk_dir),
+            "--crawl",
+            str(ast_chunk_dir),
+            "--langs",
+            "go",
+            "--max-content-bytes",
+            str(ast_chunk_max_bytes),
+        ],
+        ast_chunk_dir,
+    )
+    _, ast_chunk_record = run_cmd(
+        [
+            snapzip_bin,
+            "search",
+            "--db-dir",
+            str(ast_chunk_dir),
+            "--query",
+            ast_chunk_query,
+            "--json",
+            "--limit",
+            "5",
+        ],
+        ast_chunk_dir,
+    )
+
+    py_chunk_dir = parent / "python_structural_chunking"
+    py_chunk_dir.mkdir(parents=True, exist_ok=True)
+    py_routes = (
+        "ROUTES = {\n"
+        + "    \"feature\": \"enabled\",\n" * 18
+        + "}\n\n"
+    )
+    py_alpha = "def alpha():\n    return \"alpha\"\n"
+    py_beta = (
+        "def beta():\n"
+        + "    value = \"beta\"\n" * 5
+        + "    return value\n"
+    )
+    write_file(py_chunk_dir / "app" / "handlers.py", py_routes + py_alpha + "\n" + py_beta)
+    py_chunk_query = "alpha return alpha"
+    py_chunk_max_bytes = len(("\n" + py_alpha).encode("utf-8")) + 2
+    _, py_chunk_index_record = run_cmd(
+        [
+            snapzip_bin,
+            "index",
+            "--reset",
+            "--db-dir",
+            str(py_chunk_dir),
+            "--crawl",
+            str(py_chunk_dir),
+            "--langs",
+            "python",
+            "--max-content-bytes",
+            str(py_chunk_max_bytes),
+        ],
+        py_chunk_dir,
+    )
+    _, py_chunk_record = run_cmd(
+        [
+            snapzip_bin,
+            "search",
+            "--db-dir",
+            str(py_chunk_dir),
+            "--query",
+            py_chunk_query,
+            "--json",
+            "--limit",
+            "5",
+        ],
+        py_chunk_dir,
+    )
+
+    popular_chunk_dir = parent / "popular_structural_chunking"
+    popular_chunk_dir.mkdir(parents=True, exist_ok=True)
+    js_registry = (
+        "const registry = {\n"
+        + "  feature: \"enabled\",\n" * 18
+        + "};\n\n"
+    )
+    js_alpha = "export function alpha() {\n  return \"alpha\"\n}\n"
+    js_beta = (
+        "export function beta() {\n"
+        + "  const value = \"beta\"\n" * 5
+        + "  return value\n}\n"
+    )
+    ruby_alpha = "class Alpha\n  def value\n    \"alpha\"\n  end\nend\n"
+    ruby_beta = (
+        "class Beta\n"
+        + "  def value\n    \"beta\"\n  end\n" * 5
+        + "end\n"
+    )
+    write_file(popular_chunk_dir / "web" / "actions.js", js_registry + js_alpha + "\n" + js_beta)
+    write_file(popular_chunk_dir / "lib" / "workers.rb", ruby_alpha + "\n" + ruby_beta)
+    popular_chunk_max_bytes = 96
+    _, popular_chunk_index_record = run_cmd(
+        [
+            snapzip_bin,
+            "index",
+            "--reset",
+            "--db-dir",
+            str(popular_chunk_dir),
+            "--crawl",
+            str(popular_chunk_dir),
+            "--langs",
+            "javascript,ruby",
+            "--max-content-bytes",
+            str(popular_chunk_max_bytes),
+        ],
+        popular_chunk_dir,
+    )
+    _, popular_js_chunk_record = run_cmd(
+        [
+            snapzip_bin,
+            "search",
+            "--db-dir",
+            str(popular_chunk_dir),
+            "--query",
+            "function alpha return alpha javascript",
+            "--json",
+            "--limit",
+            "10",
+        ],
+        popular_chunk_dir,
+    )
+    _, popular_ruby_chunk_record = run_cmd(
+        [
+            snapzip_bin,
+            "search",
+            "--db-dir",
+            str(popular_chunk_dir),
+            "--query",
+            "class Alpha value alpha ruby",
+            "--json",
+            "--limit",
+            "10",
+        ],
+        popular_chunk_dir,
+    )
+
+    multipath_dir = parent / "multipath_query"
+    multipath_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(80):
+        write_file(
+            multipath_dir / "noise" / f"exact_{idx:03d}.py",
+            "refreshtoken getorcreate retry failure\n",
+        )
+    write_file(
+        multipath_dir / "app" / "session_cache.py",
+        """
+class SessionCache:
+    def get_or_create(self, refresh_token):
+        \"\"\"get create refresh token session cache\"\"\"
+        return refresh_token
+""".strip()
+        + "\n",
+    )
+    _, multipath_index_record = run_cmd(
+        [
+            snapzip_bin,
+            "index",
+            "--reset",
+            "--db-dir",
+            str(multipath_dir),
+            "--crawl",
+            str(multipath_dir),
+            "--langs",
+            "python",
+        ],
+        multipath_dir,
+    )
+    _, multipath_search_record = run_cmd(
+        [
+            snapzip_bin,
+            "search",
+            "--db-dir",
+            str(multipath_dir),
+            "--query",
+            "fix getOrCreate refreshToken",
+            "--json",
+            "--limit",
+            "5",
+        ],
+        multipath_dir,
+    )
     pack = parse_json_stdout(pack_record)
+    source_graph = parse_json_stdout(source_graph_record)
+    test_graph = parse_json_stdout(test_graph_record)
+    rerank_payload = parse_json_stdout(rerank_record)
+    rerank_paths = [snippet.get("path", "") for snippet in rerank_payload.get("snippets", [])]
+    ast_chunk_payload = parse_json_stdout(ast_chunk_record)
+    ast_alpha_snippets = [
+        snippet
+        for snippet in ast_chunk_payload.get("snippets", [])
+        if "func Alpha" in snippet.get("content", "")
+    ]
+    py_chunk_payload = parse_json_stdout(py_chunk_record)
+    py_alpha_snippets = [
+        snippet
+        for snippet in py_chunk_payload.get("snippets", [])
+        if "def alpha" in snippet.get("content", "")
+    ]
+    popular_js_chunk_payload = parse_json_stdout(popular_js_chunk_record)
+    popular_js_alpha_snippets = [
+        snippet
+        for snippet in popular_js_chunk_payload.get("snippets", [])
+        if "function alpha" in snippet.get("content", "")
+    ]
+    popular_ruby_chunk_payload = parse_json_stdout(popular_ruby_chunk_record)
+    popular_ruby_alpha_snippets = [
+        snippet
+        for snippet in popular_ruby_chunk_payload.get("snippets", [])
+        if "class Alpha" in snippet.get("content", "")
+    ]
+    multipath_payload = parse_json_stdout(multipath_search_record)
+    multipath_paths = [snippet.get("path", "") for snippet in multipath_payload.get("snippets", [])]
+    multipath_receipts = multipath_payload.get("receipts") or []
+    receipts = pack.get("receipts") or []
     quality = pack.get("quality") or {}
     metrics = quality.get("metrics") or {}
+    has_symbol_graph_reason = receipts_contain(receipts, "reasons", "local symbol reference graph")
+    has_symbol_graph_evidence = (
+        receipts_contain(receipts, "evidence", "references build_cache")
+        and receipts_contain(receipts, "evidence", "references get")
+    )
+    source_graph_symbol_edges_passed = (
+        any(symbol.get("name") == "build_cache" for symbol in source_graph.get("symbols") or [])
+        and any(ref.get("path") == "tests/test_cache.py" for ref in source_graph.get("referenced_by") or [])
+    )
+    test_graph_definition_edges_passed = any(
+        symbol.get("path") == "app/cache.py" and symbol.get("name") in {"build_cache", "get"}
+        for symbol in test_graph.get("reference_definitions") or []
+    )
+    structural_rerank_passed = (
+        len(rerank_paths) >= 2
+        and rerank_paths[0] == "app/payment_gateway.py"
+        and "app/checkout.py" in rerank_paths[:3]
+    )
+    ast_chunking_passed = bool(ast_alpha_snippets) and all(
+        "HugeRegistry" not in snippet.get("content", "")
+        and "func Beta" not in snippet.get("content", "")
+        and "return \"alpha\"" in snippet.get("content", "")
+        for snippet in ast_alpha_snippets
+    )
+    python_structural_chunking_passed = bool(py_alpha_snippets) and all(
+        "ROUTES" not in snippet.get("content", "")
+        and "def beta" not in snippet.get("content", "")
+        and "return \"alpha\"" in snippet.get("content", "")
+        for snippet in py_alpha_snippets
+    )
+    popular_structural_chunking_passed = (
+        bool(popular_js_alpha_snippets)
+        and bool(popular_ruby_alpha_snippets)
+        and all(
+            "registry" not in snippet.get("content", "")
+            and "function beta" not in snippet.get("content", "")
+            and "return \"alpha\"" in snippet.get("content", "")
+            for snippet in popular_js_alpha_snippets
+        )
+        and all(
+            "class Beta" not in snippet.get("content", "")
+            and "\"alpha\"" in snippet.get("content", "")
+            for snippet in popular_ruby_alpha_snippets
+        )
+    )
+    multipath_query_passed = (
+        "app/session_cache.py" in multipath_paths[:5]
+        and receipts_contain(multipath_receipts, "reasons", "expanded identifier retrieval path")
+        and receipts_contain(multipath_receipts, "evidence", "get, create, refresh, token")
+    )
     passed = (
         quality.get("score", 0) >= 0.55
         and metrics.get("snippet_count", 0) > 0
@@ -372,6 +791,17 @@ def test_build_cache_returns_seed():
         and metrics.get("definition_count", 0) > 0
         and metrics.get("reference_count", 0) > 0
         and metrics.get("test_snippet_count", 0) > 0
+        and metrics.get("graph_receipt_count", 0) > 0
+        and metrics.get("graph_evidence_count", 0) > 0
+        and has_symbol_graph_reason
+        and has_symbol_graph_evidence
+        and source_graph_symbol_edges_passed
+        and test_graph_definition_edges_passed
+        and structural_rerank_passed
+        and ast_chunking_passed
+        and python_structural_chunking_passed
+        and popular_structural_chunking_passed
+        and multipath_query_passed
     )
     return {
         "name": "context_quality",
@@ -380,16 +810,589 @@ def test_build_cache_returns_seed():
             "ranking": raw_candidates[:5],
             "top_path": raw_candidates[0]["path"] if raw_candidates else "",
             "has_quality_metrics": False,
+            "structural_rerank_ranking": rerank_raw_candidates[:5],
+            "ast_chunking_has_structural_chunks": False,
+            "python_structural_chunking_has_structural_chunks": False,
+            "popular_structural_chunking_has_structural_chunks": False,
+            "multipath_query_ranking_has_expanded_identifier_path": False,
         },
         "snapzip": {
             "quality": quality,
             "paths": [snippet.get("path", "") for snippet in pack.get("snippets") or []],
-            "receipt_count": len(pack.get("receipts") or []),
+            "receipt_count": len(receipts),
+            "has_symbol_graph_reason": has_symbol_graph_reason,
+            "has_symbol_graph_evidence": has_symbol_graph_evidence,
+            "source_graph_symbol_edges_passed": source_graph_symbol_edges_passed,
+            "test_graph_definition_edges_passed": test_graph_definition_edges_passed,
+            "structural_rerank_passed": structural_rerank_passed,
+            "structural_rerank_paths": rerank_paths,
+            "ast_chunking_passed": ast_chunking_passed,
+            "ast_chunking_alpha_locations": [
+                f"{snippet.get('path', '')}:{snippet.get('start_line', '')}-{snippet.get('end_line', '')}"
+                for snippet in ast_alpha_snippets
+            ],
+            "python_structural_chunking_passed": python_structural_chunking_passed,
+            "python_structural_chunking_alpha_locations": [
+                f"{snippet.get('path', '')}:{snippet.get('start_line', '')}-{snippet.get('end_line', '')}"
+                for snippet in py_alpha_snippets
+            ],
+            "popular_structural_chunking_passed": popular_structural_chunking_passed,
+            "popular_js_structural_chunking_alpha_locations": [
+                f"{snippet.get('path', '')}:{snippet.get('start_line', '')}-{snippet.get('end_line', '')}"
+                for snippet in popular_js_alpha_snippets
+            ],
+            "popular_ruby_structural_chunking_alpha_locations": [
+                f"{snippet.get('path', '')}:{snippet.get('start_line', '')}-{snippet.get('end_line', '')}"
+                for snippet in popular_ruby_alpha_snippets
+            ],
+            "multipath_query_passed": multipath_query_passed,
+            "multipath_query_paths": multipath_paths,
+            "multipath_query_receipt_count": len(multipath_receipts),
             "pack": pack,
+            "source_graph": source_graph,
+            "test_graph": test_graph,
             "index": index_record,
             "context_pack": pack_record,
+            "source_graph_record": source_graph_record,
+            "test_graph_record": test_graph_record,
+            "structural_rerank_index": rerank_index_record,
+            "structural_rerank_search": rerank_record,
+            "ast_chunking_index": ast_chunk_index_record,
+            "ast_chunking_search": ast_chunk_record,
+            "python_structural_chunking_index": py_chunk_index_record,
+            "python_structural_chunking_search": py_chunk_record,
+            "popular_structural_chunking_index": popular_chunk_index_record,
+            "popular_js_structural_chunking_search": popular_js_chunk_record,
+            "popular_ruby_structural_chunking_search": popular_ruby_chunk_record,
+            "multipath_query_index": multipath_index_record,
+            "multipath_query_search": multipath_search_record,
         },
     }
+
+
+def resolve_repobench_data(args):
+    if args.repobench_data:
+        path = Path(args.repobench_data).expanduser()
+    elif os.environ.get("REPOBENCH_R_DATA"):
+        path = Path(os.environ["REPOBENCH_R_DATA"]).expanduser()
+    else:
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError as exc:
+            raise SystemExit(
+                "RepoBench-R data not found. Install huggingface_hub or pass --repobench-data "
+                "pointing at data/python_cff.gz from tianyang/repobench-r."
+            ) from exc
+        snapshot = Path(
+            snapshot_download(
+                repo_id="tianyang/repobench-r",
+                repo_type="dataset",
+                allow_patterns=["README.md", "repobench-r.py", f"data/{args.repobench_config}.gz"],
+            )
+        )
+        path = snapshot / "data" / f"{args.repobench_config}.gz"
+
+    if not path.exists():
+        raise SystemExit(f"RepoBench-R data file not found: {path}")
+    return path.resolve()
+
+
+def load_repobench_rows(path, split):
+    with gzip.open(path, "rb") as handle:
+        payload = pickle.load(handle)
+    try:
+        return payload["test"][split]
+    except KeyError as exc:
+        raise SystemExit(f"RepoBench-R split not found in {path}: test/{split}") from exc
+
+
+def repobench_query(row):
+    return "\n".join(row["code"].splitlines()[-3:])
+
+
+def repobench_p_split_name(value):
+    aliases = {
+        "cff": "cross_file_first",
+        "cross-file-first": "cross_file_first",
+        "cross_file_first": "cross_file_first",
+        "cfr": "cross_file_random",
+        "cross-file-random": "cross_file_random",
+        "cross_file_random": "cross_file_random",
+        "if": "in_file",
+        "in-file": "in_file",
+        "in_file": "in_file",
+    }
+    return aliases.get(value, value)
+
+
+def repobench_p_repo_id(language):
+    language = language.lower()
+    if language not in {"python", "java"}:
+        raise SystemExit(f"unsupported RepoBench v1.1 language: {language}")
+    return f"tianyang/repobench_{language}_v1.1"
+
+
+def repobench_p_paths_from_arg(value, split):
+    if not value:
+        return []
+    path = Path(value).expanduser()
+    if path.is_dir():
+        return sorted(path.glob(f"{split}-*.parquet"))
+    return [path]
+
+
+def resolve_repobench_p_paths(args):
+    split = repobench_p_split_name(args.repobench_p_split)
+    explicit = repobench_p_paths_from_arg(args.repobench_p_data, split)
+    if explicit:
+        missing = [str(path) for path in explicit if not path.exists()]
+        if missing:
+            raise SystemExit("RepoBench v1.1 parquet file not found: " + ", ".join(missing))
+        return explicit, "local"
+
+    try:
+        from huggingface_hub import hf_hub_download, list_repo_files
+    except ImportError as exc:
+        raise SystemExit(
+            "RepoBench v1.1 data not found. Install huggingface_hub or pass --repobench-p-data "
+            "pointing at downloaded parquet files."
+        ) from exc
+
+    repo_id = repobench_p_repo_id(args.repobench_p_language)
+    files = sorted(
+        name
+        for name in list_repo_files(repo_id, repo_type="dataset")
+        if name.startswith(f"data/{split}-") and name.endswith(".parquet")
+    )
+    if not files:
+        raise SystemExit(f"RepoBench v1.1 split not found: {repo_id}/{split}")
+    if args.repobench_p_max_shards > 0:
+        files = files[:args.repobench_p_max_shards]
+    paths = [Path(hf_hub_download(repo_id, name, repo_type="dataset")) for name in files]
+    return paths, repo_id
+
+
+def load_repobench_p_rows(args):
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise SystemExit(
+            "RepoBench v1.1 parquet loading requires pyarrow. Install pyarrow or pass a preprocessed JSON benchmark later."
+        ) from exc
+
+    columns = [
+        "repo_name",
+        "file_path",
+        "context",
+        "import_statement",
+        "cropped_code",
+        "next_line",
+        "gold_snippet_index",
+    ]
+    paths, source = resolve_repobench_p_paths(args)
+    rows = []
+    for path in paths:
+        table = pq.read_table(path, columns=columns)
+        rows.extend(table.to_pylist())
+    if not rows:
+        raise SystemExit("RepoBench v1.1 split contained no rows")
+    return rows, source, [str(path) for path in paths]
+
+
+def repobench_p_query(row):
+    tail = "\n".join((row.get("cropped_code") or "").splitlines()[-3:])
+    imports = row.get("import_statement") or ""
+    return (imports + "\n" + tail).strip()
+
+
+def repobench_p_raw_prompt(row):
+    return "\n".join(
+        part
+        for part in [row.get("import_statement") or "", row.get("cropped_code") or ""]
+        if part.strip()
+    )
+
+
+def repobench_p_candidate_text(candidate, language):
+    comment = "#" if language == "python" else "//"
+    path = candidate.get("path") or ""
+    identifier = candidate.get("identifier") or ""
+    snippet = (candidate.get("snippet") or "").rstrip()
+    return f"{comment} Path: {path}\n{comment} Identifier: {identifier}\n{snippet}\n"
+
+
+def repobench_p_context_texts(row, language):
+    return [repobench_p_candidate_text(candidate, language) for candidate in row.get("context") or []]
+
+
+def completion_support_tokens(text):
+    stop = {
+        "and", "as", "async", "await", "break", "case", "catch", "class", "const", "continue",
+        "def", "else", "elif", "enum", "except", "false", "finally", "for", "from", "func",
+        "function", "if", "import", "in", "interface", "is", "let", "new", "none", "not",
+        "null", "or", "package", "pass", "public", "private", "protected", "return", "self",
+        "static", "switch", "this", "throw", "true", "try", "var", "void", "while", "with",
+    }
+    return [token for token in tokenize_for_retrieval(text) if token not in stop and not token.isdigit()]
+
+
+def selected_context_text(indices, candidate_texts):
+    return "\n".join(candidate_texts[idx] for idx in indices if 0 <= idx < len(candidate_texts))
+
+
+def token_coverage(target_tokens, context_text):
+    target = set(target_tokens)
+    if not target:
+        return 0.0
+    available = set(completion_support_tokens(context_text))
+    return len(target & available) / len(target)
+
+
+def deterministic_random_top5(candidate_count, seed):
+    if candidate_count <= 0:
+        return []
+    indices = list(range(candidate_count))
+    rng = random.Random(seed)
+    rng.shuffle(indices)
+    return indices[:5]
+
+
+def jaccard_top5(query, candidates):
+    query_tokens = set(tokenize_for_retrieval(query))
+    scores = []
+    for candidate in candidates:
+        candidate_tokens = set(tokenize_for_retrieval(candidate))
+        union = query_tokens | candidate_tokens
+        if not union:
+            scores.append(0.0)
+            continue
+        scores.append(len(query_tokens & candidate_tokens) / len(union))
+    return top_k_indices(scores, 5)
+
+
+def bm25_top5(query, candidates):
+    query_tokens = tokenize_for_retrieval(query)
+    documents = [tokenize_for_retrieval(candidate) for candidate in candidates]
+    if not documents:
+        return []
+
+    doc_count = len(documents)
+    avg_len = sum(len(document) for document in documents) / doc_count
+    doc_freq = {}
+    for document in documents:
+        for token in set(document):
+            doc_freq[token] = doc_freq.get(token, 0) + 1
+
+    k1 = 1.2
+    b = 0.75
+    scores = []
+    for document in documents:
+        counts = {}
+        for token in document:
+            counts[token] = counts.get(token, 0) + 1
+        doc_len = len(document) or 1
+        score = 0.0
+        for token in query_tokens:
+            freq = counts.get(token, 0)
+            if freq == 0:
+                continue
+            df = doc_freq.get(token, 0)
+            idf = math.log(1 + (doc_count - df + 0.5) / (df + 0.5))
+            denom = freq + k1 * (1 - b + b * doc_len / avg_len)
+            score += idf * freq * (k1 + 1) / denom
+        scores.append(score)
+    return top_k_indices(scores, 5)
+
+
+def snapzip_top5_from_search(output):
+    payload = json.loads(output)
+    if isinstance(payload, dict):
+        snippets = payload.get("snippets") or payload.get("results") or []
+        receipt_count = len(payload.get("receipts") or [])
+    else:
+        snippets = payload
+        receipt_count = 0
+
+    top5 = []
+    for snippet in snippets[:5]:
+        path = snippet.get("path") or ""
+        try:
+            top5.append(int(Path(path).stem.split("_")[-1]))
+        except (ValueError, IndexError):
+            top5.append(-1)
+    return top5, len(snippets), receipt_count
+
+
+def run_repobench_r(parent, args, snapzip_bin):
+    data_path = resolve_repobench_data(args)
+    rows = load_repobench_rows(data_path, args.repobench_split)
+    sample_size = min(args.repobench_sample_size, len(rows))
+    if sample_size <= 0:
+        raise SystemExit("--repobench-sample-size must be greater than zero")
+    sample_indices = sorted(random.Random(args.repobench_seed).sample(range(len(rows)), sample_size))
+    work_dir = parent / "repobench_r"
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    records = []
+    index_times = []
+    search_times = []
+    started = time.perf_counter()
+    for case_no, row_idx in enumerate(sample_indices):
+        row = rows[row_idx]
+        case_dir = work_dir / f"case_{case_no:03d}_row_{row_idx:05d}"
+        source_dir = case_dir / "snippets"
+        db_dir = case_dir / "db"
+        for snippet_idx, snippet in enumerate(row["context"]):
+            write_file(source_dir / f"snippet_{snippet_idx:03d}.py", snippet.rstrip() + "\n")
+
+        _, index_record = run_cmd(
+            [
+                snapzip_bin,
+                "index",
+                "--reset",
+                "--db-dir",
+                str(db_dir),
+                "--crawl",
+                str(source_dir),
+                "--langs",
+                "python",
+            ],
+            REPO_ROOT,
+        )
+        query = repobench_query(row)
+        _, search_record = run_cmd(
+            [
+                snapzip_bin,
+                "search",
+                "--json",
+                "--limit",
+                "5",
+                "--db-dir",
+                str(db_dir),
+                "--query",
+                query,
+            ],
+            REPO_ROOT,
+        )
+
+        jaccard_top = jaccard_top5(query, row["context"])
+        bm25_top = bm25_top5(query, row["context"])
+        snapzip_top, snapzip_return_count, snapzip_receipt_count = snapzip_top5_from_search(search_record["stdout"])
+        gold = row["golden_snippet_index"]
+        record = {
+            "case": case_no,
+            "dataset_row_index": row_idx,
+            "repo_name": row["repo_name"],
+            "file_path": row["file_path"],
+            "candidate_count": len(row["context"]),
+            "query_last_3_lines": query,
+            "gold_snippet_index": gold,
+            "jaccard_top5": jaccard_top,
+            "bm25_top5": bm25_top,
+            "snapzip_top5": snapzip_top,
+            "snapzip_return_count": snapzip_return_count,
+            "snapzip_receipt_count": snapzip_receipt_count,
+            "index_elapsed_seconds": index_record["elapsed_seconds"],
+            "search_elapsed_seconds": search_record["elapsed_seconds"],
+        }
+        for name in ("jaccard", "bm25", "snapzip"):
+            top = record[f"{name}_top5"]
+            record[f"{name}_gold_rank"] = gold_rank(gold, top)
+            record[f"{name}_rr@5"] = round(reciprocal_rank(gold, top, 5), 6)
+            record[f"{name}_ndcg@5"] = round(ndcg_at_k(gold, top, 5), 6)
+            record[f"{name}_duplicate_count@5"] = duplicate_result_count(top[:5])
+            for k in (1, 3, 5):
+                record[f"{name}_hit@{k}"] = gold in top[:k]
+        records.append(record)
+        index_times.append(index_record["elapsed_seconds"])
+        search_times.append(search_record["elapsed_seconds"])
+
+    result = {
+        "name": "repobench_r",
+        "dataset": "tianyang/repobench-r",
+        "config": args.repobench_config,
+        "split": args.repobench_split,
+        "sample_size": sample_size,
+        "sample_seed": args.repobench_seed,
+        "sample_indices": sample_indices,
+        "query": "last 3 lines of in-file code before target line",
+        "snapzip_command": "snapzip search --json --limit 5 over official candidate snippets",
+        "raw_baselines": ["token Jaccard", "BM25"],
+        "elapsed_seconds": round(time.perf_counter() - started, 6),
+        "mean_candidate_count": round(sum(r["candidate_count"] for r in records) / len(records), 6),
+        "mean_snapzip_index_elapsed_seconds": round(sum(index_times) / len(index_times), 6),
+        "mean_snapzip_search_elapsed_seconds": round(sum(search_times) / len(search_times), 6),
+        "records": records,
+    }
+    for name in ("jaccard", "bm25", "snapzip"):
+        for k in (1, 3, 5):
+            hits = sum(1 for record in records if record[f"{name}_hit@{k}"])
+            result[f"{name}_hits@{k}"] = hits
+            result[f"{name}_acc@{k}"] = hits / len(records)
+        result[f"{name}_mrr@5"] = round(sum(record[f"{name}_rr@5"] for record in records) / len(records), 6)
+        result[f"{name}_ndcg@5"] = round(sum(record[f"{name}_ndcg@5"] for record in records) / len(records), 6)
+        result[f"{name}_duplicate_top5_records"] = sum(1 for record in records if record[f"{name}_duplicate_count@5"] > 0)
+        result[f"{name}_duplicate_top5_slots"] = sum(record[f"{name}_duplicate_count@5"] for record in records)
+    result["passed"] = result["snapzip_hits@1"] >= result["bm25_hits@1"]
+    return result
+
+
+def run_repobench_p(parent, args, snapzip_bin):
+    rows, data_source, data_paths = load_repobench_p_rows(args)
+    sample_size = min(args.repobench_p_sample_size, len(rows))
+    if sample_size <= 0:
+        raise SystemExit("--repobench-p-sample-size must be greater than zero")
+    sample_indices = sorted(random.Random(args.repobench_p_seed).sample(range(len(rows)), sample_size))
+    work_dir = parent / "repobench_p"
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    language = args.repobench_p_language
+    ext = ".py" if language == "python" else ".java"
+    records = []
+    index_times = []
+    search_times = []
+    started = time.perf_counter()
+    for case_no, row_idx in enumerate(sample_indices):
+        row = rows[row_idx]
+        context = row.get("context") or []
+        if not context:
+            continue
+        case_dir = work_dir / f"case_{case_no:03d}_row_{row_idx:05d}"
+        source_dir = case_dir / "snippets"
+        db_dir = case_dir / "db"
+        candidate_texts = repobench_p_context_texts(row, language)
+        for snippet_idx, candidate_text in enumerate(candidate_texts):
+            write_file(source_dir / f"candidate_{snippet_idx:03d}{ext}", candidate_text)
+
+        _, index_record = run_cmd(
+            [
+                snapzip_bin,
+                "index",
+                "--reset",
+                "--db-dir",
+                str(db_dir),
+                "--crawl",
+                str(source_dir),
+                "--langs",
+                language,
+            ],
+            REPO_ROOT,
+        )
+        query = repobench_p_query(row)
+        _, search_record = run_cmd(
+            [
+                snapzip_bin,
+                "search",
+                "--json",
+                "--limit",
+                "5",
+                "--db-dir",
+                str(db_dir),
+                "--query",
+                query,
+            ],
+            REPO_ROOT,
+        )
+
+        jaccard_top = jaccard_top5(query, candidate_texts)
+        bm25_top = bm25_top5(query, candidate_texts)
+        random_top = deterministic_random_top5(len(candidate_texts), args.repobench_p_seed + row_idx)
+        snapzip_top, snapzip_return_count, snapzip_receipt_count = snapzip_top5_from_search(search_record["stdout"])
+        gold = int(row.get("gold_snippet_index", -1))
+        raw_prompt = repobench_p_raw_prompt(row)
+        next_line_tokens = completion_support_tokens(row.get("next_line") or "")
+        raw_tokens = set(completion_support_tokens(raw_prompt))
+        new_next_line_tokens = [token for token in next_line_tokens if token not in raw_tokens]
+        gold_identifier = ""
+        if 0 <= gold < len(context):
+            gold_identifier = context[gold].get("identifier") or ""
+
+        record = {
+            "case": case_no,
+            "dataset_row_index": row_idx,
+            "repo_name": row.get("repo_name", ""),
+            "file_path": row.get("file_path", ""),
+            "candidate_count": len(context),
+            "query_imports_and_last_3_lines": query,
+            "next_line": row.get("next_line", ""),
+            "gold_snippet_index": gold,
+            "gold_identifier": gold_identifier,
+            "new_next_line_tokens": new_next_line_tokens,
+            "jaccard_top5": jaccard_top,
+            "bm25_top5": bm25_top,
+            "random_top5": random_top,
+            "snapzip_top5": snapzip_top,
+            "snapzip_return_count": snapzip_return_count,
+            "snapzip_receipt_count": snapzip_receipt_count,
+            "raw_new_token_coverage@5": 0.0,
+            "index_elapsed_seconds": index_record["elapsed_seconds"],
+            "search_elapsed_seconds": search_record["elapsed_seconds"],
+        }
+        for name in ("random", "jaccard", "bm25", "snapzip"):
+            top = record[f"{name}_top5"]
+            selected_text = selected_context_text(top[:5], candidate_texts)
+            record[f"{name}_gold_rank"] = gold_rank(gold, top) if gold >= 0 else 0
+            record[f"{name}_rr@5"] = round(reciprocal_rank(gold, top, 5), 6) if gold >= 0 else 0.0
+            record[f"{name}_ndcg@5"] = round(ndcg_at_k(gold, top, 5), 6) if gold >= 0 else 0.0
+            record[f"{name}_duplicate_count@5"] = duplicate_result_count(top[:5])
+            record[f"{name}_new_token_coverage@5"] = round(token_coverage(new_next_line_tokens, selected_text), 6)
+            record[f"{name}_identifier_hit@5"] = bool(gold_identifier and gold_identifier in selected_text)
+            for k in (1, 3, 5):
+                record[f"{name}_gold_hit@{k}"] = gold >= 0 and gold in top[:k]
+        records.append(record)
+        index_times.append(index_record["elapsed_seconds"])
+        search_times.append(search_record["elapsed_seconds"])
+
+    if not records:
+        raise SystemExit("RepoBench v1.1 sample produced no usable rows")
+
+    result = {
+        "name": "repobench_p",
+        "dataset": "RepoBench v1.1",
+        "data_source": data_source,
+        "data_paths": data_paths,
+        "language": language,
+        "split": repobench_p_split_name(args.repobench_p_split),
+        "sample_size": len(records),
+        "sample_seed": args.repobench_p_seed,
+        "sample_indices": sample_indices,
+        "query": "import statements plus last 3 lines of cropped in-file code",
+        "snapzip_command": "snapzip search --json --limit 5 over public cross-file context snippets",
+        "proxy_metric": "gold cross-file snippet retrieval and coverage of next-line tokens absent from raw prompt",
+        "raw_baselines": ["no cross-file context", "random top-5", "token Jaccard", "BM25"],
+        "elapsed_seconds": round(time.perf_counter() - started, 6),
+        "mean_candidate_count": safe_mean([record["candidate_count"] for record in records]),
+        "mean_snapzip_index_elapsed_seconds": safe_mean(index_times),
+        "mean_snapzip_search_elapsed_seconds": safe_mean(search_times),
+        "records": records,
+    }
+    for name in ("random", "jaccard", "bm25", "snapzip"):
+        for k in (1, 3, 5):
+            hits = sum(1 for record in records if record[f"{name}_gold_hit@{k}"])
+            result[f"{name}_gold_hits@{k}"] = hits
+            result[f"{name}_gold_hit@{k}"] = hits / len(records)
+        result[f"{name}_mrr@5"] = safe_mean([record[f"{name}_rr@5"] for record in records])
+        result[f"{name}_ndcg@5"] = safe_mean([record[f"{name}_ndcg@5"] for record in records])
+        result[f"{name}_new_token_coverage@5"] = safe_mean(
+            [record[f"{name}_new_token_coverage@5"] for record in records]
+        )
+        result[f"{name}_identifier_hit@5"] = safe_mean(
+            [1.0 if record[f"{name}_identifier_hit@5"] else 0.0 for record in records]
+        )
+        result[f"{name}_duplicate_top5_records"] = sum(
+            1 for record in records if record[f"{name}_duplicate_count@5"] > 0
+        )
+        result[f"{name}_duplicate_top5_slots"] = sum(record[f"{name}_duplicate_count@5"] for record in records)
+    result["raw_new_token_coverage@5"] = 0.0
+    result["passed"] = (
+        result["snapzip_gold_hit@5"] >= result["bm25_gold_hit@5"]
+        and result["snapzip_new_token_coverage@5"] >= result["bm25_new_token_coverage@5"]
+    )
+    return result
 
 
 def snapzip_passed(result):
@@ -402,16 +1405,268 @@ def snapzip_passed(result):
         return bool(result.get("passed"))
     if result["name"] == "context_quality":
         return bool(result.get("passed"))
+    if result["name"] == "repobench_r":
+        return bool(result.get("passed"))
+    if result["name"] == "repobench_p":
+        return bool(result.get("passed"))
     return False
+
+
+def requested_repobench_quality_gates(args):
+    return [
+        {
+            "name": "repobench.snapzip_acc@1",
+            "metric": "snapzip_acc@1",
+            "minimum": args.min_repobench_snapzip_acc1,
+        },
+        {
+            "name": "repobench.snapzip_acc@3",
+            "metric": "snapzip_acc@3",
+            "minimum": args.min_repobench_snapzip_acc3,
+        },
+        {
+            "name": "repobench.snapzip_acc@5",
+            "metric": "snapzip_acc@5",
+            "minimum": args.min_repobench_snapzip_acc5,
+        },
+        {
+            "name": "repobench.snapzip_mrr@5",
+            "metric": "snapzip_mrr@5",
+            "minimum": args.min_repobench_snapzip_mrr5,
+        },
+        {
+            "name": "repobench.snapzip_ndcg@5",
+            "metric": "snapzip_ndcg@5",
+            "minimum": args.min_repobench_snapzip_ndcg5,
+        },
+        {
+            "name": "repobench.snapzip_duplicate_top5_records",
+            "metric": "snapzip_duplicate_top5_records",
+            "maximum": args.max_repobench_snapzip_duplicate_top5_records,
+        },
+        {
+            "name": "repobench.snapzip_duplicate_top5_slots",
+            "metric": "snapzip_duplicate_top5_slots",
+            "maximum": args.max_repobench_snapzip_duplicate_top5_slots,
+        },
+        {
+            "name": "repobench.snapzip_acc@5_over_bm25",
+            "metric": "snapzip_acc@5",
+            "baseline_metric": "bm25_acc@5",
+            "minimum_delta": args.min_repobench_snapzip_acc5_over_bm25,
+        },
+        {
+            "name": "repobench.snapzip_mrr@5_over_bm25",
+            "metric": "snapzip_mrr@5",
+            "baseline_metric": "bm25_mrr@5",
+            "minimum_delta": args.min_repobench_snapzip_mrr5_over_bm25,
+        },
+        {
+            "name": "repobench.snapzip_ndcg@5_over_bm25",
+            "metric": "snapzip_ndcg@5",
+            "baseline_metric": "bm25_ndcg@5",
+            "minimum_delta": args.min_repobench_snapzip_ndcg5_over_bm25,
+        },
+        {
+            "name": "repobench.snapzip_acc@5_over_jaccard",
+            "metric": "snapzip_acc@5",
+            "baseline_metric": "jaccard_acc@5",
+            "minimum_delta": args.min_repobench_snapzip_acc5_over_jaccard,
+        },
+    ]
+
+
+def requested_repobench_p_quality_gates(args):
+    return [
+        {
+            "name": "repobench_p.snapzip_gold_hit@5",
+            "metric": "snapzip_gold_hit@5",
+            "minimum": args.min_repobench_p_snapzip_gold_hit5,
+        },
+        {
+            "name": "repobench_p.snapzip_new_token_coverage@5",
+            "metric": "snapzip_new_token_coverage@5",
+            "minimum": args.min_repobench_p_snapzip_new_token_coverage5,
+        },
+        {
+            "name": "repobench_p.snapzip_identifier_hit@5",
+            "metric": "snapzip_identifier_hit@5",
+            "minimum": args.min_repobench_p_snapzip_identifier_hit5,
+        },
+        {
+            "name": "repobench_p.snapzip_gold_hit@5_over_bm25",
+            "metric": "snapzip_gold_hit@5",
+            "baseline_metric": "bm25_gold_hit@5",
+            "minimum_delta": args.min_repobench_p_snapzip_gold_hit5_over_bm25,
+        },
+        {
+            "name": "repobench_p.snapzip_new_token_coverage@5_over_bm25",
+            "metric": "snapzip_new_token_coverage@5",
+            "baseline_metric": "bm25_new_token_coverage@5",
+            "minimum_delta": args.min_repobench_p_snapzip_new_token_coverage5_over_bm25,
+        },
+    ]
+
+
+def requested_gates(gates):
+    return [
+        gate
+        for gate in gates
+        if (
+            gate.get("minimum") is not None
+            or gate.get("maximum") is not None
+            or gate.get("minimum_delta") is not None
+        )
+    ]
+
+
+def evaluate_quality_gates_for_run(result, run_name, present_gate_name, gates):
+    requested = requested_gates(gates)
+    if not requested:
+        return []
+
+    run = next((candidate for candidate in result.get("runs", []) if candidate.get("name") == run_name), None)
+    if run is None:
+        return [
+            {
+                "name": present_gate_name,
+                "metric": run_name,
+                "observed": False,
+                "minimum": True,
+                "passed": False,
+            }
+        ]
+
+    evaluated = []
+    for gate in requested:
+        observed = run.get(gate["metric"])
+        minimum = gate.get("minimum")
+        maximum = gate.get("maximum")
+        minimum_delta = gate.get("minimum_delta")
+        baseline_metric = gate.get("baseline_metric")
+        baseline = None
+        delta = None
+        passed = observed is not None
+        reason = ""
+        if observed is None:
+            reason = "metric missing"
+        if baseline_metric is not None and passed:
+            baseline = run.get(baseline_metric)
+            if baseline is None:
+                passed = False
+                reason = "baseline metric missing"
+            else:
+                delta = round(observed - baseline, 6)
+        if minimum is not None and passed:
+            passed = passed and observed >= minimum
+            if not passed:
+                reason = f"observed {observed} below minimum {minimum}"
+        if maximum is not None and passed:
+            passed = passed and observed <= maximum
+            if not passed:
+                reason = f"observed {observed} above maximum {maximum}"
+        if minimum_delta is not None and passed:
+            passed = passed and delta >= minimum_delta
+            if not passed:
+                reason = f"delta {delta} below minimum_delta {minimum_delta}"
+        evaluated.append({
+            "name": gate["name"],
+            "metric": gate["metric"],
+            "observed": observed,
+            "baseline_metric": baseline_metric,
+            "baseline": baseline,
+            "delta": delta,
+            "minimum": minimum,
+            "maximum": maximum,
+            "minimum_delta": minimum_delta,
+            "passed": passed,
+            "reason": reason,
+        })
+    return evaluated
+
+
+def apply_quality_gates(result, args):
+    gates = []
+    gates.extend(
+        evaluate_quality_gates_for_run(
+            result,
+            "repobench_r",
+            "repobench.present",
+            requested_repobench_quality_gates(args),
+        )
+    )
+    gates.extend(
+        evaluate_quality_gates_for_run(
+            result,
+            "repobench_p",
+            "repobench_p.present",
+            requested_repobench_p_quality_gates(args),
+        )
+    )
+    if not gates:
+        return result
+    result["quality_gates"] = gates
+    if not all(gate["passed"] for gate in gates):
+        result["passed"] = False
+    return result
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run reproducible SnapZip benchmark comparisons.")
-    parser.add_argument("--suite", choices=["smoke", "algorithm-20", "hard-rbt", "repair-retrieval", "context-quality", "all"], default="smoke")
+    parser.add_argument(
+        "--suite",
+        choices=[
+            "smoke",
+            "algorithm-20",
+            "hard-rbt",
+            "repair-retrieval",
+            "context-quality",
+            "repobench-r",
+            "repobench-p",
+            "all",
+        ],
+        default="smoke",
+    )
     parser.add_argument("--snapzip-bin", default="", help="Path to a built snapzip binary")
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--json", default="", help="Optional path to write the JSON report")
     parser.add_argument("--keep-workdir", default="", help="Optional directory to keep generated benchmark files")
+    parser.add_argument("--repobench-data", default="", help="Path to RepoBench-R data/python_cff.gz")
+    parser.add_argument("--repobench-config", default="python_cff")
+    parser.add_argument("--repobench-split", choices=["easy", "hard"], default="hard")
+    parser.add_argument("--repobench-sample-size", type=int, default=100)
+    parser.add_argument("--repobench-seed", type=int, default=42)
+    parser.add_argument("--repobench-p-data", default="", help="Path to a RepoBench v1.1 parquet file or split directory")
+    parser.add_argument("--repobench-p-language", choices=["python", "java"], default="python")
+    parser.add_argument(
+        "--repobench-p-split",
+        choices=["cross_file_first", "cross_file_random", "in_file", "cff", "cfr", "if"],
+        default="cross_file_first",
+    )
+    parser.add_argument("--repobench-p-sample-size", type=int, default=100)
+    parser.add_argument("--repobench-p-seed", type=int, default=42)
+    parser.add_argument(
+        "--repobench-p-max-shards",
+        type=int,
+        default=1,
+        help="Maximum RepoBench v1.1 parquet shards to load from Hugging Face; use 0 for all matching shards",
+    )
+    parser.add_argument("--min-repobench-snapzip-acc1", type=float, default=None, help="Minimum SnapZip acc@1 for RepoBench-R")
+    parser.add_argument("--min-repobench-snapzip-acc3", type=float, default=None, help="Minimum SnapZip acc@3 for RepoBench-R")
+    parser.add_argument("--min-repobench-snapzip-acc5", type=float, default=None, help="Minimum SnapZip acc@5 for RepoBench-R")
+    parser.add_argument("--min-repobench-snapzip-mrr5", type=float, default=None, help="Minimum SnapZip MRR@5 for RepoBench-R")
+    parser.add_argument("--min-repobench-snapzip-ndcg5", type=float, default=None, help="Minimum SnapZip nDCG@5 for RepoBench-R")
+    parser.add_argument("--max-repobench-snapzip-duplicate-top5-records", type=int, default=None, help="Maximum records with duplicate SnapZip top-5 results for RepoBench-R")
+    parser.add_argument("--max-repobench-snapzip-duplicate-top5-slots", type=int, default=None, help="Maximum duplicate SnapZip top-5 result slots for RepoBench-R")
+    parser.add_argument("--min-repobench-snapzip-acc5-over-bm25", type=float, default=None, help="Minimum SnapZip acc@5 delta over BM25 for RepoBench-R")
+    parser.add_argument("--min-repobench-snapzip-mrr5-over-bm25", type=float, default=None, help="Minimum SnapZip MRR@5 delta over BM25 for RepoBench-R")
+    parser.add_argument("--min-repobench-snapzip-ndcg5-over-bm25", type=float, default=None, help="Minimum SnapZip nDCG@5 delta over BM25 for RepoBench-R")
+    parser.add_argument("--min-repobench-snapzip-acc5-over-jaccard", type=float, default=None, help="Minimum SnapZip acc@5 delta over Jaccard for RepoBench-R")
+    parser.add_argument("--min-repobench-p-snapzip-gold-hit5", type=float, default=None, help="Minimum SnapZip gold hit@5 for RepoBench v1.1")
+    parser.add_argument("--min-repobench-p-snapzip-new-token-coverage5", type=float, default=None, help="Minimum SnapZip new-token coverage@5 for RepoBench v1.1")
+    parser.add_argument("--min-repobench-p-snapzip-identifier-hit5", type=float, default=None, help="Minimum SnapZip gold-identifier hit@5 for RepoBench v1.1")
+    parser.add_argument("--min-repobench-p-snapzip-gold-hit5-over-bm25", type=float, default=None, help="Minimum SnapZip gold hit@5 delta over BM25 for RepoBench v1.1")
+    parser.add_argument("--min-repobench-p-snapzip-new-token-coverage5-over-bm25", type=float, default=None, help="Minimum SnapZip new-token coverage@5 delta over BM25 for RepoBench v1.1")
     args = parser.parse_args()
 
     snapzip_bin = resolve_snapzip_bin(args.snapzip_bin)
@@ -440,9 +1695,14 @@ def main():
             result["runs"].append(run_context_quality(work_parent, args, snapzip_bin))
         if args.suite in ("algorithm-20", "all"):
             result["runs"].append(run_algorithm_20(work_parent, args, snapzip_bin))
+        if args.suite in ("repobench-r", "all"):
+            result["runs"].append(run_repobench_r(work_parent, args, snapzip_bin))
+        if args.suite in ("repobench-p", "all"):
+            result["runs"].append(run_repobench_p(work_parent, args, snapzip_bin))
 
         result["elapsed_seconds"] = round(time.perf_counter() - started, 6)
         result["passed"] = all(snapzip_passed(run) for run in result["runs"])
+        result = apply_quality_gates(result, args)
         if args.keep_workdir:
             result["workdir"] = str(work_parent)
     except BenchmarkFailure as exc:

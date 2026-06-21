@@ -91,7 +91,7 @@ func printUsage() {
 	fmt.Println("  symbols        Search indexed symbols")
 	fmt.Println("  symbol-context Show matching definitions and call/reference sites")
 	fmt.Println("  imports        Search indexed imports and dependency references")
-	fmt.Println("  graph          Show resolved import graph for an indexed file")
+	fmt.Println("  graph          Show resolved import and symbol graph for an indexed file")
 	fmt.Println("  related        Find files related to an indexed path")
 	fmt.Println("  affected       Find tests likely affected by changed or named files")
 	fmt.Println("  pr             Build diff-aware review context for changed files")
@@ -118,6 +118,7 @@ func handleInitDB() {
 	crawl := fs.String("crawl", "", "Codebase directory to crawl and index")
 	reset := fs.Bool("reset", false, "Remove any existing memory.db before initializing")
 	maxFileBytes := fs.Int64("max-file-bytes", core.DefaultMaxIndexFileBytes, "Maximum individual source file size to index")
+	maxContentBytes := fs.Int("max-content-bytes", core.DefaultMaxKnowledgeContentBytes, "Maximum source bytes per indexed snippet")
 	_ = fs.Parse(os.Args[2:])
 	langsProvided := flagWasProvided(fs, "langs")
 	crawlProvided := flagWasProvided(fs, "crawl")
@@ -175,6 +176,7 @@ func handleInitDB() {
 		fmt.Printf("\nIndexing files under: %s...\n", codebasePath)
 		options := core.DefaultIndexOptions()
 		options.MaxFileBytes = *maxFileBytes
+		options.MaxContentBytes = *maxContentBytes
 		entryCount, err := core.IndexDirectoryWithOptions(db, codebasePath, langFilter, options)
 
 		if err != nil {

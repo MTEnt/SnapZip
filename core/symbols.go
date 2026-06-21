@@ -115,6 +115,9 @@ func ReplaceSymbolsForFile(db *sql.DB, language, path string, content []byte) er
 	if _, err := tx.Exec("DELETE FROM symbols WHERE path = ?", path); err != nil {
 		return err
 	}
+	if _, err := tx.Exec("DELETE FROM symbols_fts WHERE path = ?", path); err != nil {
+		return err
+	}
 	for _, symbol := range symbols {
 		_, err := tx.Exec(`
 			INSERT INTO symbols (name, kind, signature, language, path, line)
@@ -131,6 +134,29 @@ func ReplaceSymbolsForFile(db *sql.DB, language, path string, content []byte) er
 			symbol.Line,
 		)
 		if err != nil {
+			return err
+		}
+		var rowID int64
+		if err := tx.QueryRow(`
+			SELECT id FROM symbols
+			WHERE path = ? AND name = ? AND kind = ? AND line = ?`,
+			symbol.Path,
+			symbol.Name,
+			symbol.Kind,
+			symbol.Line,
+		).Scan(&rowID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO symbols_fts(rowid, name, kind, signature, language, path)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			rowID,
+			symbol.Name,
+			symbol.Kind,
+			symbol.Signature,
+			symbol.Language,
+			symbol.Path,
+		); err != nil {
 			return err
 		}
 	}
@@ -151,6 +177,9 @@ func ReplaceSymbolReferencesForFile(db *sql.DB, language, path string, content [
 	if _, err := tx.Exec("DELETE FROM symbol_refs WHERE path = ?", path); err != nil {
 		return err
 	}
+	if _, err := tx.Exec("DELETE FROM symbol_refs_fts WHERE path = ?", path); err != nil {
+		return err
+	}
 	for _, ref := range refs {
 		_, err := tx.Exec(`
 			INSERT INTO symbol_refs (name, language, path, line, context)
@@ -168,12 +197,41 @@ func ReplaceSymbolReferencesForFile(db *sql.DB, language, path string, content [
 		if err != nil {
 			return err
 		}
+		var rowID int64
+		if err := tx.QueryRow(`
+			SELECT id FROM symbol_refs
+			WHERE path = ? AND name = ? AND line = ?`,
+			ref.Path,
+			ref.Name,
+			ref.Line,
+		).Scan(&rowID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO symbol_refs_fts(rowid, name, language, path, context)
+			VALUES (?, ?, ?, ?, ?)`,
+			rowID,
+			ref.Name,
+			ref.Language,
+			ref.Path,
+			ref.Context,
+		); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
 
 func ExtractSymbols(language, path, content string) []Symbol {
 	language = NormalizeLanguage(language)
+	if language == "go" {
+		if symbols, ok := extractGoSymbolsAST(path, content); ok {
+			return symbols
+		}
+	}
+	if language == "py" {
+		return extractPythonSymbols(path, content)
+	}
 	patterns := symbolPatterns[language]
 	if len(patterns) == 0 {
 		return nil
@@ -205,10 +263,100 @@ func ExtractSymbols(language, path, content string) []Symbol {
 	return symbols
 }
 
+type pythonClassScope struct {
+	name   string
+	indent int
+}
+
+func extractPythonSymbols(path, content string) []Symbol {
+	var symbols []Symbol
+	var classStack []pythonClassScope
+	lines := strings.Split(content, "\n")
+	for idx, line := range lines {
+		trimmed := strings.TrimSpace(stripLineComment("py", line))
+		if trimmed == "" {
+			continue
+		}
+
+		indent := leadingIndentWidth(line)
+		for len(classStack) > 0 && indent <= classStack[len(classStack)-1].indent {
+			classStack = classStack[:len(classStack)-1]
+		}
+
+		if match := symbolPatterns["py"][0].re.FindStringSubmatch(line); len(match) > 1 {
+			name := strings.TrimSpace(match[1])
+			if name == "" || protectedIdentifier(name) {
+				continue
+			}
+			symbols = append(symbols, Symbol{
+				Name:      name,
+				Kind:      "class",
+				Signature: strings.TrimSpace(line),
+				Language:  "py",
+				Path:      path,
+				Line:      idx + 1,
+			})
+			classStack = append(classStack, pythonClassScope{name: name, indent: indent})
+			continue
+		}
+
+		if match := symbolPatterns["py"][1].re.FindStringSubmatch(line); len(match) > 1 {
+			name := strings.TrimSpace(match[1])
+			if name == "" || protectedIdentifier(name) {
+				continue
+			}
+			kind := "function"
+			signature := strings.TrimSpace(line)
+			if len(classStack) > 0 {
+				kind = "method"
+				signature = pythonQualifiedName(classStack, name) + ": " + signature
+			}
+			symbols = append(symbols, Symbol{
+				Name:      name,
+				Kind:      kind,
+				Signature: signature,
+				Language:  "py",
+				Path:      path,
+				Line:      idx + 1,
+			})
+		}
+	}
+	return symbols
+}
+
+func leadingIndentWidth(line string) int {
+	width := 0
+	for _, char := range line {
+		switch char {
+		case ' ':
+			width++
+		case '\t':
+			width += 4
+		default:
+			return width
+		}
+	}
+	return width
+}
+
+func pythonQualifiedName(scopes []pythonClassScope, name string) string {
+	parts := make([]string, 0, len(scopes)+1)
+	for _, scope := range scopes {
+		parts = append(parts, scope.name)
+	}
+	parts = append(parts, name)
+	return strings.Join(parts, ".")
+}
+
 func ExtractSymbolReferences(language, path, content string) []SymbolReference {
 	language = NormalizeLanguage(language)
 	if !supportsSymbolReferences(language) {
 		return nil
+	}
+	if language == "go" {
+		if refs, ok := extractGoSymbolReferencesAST(path, content); ok {
+			return refs
+		}
 	}
 
 	definedOnLine := map[int]map[string]bool{}
@@ -248,27 +396,69 @@ func ExtractSymbolReferences(language, path, content string) []SymbolReference {
 func SearchSymbols(db *sql.DB, query string, limit int) ([]Symbol, error) {
 	limit = normalizeResultLimit(limit, 20)
 	tokens := searchTokens(query)
-	rows, err := db.Query(`
-		SELECT id, name, kind, signature, language, path, line
-		FROM symbols
-		ORDER BY path ASC, line ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var matches []Symbol
-	for rows.Next() {
-		symbol, err := scanSymbol(rows)
+	seen := map[int]bool{}
+
+	if ftsQuery := metadataFTSQuery(tokens); ftsQuery != "" {
+		rows, err := db.Query(`
+			SELECT s.id, s.name, s.kind, s.signature, s.language, s.path, s.line
+			FROM symbols s
+			JOIN symbols_fts f ON s.id = f.rowid
+			WHERE symbols_fts MATCH ?
+			ORDER BY bm25(symbols_fts, 8.0, 1.0, 4.0, 1.0, 2.0)
+			LIMIT ?`, ftsQuery, metadataFTSCandidateLimit(limit))
 		if err != nil {
 			return nil, err
 		}
-		if symbolMatches(symbol, tokens) {
-			matches = append(matches, symbol)
+		for rows.Next() {
+			symbol, err := scanSymbol(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			seen[symbol.ID] = true
+			if symbolMatches(symbol, tokens) {
+				matches = append(matches, symbol)
+			}
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+
+	if len(matches) < limit {
+		sqlText := `
+			SELECT id, name, kind, signature, language, path, line
+			FROM symbols`
+		args := []any(nil)
+		if where, whereArgs := metadataSearchWhere(tokens, "name", "kind", "signature", "language", "path"); where != "" {
+			sqlText += " WHERE " + where
+			args = append(args, whereArgs...)
+		}
+		sqlText += " ORDER BY path ASC, line ASC"
+		rows, err := db.Query(sqlText, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			symbol, err := scanSymbol(rows)
+			if err != nil {
+				return nil, err
+			}
+			if seen[symbol.ID] {
+				continue
+			}
+			if symbolMatches(symbol, tokens) {
+				matches = append(matches, symbol)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 
 	sort.SliceStable(matches, func(i, j int) bool {
@@ -283,27 +473,69 @@ func SearchSymbols(db *sql.DB, query string, limit int) ([]Symbol, error) {
 func SearchSymbolReferences(db *sql.DB, query string, limit int) ([]SymbolReference, error) {
 	limit = normalizeResultLimit(limit, 20)
 	tokens := searchTokens(query)
-	rows, err := db.Query(`
-		SELECT id, name, language, path, line, context
-		FROM symbol_refs
-		ORDER BY path ASC, line ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var matches []SymbolReference
-	for rows.Next() {
-		ref, err := scanSymbolReference(rows)
+	seen := map[int]bool{}
+
+	if ftsQuery := metadataFTSQuery(tokens); ftsQuery != "" {
+		rows, err := db.Query(`
+			SELECT r.id, r.name, r.language, r.path, r.line, r.context
+			FROM symbol_refs r
+			JOIN symbol_refs_fts f ON r.id = f.rowid
+			WHERE symbol_refs_fts MATCH ?
+			ORDER BY bm25(symbol_refs_fts, 6.0, 1.0, 2.0, 4.0)
+			LIMIT ?`, ftsQuery, metadataFTSCandidateLimit(limit))
 		if err != nil {
 			return nil, err
 		}
-		if symbolReferenceMatches(ref, tokens) {
-			matches = append(matches, ref)
+		for rows.Next() {
+			ref, err := scanSymbolReference(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			seen[ref.ID] = true
+			if symbolReferenceMatches(ref, tokens) {
+				matches = append(matches, ref)
+			}
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+
+	if len(matches) < limit {
+		sqlText := `
+			SELECT id, name, language, path, line, context
+			FROM symbol_refs`
+		args := []any(nil)
+		if where, whereArgs := metadataSearchWhere(tokens, "name", "language", "path", "context"); where != "" {
+			sqlText += " WHERE " + where
+			args = append(args, whereArgs...)
+		}
+		sqlText += " ORDER BY path ASC, line ASC"
+		rows, err := db.Query(sqlText, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			ref, err := scanSymbolReference(rows)
+			if err != nil {
+				return nil, err
+			}
+			if seen[ref.ID] {
+				continue
+			}
+			if symbolReferenceMatches(ref, tokens) {
+				matches = append(matches, ref)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 
 	sort.SliceStable(matches, func(i, j int) bool {

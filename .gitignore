@@ -23,3 +23,6 @@ __pycache__/
 # Benchmark output
 /benchmarks/.work/
 *.benchmark.json
+
+# Local coder handoff notes
+/coder activity/

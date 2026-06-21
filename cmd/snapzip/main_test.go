@@ -55,6 +55,9 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 	if !strings.Contains(searchOutput, "CacheStore") {
 		t.Fatalf("search output did not include indexed Ruby fixture:\n%s", searchOutput)
 	}
+	if !strings.Contains(searchOutput, "## Context Receipts") {
+		t.Fatalf("search output did not include retrieval receipts:\n%s", searchOutput)
+	}
 
 	searchJSON := runSnapZip(t, repoRoot,
 		"search",
@@ -487,7 +490,7 @@ func TestRepositoryGitHubActionArtifacts(t *testing.T) {
 			t.Fatalf("snapzip-pr-context workflow missing %q:\n%s", want, workflow)
 		}
 	}
-	if strings.Contains(workflow, "outputs.report-path") || strings.Contains(workflow, "node20") {
+	if strings.Contains(workflow, "outputs.report-path") || strings.Contains(workflow, "node"+"20") {
 		t.Fatalf("snapzip-pr-context workflow contains stale output or runtime reference:\n%s", workflow)
 	}
 
@@ -562,6 +565,70 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 	ciWorkflow := readRepoFile(t, repoRoot, ".github/workflows/ci.yml")
 	if !strings.Contains(ciWorkflow, "examples/review_demo/app/cache.py") || !strings.Contains(ciWorkflow, "examples/review_demo/tests/test_cache.py") {
 		t.Fatalf("CI workflow does not compile review demo files:\n%s", ciWorkflow)
+	}
+	if !strings.Contains(ciWorkflow, "Run public safety scan") || !strings.Contains(ciWorkflow, "scripts/public_safety_scan.py --root .") {
+		t.Fatalf("CI workflow does not run public safety scan:\n%s", ciWorkflow)
+	}
+	for _, want := range []string{
+		"huggingface_hub>=0.23",
+		"--suite context-quality",
+		"--suite repobench-r",
+		"--min-repobench-snapzip-acc1 0.17",
+		"--min-repobench-snapzip-acc3 0.36",
+		"--min-repobench-snapzip-acc5 0.59",
+		"--min-repobench-snapzip-mrr5 0.298667",
+		"--min-repobench-snapzip-ndcg5 0.369709",
+		"--max-repobench-snapzip-duplicate-top5-records 0",
+		"--max-repobench-snapzip-duplicate-top5-slots 0",
+		"--min-repobench-snapzip-acc5-over-bm25 0.06",
+		"--min-repobench-snapzip-mrr5-over-bm25 0.03",
+		"--min-repobench-snapzip-ndcg5-over-bm25 0.04",
+		"--min-repobench-snapzip-acc5-over-jaccard 0.10",
+	} {
+		if !strings.Contains(ciWorkflow, want) {
+			t.Fatalf("CI workflow missing public retrieval quality gate fragment %q:\n%s", want, ciWorkflow)
+		}
+	}
+
+	commandsExtra := readRepoFile(t, repoRoot, "cmd/snapzip/commands_extra.go")
+	for _, want := range []string{
+		"repobench-p",
+		"repobench-p-data",
+		"repobench-p-sample-size",
+		"min-repobench-p-snapzip-new-token-coverage5-over-bm25",
+		"min-repobench-snapzip-ndcg5-over-bm25",
+	} {
+		if !strings.Contains(commandsExtra, want) {
+			t.Fatalf("snapzip eval wrapper missing benchmark flag %q:\n%s", want, commandsExtra)
+		}
+	}
+}
+
+func TestPublicSafetyScan(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(repoRoot, "scripts", "public_safety_scan.py")
+
+	cleanDir := t.TempDir()
+	writeCLIFile(t, cleanDir, "README.md", "public-safe benchmark notes\n")
+	cmd := exec.Command("python3", script, "--root", cleanDir)
+	cmd.Dir = repoRoot
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("public safety scan rejected clean fixture: %v\n%s", err, string(output))
+	}
+
+	leakyDir := t.TempDir()
+	writeCLIFile(t, leakyDir, "notes.md", "local path: "+"/Users/"+"MTEnt/Documents/private\n")
+	cmd = exec.Command("python3", script, "--root", leakyDir)
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("public safety scan accepted leaky fixture:\n%s", string(output))
+	}
+	if !strings.Contains(string(output), "local developer Documents path") {
+		t.Fatalf("public safety scan reported wrong failure:\n%s", string(output))
 	}
 }
 

@@ -33,10 +33,84 @@ python3 benchmarks/run.py --suite repair-retrieval --snapzip-bin ./snapzip
 
 ## Context Quality Benchmark
 
-The context quality suite uses a public-safe synthetic project with source, tests, and distracting cache-related noise. It checks whether `pack --json` emits quality metrics for receipts, definitions, references, and test coverage.
+The context quality suite uses public-safe synthetic projects with source, tests, distracting cache-related noise, a structural reranking fixture, a multi-path expanded-identifier retrieval fixture, and Go/Python/JavaScript/Ruby chunking fixtures. It checks whether `pack --json` emits quality metrics for receipts, structural graph receipts, definitions, references, and test coverage. It also verifies that task-mode packs include local symbol-reference graph receipts that explain source/test caller-definition relationships, that `graph --json` exposes symbol caller/definition edges, that structural reranking prefers an indexed definition over keyword-heavy noise, that multi-path retrieval can recover split identifiers from camelCase prompt terms and explain the matched expanded-identifier terms in receipts, and that structural chunking keeps unrelated top-level declarations out of focused snippets.
 
 ```bash
 python3 benchmarks/run.py --suite context-quality --snapzip-bin ./snapzip
+```
+
+## RepoBench-R Retrieval Benchmark
+
+The RepoBench-R suite uses the public `tianyang/repobench-r` dataset. It materializes the official candidate snippets into temporary files, indexes them with SnapZip, and compares top-5 retrieval against token Jaccard and BM25 baselines.
+The report includes acc@1/3/5, MRR@5, nDCG@5, gold-rank diagnostics, and duplicate top-5 result counts.
+
+```bash
+python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobench-sample-size 100 --json /tmp/snapzip-repobench-r.json
+```
+
+Equivalent CLI wrapper:
+
+```bash
+snapzip eval --suite repobench-r --snapzip-bin ./snapzip --repobench-sample-size 100 --json /tmp/snapzip-repobench-r.json
+```
+
+Current 100-sample public readout on `python_cff` / `test_hard`, seed `42`:
+
+- Jaccard: 10/100 acc@1, 32/100 acc@3, 48/100 acc@5, 0.2315 MRR@5, 0.292862 nDCG@5
+- BM25: 14/100 acc@1, 31/100 acc@3, 52/100 acc@5, 0.261167 MRR@5, 0.324596 nDCG@5
+- SnapZip: 17/100 acc@1, 36/100 acc@3, 59/100 acc@5, 0.298667 MRR@5, 0.369709 nDCG@5, 0 duplicate top-5 records
+
+Use optional quality gates for release or CI checks:
+
+```bash
+python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobench-sample-size 100 \
+  --min-repobench-snapzip-acc1 0.17 \
+  --min-repobench-snapzip-acc3 0.36 \
+  --min-repobench-snapzip-acc5 0.59 \
+  --min-repobench-snapzip-mrr5 0.298667 \
+  --min-repobench-snapzip-ndcg5 0.369709 \
+  --max-repobench-snapzip-duplicate-top5-records 0 \
+  --max-repobench-snapzip-duplicate-top5-slots 0 \
+  --min-repobench-snapzip-acc5-over-bm25 0.06 \
+  --min-repobench-snapzip-mrr5-over-bm25 0.03 \
+  --min-repobench-snapzip-ndcg5-over-bm25 0.04 \
+  --min-repobench-snapzip-acc5-over-jaccard 0.10
+```
+
+The default CI workflow runs this gated public sample so retrieval changes must preserve both the current measured floor and the current measured lift over raw baselines before merging.
+
+## RepoBench v1.1 Pipeline-Context Proxy
+
+The `repobench-p` suite uses the public RepoBench v1.1 parquet dataset. It materializes each row's cross-file context snippets, indexes them with SnapZip, and compares top-5 context selection against random, token Jaccard, and BM25 baselines.
+
+This is not a live-model completion benchmark. It is a context-quality proxy for completion: the report measures gold cross-file snippet hit@1/3/5, MRR@5, nDCG@5, gold-identifier hit@5, and coverage of next-line tokens that are absent from the raw in-file prompt.
+
+```bash
+python3 -m pip install "huggingface_hub>=0.23" "pyarrow>=15"
+python3 benchmarks/run.py --suite repobench-p --snapzip-bin ./snapzip --repobench-p-sample-size 100 --json /tmp/snapzip-repobench-p.json
+```
+
+Equivalent CLI wrapper:
+
+```bash
+snapzip eval --suite repobench-p --snapzip-bin ./snapzip --repobench-p-sample-size 100 --json /tmp/snapzip-repobench-p.json
+```
+
+Current 100-sample public readout on RepoBench v1.1 Python `cross_file_first`, first parquet shard, seed `42`:
+
+- Random: 84/100 gold hit@5, 0.506 MRR@5, 0.293 new-token coverage@5
+- Jaccard: 90/100 gold hit@5, 0.564333 MRR@5, 0.309667 new-token coverage@5
+- BM25: 89/100 gold hit@5, 0.569667 MRR@5, 0.300667 new-token coverage@5, 0.92 identifier hit@5
+- SnapZip: 32/100 gold hit@1, 75/100 gold hit@3, 89/100 gold hit@5, 0.544667 MRR@5, 0.307167 new-token coverage@5, 0.93 identifier hit@5
+
+Use optional gates when tuning completion-context retrieval:
+
+```bash
+python3 benchmarks/run.py --suite repobench-p --snapzip-bin ./snapzip --repobench-p-sample-size 100 \
+  --min-repobench-p-snapzip-gold-hit5 0.89 \
+  --min-repobench-p-snapzip-new-token-coverage5 0.307167 \
+  --min-repobench-p-snapzip-identifier-hit5 0.93 \
+  --min-repobench-p-snapzip-new-token-coverage5-over-bm25 0.006
 ```
 
 ## Full Algorithm Benchmark

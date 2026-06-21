@@ -1,6 +1,8 @@
 package core
 
 import (
+	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,6 +203,255 @@ func TestIndexDirectoryChunksLargeFiles(t *testing.T) {
 	}
 }
 
+func TestSplitContentChunksForLanguageUsesCodeBoundaries(t *testing.T) {
+	header := "import os\n\n"
+	alpha := "def alpha():\n    alpha_value = 'a'\n    return alpha_value\n\n"
+	beta := "def beta():\n    beta_value = 'b'\n    return beta_value\n"
+	content := []byte(header + alpha + beta)
+	maxBytes := len([]byte(header+alpha)) + 1
+
+	chunks := splitContentChunksForLanguage("py", content, maxBytes)
+	if len(chunks) != 2 {
+		t.Fatalf("got %d chunks, want 2: %+v", len(chunks), chunks)
+	}
+	if strings.Contains(string(chunks[0].Data), "def beta") {
+		t.Fatalf("first chunk crossed into beta function:\n%s", string(chunks[0].Data))
+	}
+	if !strings.Contains(string(chunks[1].Data), "def beta") {
+		t.Fatalf("second chunk missing beta function:\n%s", string(chunks[1].Data))
+	}
+	if chunks[1].StartLine <= chunks[0].EndLine {
+		t.Fatalf("chunk line ranges overlap: first %d-%d second %d-%d", chunks[0].StartLine, chunks[0].EndLine, chunks[1].StartLine, chunks[1].EndLine)
+	}
+}
+
+func TestSplitContentChunksForLanguageUsesSymbolsAcrossLanguages(t *testing.T) {
+	cases := []struct {
+		name       string
+		language   string
+		secondName string
+		content    string
+	}{
+		{
+			name:       "go functions",
+			language:   "go",
+			secondName: "func Beta",
+			content:    "package pkg\n\nfunc Alpha() string {\n\treturn \"a\"\n}\n\nfunc Beta() string {\n\treturn \"b\"\n}\n",
+		},
+		{
+			name:       "typescript interfaces",
+			language:   "ts",
+			secondName: "interface Beta",
+			content:    "export interface Alpha {\n  id: string\n}\n\nexport interface Beta {\n  id: string\n}\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			maxBytes := strings.Index(tc.content, tc.secondName)
+			if maxBytes <= 0 {
+				t.Fatalf("test setup did not find second boundary %q", tc.secondName)
+			}
+			chunks := splitContentChunksForLanguage(tc.language, []byte(tc.content), maxBytes+1)
+			if len(chunks) != 2 {
+				t.Fatalf("got %d chunks, want 2: %+v", len(chunks), chunks)
+			}
+			if strings.Contains(string(chunks[0].Data), tc.secondName) {
+				t.Fatalf("first chunk crossed into second block:\n%s", string(chunks[0].Data))
+			}
+			if !strings.Contains(string(chunks[1].Data), tc.secondName) {
+				t.Fatalf("second chunk missing second block:\n%s", string(chunks[1].Data))
+			}
+		})
+	}
+}
+
+func TestSplitContentChunksForGoUsesASTDeclarationSpans(t *testing.T) {
+	registry := "var HugeRegistry = map[string]string{\n" +
+		strings.Repeat("\t\"feature\": \"enabled\",\n", 18) +
+		"}\n\n"
+	alpha := "func Alpha() string {\n\treturn \"alpha\"\n}\n"
+	beta := "func Beta() string {\n" +
+		strings.Repeat("\tvalue := \"beta\"\n", 5) +
+		"\treturn value\n}\n"
+	content := "package pkg\n\n" + registry + alpha + "\n" + beta
+	maxBytes := len([]byte("\n"+alpha)) + 2
+
+	chunks := splitContentChunksForLanguage("go", []byte(content), maxBytes)
+	var alphaChunk contentChunk
+	for _, chunk := range chunks {
+		if strings.Contains(string(chunk.Data), "func Alpha") {
+			alphaChunk = chunk
+			break
+		}
+	}
+	if len(alphaChunk.Data) == 0 {
+		t.Fatalf("no chunk contained Alpha: %+v", chunks)
+	}
+	alphaContent := string(alphaChunk.Data)
+	if !strings.Contains(alphaContent, "return \"alpha\"") {
+		t.Fatalf("Alpha chunk is incomplete:\n%s", alphaContent)
+	}
+	if strings.Contains(alphaContent, "HugeRegistry") {
+		t.Fatalf("Alpha chunk retained unrelated top-level var:\n%s", alphaContent)
+	}
+	if strings.Contains(alphaContent, "func Beta") {
+		t.Fatalf("Alpha chunk crossed into sibling function:\n%s", alphaContent)
+	}
+}
+
+func TestSplitContentChunksForPythonUsesTopLevelStructuralSpans(t *testing.T) {
+	routes := "ROUTES = {\n" +
+		strings.Repeat("    \"feature\": \"enabled\",\n", 18) +
+		"}\n\n"
+	alpha := "def alpha():\n    return \"alpha\"\n"
+	beta := "def beta():\n" +
+		strings.Repeat("    value = \"beta\"\n", 5) +
+		"    return value\n"
+	content := routes + alpha + "\n" + beta
+	maxBytes := len([]byte("\n"+alpha)) + 2
+
+	chunks := splitContentChunksForLanguage("py", []byte(content), maxBytes)
+	var alphaChunk contentChunk
+	for _, chunk := range chunks {
+		if strings.Contains(string(chunk.Data), "def alpha") {
+			alphaChunk = chunk
+			break
+		}
+	}
+	if len(alphaChunk.Data) == 0 {
+		t.Fatalf("no chunk contained alpha: %+v", chunks)
+	}
+	alphaContent := string(alphaChunk.Data)
+	if !strings.Contains(alphaContent, "return \"alpha\"") {
+		t.Fatalf("alpha chunk is incomplete:\n%s", alphaContent)
+	}
+	if strings.Contains(alphaContent, "ROUTES") {
+		t.Fatalf("alpha chunk retained unrelated top-level data:\n%s", alphaContent)
+	}
+	if strings.Contains(alphaContent, "def beta") {
+		t.Fatalf("alpha chunk crossed into sibling function:\n%s", alphaContent)
+	}
+}
+
+func TestSplitContentChunksForPopularLanguagesUsesTopLevelStructuralSpans(t *testing.T) {
+	cases := []struct {
+		name      string
+		language  string
+		content   string
+		target    string
+		required  string
+		forbidden []string
+	}{
+		{
+			name:     "javascript declarations",
+			language: "js",
+			content: "const registry = {\n" +
+				strings.Repeat("  feature: \"enabled\",\n", 18) +
+				"};\n\n" +
+				"export function alpha() {\n  return \"alpha\"\n}\n\n" +
+				"export function beta() {\n" +
+				strings.Repeat("  const value = \"beta\"\n", 5) +
+				"  return value\n}\n",
+			target:    "function alpha",
+			required:  "return \"alpha\"",
+			forbidden: []string{"const registry", "function beta"},
+		},
+		{
+			name:     "typescript interfaces",
+			language: "ts",
+			content: "export interface Alpha {\n  id: string\n  name: string\n}\n\n" +
+				"export interface Beta {\n" +
+				strings.Repeat("  value: string\n", 5) +
+				"}\n",
+			target:    "interface Alpha",
+			required:  "name: string",
+			forbidden: []string{"interface Beta"},
+		},
+		{
+			name:     "java classes",
+			language: "java",
+			content: "public class Alpha {\n  String value() {\n    return \"alpha\";\n  }\n}\n\n" +
+				"public class Beta {\n" +
+				strings.Repeat("  String value = \"beta\";\n", 5) +
+				"}\n",
+			target:    "class Alpha",
+			required:  "return \"alpha\"",
+			forbidden: []string{"class Beta"},
+		},
+		{
+			name:     "rust declarations",
+			language: "rs",
+			content: "pub static REGISTRY: &[&str] = &[\n" +
+				strings.Repeat("    \"feature\",\n", 18) +
+				"];\n\n" +
+				"pub fn alpha() -> &'static str {\n    \"alpha\"\n}\n\n" +
+				"pub fn beta() -> String {\n" +
+				strings.Repeat("    let value = \"beta\";\n", 5) +
+				"    value.to_string()\n}\n",
+			target:    "fn alpha",
+			required:  "\"alpha\"",
+			forbidden: []string{"REGISTRY", "fn beta"},
+		},
+		{
+			name:     "ruby classes",
+			language: "rb",
+			content: "class Alpha\n  def value\n    \"alpha\"\n  end\nend\n\n" +
+				"class Beta\n" +
+				strings.Repeat("  def value\n    \"beta\"\n  end\n", 5) +
+				"end\n",
+			target:    "class Alpha",
+			required:  "\"alpha\"",
+			forbidden: []string{"class Beta"},
+		},
+		{
+			name:     "cpp functions",
+			language: "cpp",
+			content: "static const char* registry[] = {\n" +
+				strings.Repeat("  \"feature\",\n", 18) +
+				"};\n\n" +
+				"std::string alpha() {\n  return \"alpha\";\n}\n\n" +
+				"std::string beta() {\n" +
+				strings.Repeat("  auto value = \"beta\";\n", 5) +
+				"  return value;\n}\n",
+			target:    "alpha()",
+			required:  "return \"alpha\"",
+			forbidden: []string{"registry", "beta()"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			maxBytes := len([]byte(tc.required)) + 80
+			chunks := splitContentChunksForLanguage(tc.language, []byte(tc.content), maxBytes)
+			assertFocusedChunk(t, chunks, tc.target, tc.required, tc.forbidden...)
+		})
+	}
+}
+
+func assertFocusedChunk(t *testing.T, chunks []contentChunk, target, required string, forbidden ...string) {
+	t.Helper()
+	var found contentChunk
+	for _, chunk := range chunks {
+		if strings.Contains(string(chunk.Data), target) {
+			found = chunk
+			break
+		}
+	}
+	if len(found.Data) == 0 {
+		t.Fatalf("no chunk contained %q: %+v", target, chunks)
+	}
+	content := string(found.Data)
+	if !strings.Contains(content, required) {
+		t.Fatalf("focused chunk for %q missing %q:\n%s", target, required, content)
+	}
+	for _, unexpected := range forbidden {
+		if strings.Contains(content, unexpected) {
+			t.Fatalf("focused chunk for %q retained unrelated %q:\n%s", target, unexpected, content)
+		}
+	}
+}
+
 func TestFindAffectedTestsUsesDirectAndRelatedSignals(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root, "pkg/cache.go", "package cache\n\ntype CacheStore struct{}\n\nfunc NewCacheStore() CacheStore { return CacheStore{} }\n")
@@ -271,6 +522,7 @@ func TestIndexDirectoryStoresSymbolsAndRepoMap(t *testing.T) {
 	if stats.ImportRows == 0 {
 		t.Fatal("expected indexed import references")
 	}
+	assertMetadataFTSRowCounts(t, db)
 
 	related, err := RelatedFiles(db, "pkg/cache.go", 10)
 	if err != nil {
@@ -286,6 +538,35 @@ func TestIndexDirectoryStoresSymbolsAndRepoMap(t *testing.T) {
 	}
 	if len(plan.SuggestedCommands) == 0 || !strings.Contains(plan.SuggestedCommands[0].Command, "go test ./pkg") {
 		t.Fatalf("validation plan missing Go test command: %+v", plan.SuggestedCommands)
+	}
+}
+
+func TestSearchSymbolsKeepsNameMatchWhenFTSCandidatesAreCrowded(t *testing.T) {
+	root := t.TempDir()
+	for idx := 0; idx < metadataFTSCandidateLimit(1)+20; idx++ {
+		writeTestFile(t, root, fmt.Sprintf("pkg/decoy_%03d.go", idx), fmt.Sprintf("package pkg\n\nfunc Decoy%03d() { _ = CacheStore{} }\n", idx))
+	}
+	writeTestFile(t, root, "pkg/cache.go", "package pkg\n\ntype CacheStore struct{}\n")
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := IndexDirectory(db, root, NewLanguageFilter("go")); err != nil {
+		t.Fatal(err)
+	}
+
+	symbols, err := SearchSymbols(db, "CacheStore", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(symbols) != 1 {
+		t.Fatalf("got %d symbols, want 1", len(symbols))
+	}
+	if symbols[0].Name != "CacheStore" || symbols[0].Path != "pkg/cache.go" {
+		t.Fatalf("top crowded symbol = %+v, want CacheStore from pkg/cache.go", symbols[0])
 	}
 }
 
@@ -341,9 +622,17 @@ func TestImportsConnectSourceAndTests(t *testing.T) {
 	if len(graph.ImportedBy) == 0 || graph.ImportedBy[0].Path != "tests/test_cache.py" {
 		t.Fatalf("graph imported_by = %+v, want tests/test_cache.py", graph.ImportedBy)
 	}
-	if !strings.Contains(RenderDependencyGraph(graph), "Imported By") {
-		t.Fatalf("rendered graph missing incoming section:\n%s", RenderDependencyGraph(graph))
+	if len(graph.Symbols) == 0 {
+		t.Fatalf("graph symbols empty: %+v", graph)
 	}
+	if len(graph.ReferencedBy) == 0 || graph.ReferencedBy[0].Path != "tests/test_cache.py" {
+		t.Fatalf("graph referenced_by = %+v, want tests/test_cache.py", graph.ReferencedBy)
+	}
+	renderedGraph := RenderDependencyGraph(graph)
+	if !strings.Contains(renderedGraph, "Imported By") || !strings.Contains(renderedGraph, "Referenced By") {
+		t.Fatalf("rendered graph missing import or symbol graph section:\n%s", renderedGraph)
+	}
+	assertMetadataFTSRowCounts(t, db)
 
 	testGraph, err := BuildDependencyGraph(db, "tests/test_cache.py", 10)
 	if err != nil {
@@ -351,6 +640,9 @@ func TestImportsConnectSourceAndTests(t *testing.T) {
 	}
 	if len(testGraph.Imports) == 0 || testGraph.Imports[0].TargetPath != "app/cache.py" {
 		t.Fatalf("test graph imports = %+v, want resolved app/cache.py", testGraph.Imports)
+	}
+	if len(testGraph.ReferenceDefinitions) == 0 || testGraph.ReferenceDefinitions[0].Path != "app/cache.py" {
+		t.Fatalf("test graph reference definitions = %+v, want app/cache.py", testGraph.ReferenceDefinitions)
 	}
 
 	pack, err := BuildContextPack(db, mustTestCompressor(t), "build_cache", 5, 4096, 0)
@@ -437,4 +729,28 @@ func receiptEvidenceContains(receipts []ContextReceipt, needle string) bool {
 		}
 	}
 	return false
+}
+
+func assertMetadataFTSRowCounts(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, pair := range []struct {
+		source string
+		fts    string
+	}{
+		{"symbols", "symbols_fts"},
+		{"symbol_refs", "symbol_refs_fts"},
+		{"import_refs", "import_refs_fts"},
+	} {
+		sourceCount, err := tableRowCount(db, pair.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ftsCount, err := tableRowCount(db, pair.fts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sourceCount != ftsCount {
+			t.Fatalf("%s has %d rows, %s has %d rows", pair.source, sourceCount, pair.fts, ftsCount)
+		}
+	}
 }
