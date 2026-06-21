@@ -754,3 +754,44 @@ func assertMetadataFTSRowCounts(t *testing.T, db *sql.DB) {
 		}
 	}
 }
+
+func TestSplitContentChunksWithOverlap(t *testing.T) {
+	content := []byte("line1\nline2\nline3\nline4\nline5\n")
+	chunks := splitContentChunks(content, 12)
+
+	if len(chunks) != 4 {
+		t.Fatalf("got %d chunks, want 4", len(chunks))
+	}
+
+	// Chunk 1: "line1\nline2\n"
+	if chunks[0].StartLine != 1 || chunks[0].EndLine != 2 {
+		t.Errorf("chunk 0 lines: got %d-%d, want 1-2", chunks[0].StartLine, chunks[0].EndLine)
+	}
+	if string(chunks[0].Data) != "line1\nline2\n" {
+		t.Errorf("chunk 0 data: got %q, want %q", string(chunks[0].Data), "line1\nline2\n")
+	}
+
+	// Chunk 2: "2\nline3\n"
+	if chunks[1].StartLine != 2 || chunks[1].EndLine != 3 {
+		t.Errorf("chunk 1 lines: got %d-%d, want 2-3", chunks[1].StartLine, chunks[1].EndLine)
+	}
+	if string(chunks[1].Data) != "2\nline3\n" {
+		t.Errorf("chunk 1 data: got %q, want %q", string(chunks[1].Data), "2\nline3\n")
+	}
+
+	// Chunk 3: "3\nline4\n"
+	if chunks[2].StartLine != 3 || chunks[2].EndLine != 4 {
+		t.Errorf("chunk 2 lines: got %d-%d, want 3-4", chunks[2].StartLine, chunks[2].EndLine)
+	}
+	if string(chunks[2].Data) != "3\nline4\n" {
+		t.Errorf("chunk 2 data: got %q, want %q", string(chunks[2].Data), "3\nline4\n")
+	}
+
+	// Chunk 4: "4\nline5\n"
+	if chunks[3].StartLine != 4 || chunks[3].EndLine != 5 {
+		t.Errorf("chunk 3 lines: got %d-%d, want 4-5", chunks[3].StartLine, chunks[3].EndLine)
+	}
+	if string(chunks[3].Data) != "4\nline5\n" {
+		t.Errorf("chunk 3 data: got %q, want %q", string(chunks[3].Data), "4\nline5\n")
+	}
+}

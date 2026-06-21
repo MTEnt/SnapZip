@@ -671,6 +671,19 @@ type contentChunk struct {
 	EndLine   int
 }
 
+func lineCountForOffset(content []byte, offset int) int {
+	if offset <= 0 {
+		return 1
+	}
+	lines := 1
+	for i := 0; i < offset && i < len(content); i++ {
+		if content[i] == '\n' {
+			lines++
+		}
+	}
+	return lines
+}
+
 func splitContentChunks(content []byte, maxBytes int) []contentChunk {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxKnowledgeContentBytes
@@ -683,9 +696,11 @@ func splitContentChunks(content []byte, maxBytes int) []contentChunk {
 		}}
 	}
 
+	overlapBytes := maxBytes * 20 / 100
+
 	var chunks []contentChunk
-	startLine := 1
 	for start := 0; start < len(content); {
+		startLine := lineCountForOffset(content, start)
 		end := start + maxBytes
 		if end >= len(content) {
 			chunk := content[start:]
@@ -708,8 +723,12 @@ func splitContentChunks(content []byte, maxBytes int) []contentChunk {
 			StartLine: startLine,
 			EndLine:   endLine,
 		})
-		startLine = endLine + 1
-		start = chunkEnd
+
+		nextStart := chunkEnd - overlapBytes
+		if nextStart <= start {
+			nextStart = chunkEnd
+		}
+		start = nextStart
 	}
 	return chunks
 }
