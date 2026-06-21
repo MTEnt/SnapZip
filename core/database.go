@@ -1346,11 +1346,15 @@ func planRetrievalQuery(prompt string) retrievalQueryPlan {
 		if len(rankingTokens) == 0 {
 			rankingTokens = firstTokenList(primaryTokens, expandedTokens)
 		}
+		
+		synRankingTokens := expandSynonymTokens(rankingTokens)
+		synPrimaryTokens := expandSynonymTokens(primaryTokens)
+
 		return retrievalQueryPlan{
-			FTSTokens:        primaryTokens,
-			FTSPaths:         retrievalFTSPaths(primaryTokens, expandedTokens, rankingTokens),
-			RankingTokens:    rankingTokens,
-			StructuredPrompt: strings.Join(rankingTokens, " "),
+			FTSTokens:        limitSearchTokens(synPrimaryTokens, 32),
+			FTSPaths:         retrievalFTSPaths(synPrimaryTokens, rankingTokens, synRankingTokens),
+			RankingTokens:    limitSearchTokens(synRankingTokens, 48),
+			StructuredPrompt: strings.Join(limitSearchTokens(synRankingTokens, 24), " "),
 		}
 	}
 
@@ -2357,4 +2361,68 @@ func pathFromTopic(topic string) string {
 		topic = topic[:idx]
 	}
 	return strings.TrimSpace(topic)
+}
+
+var softwareSynonymMap = map[string][]string{
+	"delete":     {"remove", "evict", "purge", "clear", "destroy", "discard", "erase"},
+	"remove":     {"delete", "evict", "purge", "clear", "destroy", "discard", "erase"},
+	"evict":      {"delete", "remove", "purge", "clear", "discard"},
+	"purge":      {"delete", "remove", "evict", "clear", "discard"},
+	"destroy":    {"delete", "remove", "terminate", "close", "shutdown", "kill"},
+	"create":     {"build", "make", "new", "init", "setup", "generate", "produce"},
+	"build":      {"create", "make", "new", "init", "setup", "generate"},
+	"init":       {"create", "build", "setup", "initialize", "start", "begin"},
+	"initialize": {"create", "build", "setup", "init", "start", "begin"},
+	"start":      {"init", "begin", "launch", "run", "execute"},
+	"stop":       {"close", "shutdown", "terminate", "kill", "halt"},
+	"close":      {"stop", "shutdown", "terminate", "finalize"},
+	"shutdown":   {"stop", "close", "terminate", "kill"},
+	"fetch":      {"get", "retrieve", "load", "read", "query"},
+	"get":        {"fetch", "retrieve", "load", "read", "query"},
+	"retrieve":   {"fetch", "get", "load", "read", "query"},
+	"load":       {"fetch", "get", "retrieve", "read"},
+	"save":       {"write", "store", "persist", "insert", "update"},
+	"store":      {"save", "write", "persist", "insert"},
+	"persist":    {"save", "write", "store", "insert"},
+	"write":      {"save", "store", "persist", "insert"},
+	"add":        {"insert", "push", "append", "put"},
+	"insert":     {"add", "push", "append", "put"},
+	"push":       {"add", "insert", "append"},
+	"append":     {"add", "insert", "push"},
+	"put":        {"add", "insert", "set"},
+	"error":      {"fail", "failure", "exception", "panic", "err", "warn", "warning"},
+	"fail":       {"error", "failure", "exception", "panic", "err"},
+	"failure":    {"error", "fail", "exception", "panic", "err"},
+	"err":        {"error", "fail", "failure", "exception", "panic"},
+	"warn":       {"warning", "error"},
+	"warning":    {"warn", "error"},
+	"timeout":    {"deadline", "expiry", "expiration", "ttl"},
+	"expiry":     {"timeout", "deadline", "expiration", "ttl"},
+	"expiration": {"timeout", "deadline", "expiry", "ttl"},
+	"ttl":        {"timeout", "deadline", "expiry", "expiration"},
+	"auth":       {"login", "signin", "authenticate", "authorize", "token", "session"},
+	"login":      {"auth", "signin", "authenticate"},
+	"signin":     {"auth", "login", "authenticate"},
+	"authenticate": {"auth", "login", "signin", "authorize"},
+	"authorize":  {"auth", "authenticate", "permission", "allow"},
+}
+
+func expandSynonymTokens(tokens []string) []string {
+	var expanded []string
+	seen := map[string]bool{}
+	for _, t := range tokens {
+		if !seen[t] {
+			seen[t] = true
+			expanded = append(expanded, t)
+		}
+		if syns, ok := softwareSynonymMap[strings.ToLower(t)]; ok {
+			for _, syn := range syns {
+				if !seen[syn] {
+					seen[syn] = true
+					expanded = append(expanded, syn)
+				}
+			}
+		}
+	}
+	return expanded
 }

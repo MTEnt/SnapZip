@@ -90,6 +90,21 @@ func TestPlanRetrievalQueryKeepsNaturalLanguageTokens(t *testing.T) {
 	}
 }
 
+func TestPlanRetrievalQueryExpandsSynonyms(t *testing.T) {
+	plan := planRetrievalQuery("how to delete active cache records")
+
+	foundSynonym := false
+	for _, syn := range []string{"remove", "evict", "purge", "clear"} {
+		if stringSliceContains(plan.FTSTokens, syn) {
+			foundSynonym = true
+			break
+		}
+	}
+	if !foundSynonym {
+		t.Fatalf("synonym expansion failed, none of the expected synonyms found in: %+v", plan.FTSTokens)
+	}
+}
+
 func TestPlanRetrievalQueryAddsExpandedIdentifierFTSPath(t *testing.T) {
 	plan := planRetrievalQuery("fix getOrCreate refreshToken")
 

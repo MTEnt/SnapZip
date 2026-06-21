@@ -28,6 +28,9 @@ var (
 	identifierPattern       = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]{2,}`)
 	callPattern             = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 	quotedIdentifierPattern = regexp.MustCompile(`['"]([A-Za-z_][A-Za-z0-9_]{2,})['"]`)
+	jsFramePattern          = regexp.MustCompile(`at\s+(?:([A-Za-z0-9_$.<>\s]+)\s+\()?(?:file:\/\/)?([^:)]+):([0-9]+)(?::([0-9]+))?\)?`)
+	goFuncPattern           = regexp.MustCompile(`^([A-Za-z0-9_./\\:*-]+)(?:\.\([^*)]+\))?\.([A-Za-z0-9_]+)(?:\(.*\))?$`)
+	goPathPattern           = regexp.MustCompile(`^\s*(.+):([0-9]+)(?:\s+\+0x[0-9a-fA-F]+)?$`)
 )
 
 func AnalyzeFailureOutput(output, extra string) FailureAnalysis {
@@ -38,8 +41,47 @@ func AnalyzeFailureOutput(output, extra string) FailureAnalysis {
 	}
 
 	lines := strings.Split(output, "\n")
+	var lastGoFunc string
 	for _, line := range lines {
-		analysis.addPythonFrames(line, &queryTerms)
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			lastGoFunc = ""
+			continue
+		}
+
+		if analysis.addPythonFrames(trimmed, &queryTerms) {
+			lastGoFunc = ""
+			continue
+		}
+
+		if analysis.addJSFrames(trimmed, &queryTerms) {
+			lastGoFunc = ""
+			continue
+		}
+
+		if m := goFuncPattern.FindStringSubmatch(trimmed); len(m) > 0 {
+			lastGoFunc = m[2]
+			continue
+		}
+		if lastGoFunc != "" {
+			if m := goPathPattern.FindStringSubmatch(trimmed); len(m) > 0 {
+				path := cleanFailurePath(m[1])
+				lineNumber, _ := strconv.Atoi(m[2])
+				analysis.FileRefs = append(analysis.FileRefs, FailureFileRef{
+					Path:     path,
+					Line:     lineNumber,
+					Function: lastGoFunc,
+				})
+				queryTerms = append(queryTerms, path, lastGoFunc)
+				if !commonFailureSymbol(lastGoFunc) {
+					analysis.Symbols = append(analysis.Symbols, lastGoFunc)
+				}
+				lastGoFunc = ""
+				continue
+			}
+			lastGoFunc = ""
+		}
+
 		analysis.addGenericLocations(line, &queryTerms)
 		analysis.addQuotedIdentifiers(line, &queryTerms)
 		analysis.addCallSymbols(line, &queryTerms)
@@ -53,8 +95,12 @@ func AnalyzeFailureOutput(output, extra string) FailureAnalysis {
 	return analysis
 }
 
-func (analysis *FailureAnalysis) addPythonFrames(line string, queryTerms *[]string) {
-	for _, match := range pythonFramePattern.FindAllStringSubmatch(line, -1) {
+func (analysis *FailureAnalysis) addPythonFrames(line string, queryTerms *[]string) bool {
+	matches := pythonFramePattern.FindAllStringSubmatch(line, -1)
+	if len(matches) == 0 {
+		return false
+	}
+	for _, match := range matches {
 		lineNumber, _ := strconv.Atoi(match[2])
 		path := cleanFailurePath(match[1])
 		functionName := strings.TrimSpace(match[3])
@@ -68,6 +114,33 @@ func (analysis *FailureAnalysis) addPythonFrames(line string, queryTerms *[]stri
 			analysis.Symbols = append(analysis.Symbols, functionName)
 		}
 	}
+	return true
+}
+
+func (analysis *FailureAnalysis) addJSFrames(line string, queryTerms *[]string) bool {
+	matches := jsFramePattern.FindAllStringSubmatch(line, -1)
+	if len(matches) == 0 {
+		return false
+	}
+	for _, match := range matches {
+		lineNumber, _ := strconv.Atoi(match[3])
+		path := cleanFailurePath(match[2])
+		functionName := strings.TrimSpace(match[1])
+		analysis.FileRefs = append(analysis.FileRefs, FailureFileRef{
+			Path:     path,
+			Line:     lineNumber,
+			Function: functionName,
+		})
+		if functionName != "" {
+			*queryTerms = append(*queryTerms, path, functionName)
+			if !commonFailureSymbol(functionName) {
+				analysis.Symbols = append(analysis.Symbols, functionName)
+			}
+		} else {
+			*queryTerms = append(*queryTerms, path)
+		}
+	}
+	return true
 }
 
 func (analysis *FailureAnalysis) addGenericLocations(line string, queryTerms *[]string) {
