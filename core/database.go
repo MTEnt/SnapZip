@@ -1680,10 +1680,55 @@ func uniqueStrings(values []string) []string {
 	return unique
 }
 
+func pathTokenBoost(queryTokens []string, path string) float64 {
+	if len(queryTokens) == 0 || path == "" {
+		return 0
+	}
+	path = strings.ToLower(normalizeIndexedPath(path))
+	delimiterFunc := func(r rune) bool {
+		return r == '/' || r == '\\' || r == '_' || r == '-' || r == '.'
+	}
+	segments := strings.FieldsFunc(path, delimiterFunc)
+	if len(segments) == 0 {
+		return 0
+	}
+	segmentSet := make(map[string]bool, len(segments))
+	for _, seg := range segments {
+		if len(seg) > 1 && seg != "src" && seg != "internal" && seg != "pkg" && seg != "tests" && seg != "test" && seg != "dist" && seg != "build" {
+			segmentSet[seg] = true
+		}
+	}
+	matches := 0
+	for _, token := range queryTokens {
+		token = strings.ToLower(token)
+		if len(token) > 1 {
+			if segmentSet[token] {
+				matches++
+			} else {
+				for seg := range segmentSet {
+					if strings.Contains(seg, token) {
+						matches++
+						break
+					}
+				}
+			}
+		}
+	}
+	if matches == 0 {
+		return 0
+	}
+	score := 0.015 * float64(matches)
+	if score > 0.05 {
+		return 0.05
+	}
+	return score
+}
+
 func relevanceScore(qnd float64, queryTokens []string, tokenWeights map[string]float64, bm25Boost float64, structuredBoost float64, snippet Snippet, detectedLang, structureIntent string, structureWeight float64) float64 {
 	boost := lexicalBoost(queryTokens, tokenWeights, snippet)
 	boost += bm25Boost
 	boost += structuredBoost
+	boost += pathTokenBoost(queryTokens, snippet.Path)
 	if detectedLang != "" && NormalizeLanguage(snippet.Language) == detectedLang {
 		boost += 0.08
 	}

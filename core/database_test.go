@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -899,4 +900,47 @@ func tokenPathContainsAll(paths [][]string, wants ...string) bool {
 		}
 	}
 	return false
+}
+
+func TestPathTokenBoost(t *testing.T) {
+	cases := []struct {
+		name        string
+		queryTokens []string
+		path        string
+		wantBoost   float64
+	}{
+		{
+			name:        "no match",
+			queryTokens: []string{"auth"},
+			path:        "core/indexer.go",
+			wantBoost:   0.0,
+		},
+		{
+			name:        "exact segment match",
+			queryTokens: []string{"auth", "session"},
+			path:        "core/auth/session_manager.go",
+			wantBoost:   0.03, // 2 matches * 0.015
+		},
+		{
+			name:        "substring segment match",
+			queryTokens: []string{"auth"},
+			path:        "core/authentication_service.go",
+			wantBoost:   0.015,
+		},
+		{
+			name:        "max boost cap",
+			queryTokens: []string{"auth", "session", "manager", "test", "token"},
+			path:        "core/auth/session_manager_token_test.go",
+			wantBoost:   0.05, // 4 valid matches capped at 0.05 (test is ignored)
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pathTokenBoost(tc.queryTokens, tc.path)
+			if math.Abs(got-tc.wantBoost) > 1e-9 {
+				t.Errorf("pathTokenBoost(%v, %q) = %f, want %f", tc.queryTokens, tc.path, got, tc.wantBoost)
+			}
+		})
+	}
 }
