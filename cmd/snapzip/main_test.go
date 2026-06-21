@@ -659,6 +659,7 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 		"live-sample-size",
 		"snapzip-rerank-cmd",
 		"snapzip-diagnostics",
+		"snapzip-search-limit",
 		"min-repobench-p-snapzip-new-token-coverage5-over-bm25",
 		"min-repobench-snapzip-ndcg5-over-bm25",
 	} {

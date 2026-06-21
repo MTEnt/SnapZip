@@ -538,7 +538,7 @@ python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobenc
 
 When tuning ranking, add `--snapzip-diagnostics` to RepoBench-R or RepoBench-P benchmark runs. The JSON records then include compact score diagnostics for SnapZip's top-5 results without changing retrieval behavior.
 
-To analyze those diagnostics offline, run `python3 benchmarks/tune_diagnostics.py --input /tmp/snapzip-repobench-r.json --metric mrr@5 --json /tmp/snapzip-tuning.json`. The tuner only reorders candidates already returned by SnapZip, so it is a rank-quality tool rather than a recall test.
+To analyze those diagnostics offline, run `python3 benchmarks/tune_diagnostics.py --input /tmp/snapzip-repobench-r.json --metric mrr@5 --json /tmp/snapzip-tuning.json`. Keep the default benchmark `--snapzip-search-limit 5` when reproducing published top-5 numbers, and raise it during offline diagnostics when you want to see whether lower-ranked candidates can be promoted into the top five.
 
 Run the public RepoBench v1.1 pipeline-context proxy:
 ```bash

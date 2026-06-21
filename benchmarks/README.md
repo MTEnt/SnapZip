@@ -97,6 +97,7 @@ Use the offline tuner to test alternate score-feature weights against those retu
 python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip \
   --repobench-sample-size 100 \
   --snapzip-diagnostics \
+  --snapzip-search-limit 20 \
   --json /tmp/snapzip-repobench-r-diagnostics.json
 
 python3 benchmarks/tune_diagnostics.py \
@@ -105,7 +106,7 @@ python3 benchmarks/tune_diagnostics.py \
   --json /tmp/snapzip-repobench-r-tuning.json
 ```
 
-The tuner only reorders candidates SnapZip already returned, so it is useful for rank-quality experiments, not recall experiments.
+The tuner only reorders candidates SnapZip already returned. Keep the default `--snapzip-search-limit 5` when reproducing published top-5 numbers, and raise it during offline diagnostics when you want to see whether lower-ranked candidates can be promoted into the top five.
 
 ## RepoBench v1.1 Pipeline-Context Proxy
 

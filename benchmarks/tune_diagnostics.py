@@ -3,8 +3,8 @@
 
 This script replays benchmark JSON produced with --snapzip-diagnostics and
 tests whether alternate score-feature weights would improve ordering within the
-returned SnapZip top-5 candidates. It does not recover candidates that SnapZip
-did not return, so hit@5 is a recall ceiling for these reports.
+returned SnapZip candidates. It does not recover candidates that SnapZip
+did not return, so the returned candidate set is the recall ceiling.
 """
 
 import argparse
@@ -471,7 +471,7 @@ def build_report(args, payload):
             "gold_in_returned_candidates": gold_in_candidates,
             **skipped,
         },
-        "limitation": "Diagnostics include only SnapZip's returned candidates, so this tuner can improve ordering but cannot recover missing candidates.",
+        "limitation": "Diagnostics include only SnapZip's returned candidates, so this tuner can improve ordering inside that set but cannot recover missing candidates.",
         "baseline": {
             "all": baseline_all,
             "train": baseline_train,
@@ -495,7 +495,7 @@ def print_report(report):
     counts = report["record_counts"]
     print(f"Loaded {counts['diagnostic_records']} diagnostic records from {report['input']}")
     print(f"Gold present in returned candidates: {counts['gold_in_returned_candidates']}/{counts['diagnostic_records']}")
-    print("Limitation: reranking can improve top-1/top-3/MRR, but hit@5 is capped by returned candidates.")
+    print("Limitation: reranking can improve ordering inside returned candidates, but cannot recover missing candidates.")
     baseline = report["baseline"]["all"]
     tuned = report["tuned"]["all"]
     delta = report["tuned"]["delta_vs_baseline_all"]

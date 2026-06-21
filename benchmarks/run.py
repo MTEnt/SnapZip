@@ -1229,12 +1229,12 @@ def snapzip_top5_from_search(output):
     return top5, len(snippets), receipt_count
 
 
-def snapzip_diagnostics_from_search(output):
+def snapzip_diagnostics_from_search(output, limit=5):
     payload = json.loads(output)
     if not isinstance(payload, dict):
         return []
     diagnostics = []
-    for rank, snippet in enumerate((payload.get("snippets") or payload.get("results") or [])[:5], start=1):
+    for rank, snippet in enumerate((payload.get("snippets") or payload.get("results") or [])[:limit], start=1):
         item = {
             "rank": rank,
             "path": snippet.get("path") or "",
@@ -1295,7 +1295,7 @@ def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=Non
             "search",
             "--json",
             "--limit",
-            "5",
+            str(args.snapzip_search_limit),
             "--db-dir",
             str(db_dir),
         ]
@@ -1333,7 +1333,7 @@ def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=Non
             for k in (1, 3, 5):
                 record[f"{name}_hit@{k}"] = gold in top[:k]
         if args.snapzip_diagnostics:
-            record["snapzip_diagnostics"] = snapzip_diagnostics_from_search(search_record["stdout"])
+            record["snapzip_diagnostics"] = snapzip_diagnostics_from_search(search_record["stdout"], args.snapzip_search_limit)
         records.append(record)
         index_times.append(index_record["elapsed_seconds"])
         search_times.append(search_record["elapsed_seconds"])
@@ -1350,7 +1350,7 @@ def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=Non
         "sample_seed": args.repobench_seed,
         "sample_indices": sample_indices,
         "query": "last 3 lines of in-file code before target line",
-        "snapzip_command": "snapzip search --json --limit 5 over official candidate snippets",
+        "snapzip_command": f"snapzip search --json --limit {args.snapzip_search_limit} over official candidate snippets; metrics evaluate top 5",
         "raw_baselines": ["token Jaccard", "BM25"],
         "elapsed_seconds": round(time.perf_counter() - started, 6),
         "mean_candidate_count": round(sum(r["candidate_count"] for r in records) / len(records), 6),
@@ -1499,7 +1499,7 @@ def prepare_repobench_p_case(case_no, row_idx, row, work_dir, language, ext, sna
         "search",
         "--json",
         "--limit",
-        "5",
+        str(args.snapzip_search_limit),
         "--db-dir",
         str(db_dir),
     ]
@@ -1535,7 +1535,7 @@ def prepare_repobench_p_case(case_no, row_idx, row, work_dir, language, ext, sna
         "snapzip_top5": snapzip_top,
         "snapzip_return_count": snapzip_return_count,
         "snapzip_receipt_count": snapzip_receipt_count,
-        "snapzip_diagnostics": snapzip_diagnostics_from_search(search_record["stdout"]) if args.snapzip_diagnostics else [],
+        "snapzip_diagnostics": snapzip_diagnostics_from_search(search_record["stdout"], args.snapzip_search_limit) if args.snapzip_diagnostics else [],
         "index_record": index_record,
         "search_record": search_record,
     }
@@ -1655,7 +1655,7 @@ def run_repobench_p(parent, args, snapzip_bin):
         "sample_seed": args.repobench_p_seed,
         "sample_indices": sample_indices,
         "query": "import statements plus last 3 lines of cropped in-file code",
-        "snapzip_command": "snapzip search --json --limit 5 over public cross-file context snippets",
+        "snapzip_command": f"snapzip search --json --limit {args.snapzip_search_limit} over public cross-file context snippets; metrics evaluate top 5",
         "proxy_metric": "gold cross-file snippet retrieval and coverage of next-line tokens absent from raw prompt",
         "raw_baselines": ["no cross-file context", "random top-5", "token Jaccard", "BM25"],
         "elapsed_seconds": round(time.perf_counter() - started, 6),
@@ -2257,6 +2257,7 @@ def main():
     parser.add_argument("--repobench-p-seed", type=int, default=42)
     parser.add_argument("--snapzip-rerank-cmd", default="", help="Command to run external reranker in snapzip search")
     parser.add_argument("--snapzip-diagnostics", action="store_true", help="Include compact snapzip search score diagnostics in RepoBench records")
+    parser.add_argument("--snapzip-search-limit", type=int, default=5, help="SnapZip search result count for RepoBench runs; metrics still evaluate top 5")
     parser.add_argument(
         "--repobench-p-max-shards",
         type=int,
@@ -2288,6 +2289,8 @@ def main():
     parser.add_argument("--live-cache", default="", help="Optional JSON cache path for live model calls")
     parser.add_argument("--live-no-cache", action="store_true", help="Disable live model response cache")
     args = parser.parse_args()
+    if args.snapzip_search_limit < 5:
+        raise SystemExit("--snapzip-search-limit must be at least 5 because RepoBench metrics evaluate top-5 results")
 
     snapzip_bin = resolve_snapzip_bin(args.snapzip_bin)
     started = time.perf_counter()
