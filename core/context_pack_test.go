@@ -483,3 +483,45 @@ func TestExpandQueryForPackMode(t *testing.T) {
 		t.Fatalf("expanded query missing debug mode terms: %q", expanded)
 	}
 }
+
+func TestBuildContextPackAddsDependentTypeContext(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "app/config.py", `class CacheConfig:
+    def __init__(self, ttl):
+        self.ttl = ttl
+`)
+	writeTestFile(t, root, "app/cache.py", `from app.config import CacheConfig
+
+class BoundedCache:
+    def __init__(self, config: CacheConfig):
+        self.config = config
+
+    def evict_keys(self):
+        return self.config.ttl
+`)
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := IndexDirectory(db, root, NewLanguageFilter("python")); err != nil {
+		t.Fatal(err)
+	}
+
+	pack, err := BuildContextPackWithMode(db, mustTestCompressor(t), "evict_keys", "", 3, 12000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify both evict_keys method and CacheConfig class definition are retrieved
+	if !packHasPath(pack, "app/cache.py") || !packHasPath(pack, "app/config.py") {
+		t.Fatalf("context pack missing source or config file: \n%s", RenderContextPack(pack))
+	}
+
+	// Make sure the receipt explains dependent type inclusion
+	if !receiptForPathHasReason(pack.Receipts, "app/config.py", "dependent type expansion") {
+		t.Fatalf("receipts missing dependent type expansion explanation: %+v", pack.Receipts)
+	}
+}

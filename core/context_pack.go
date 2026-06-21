@@ -3,6 +3,7 @@ package core
 import (
 	"database/sql"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -810,6 +811,7 @@ func graphContextCandidates(db *sql.DB, seeds []Snippet, budget int, mode string
 		if seed.Path == "" {
 			continue
 		}
+		candidates = append(candidates, dependentTypeContextCandidates(db, seed)...)
 		candidates = append(candidates, outgoingGraphContextCandidates(db, seed)...)
 		candidates = append(candidates, incomingGraphContextCandidates(db, seed)...)
 		if includeSymbolReferenceGraph(mode) {
@@ -1281,6 +1283,8 @@ func graphContextPriorityForRelation(snippet Snippet, relation string) int {
 		score += 18
 	case "symbol_definition":
 		score += 22
+	case "dependent_type":
+		score += 26
 	}
 	if isTestPath(snippet.Path) {
 		score += 20
@@ -1448,4 +1452,113 @@ func snippetLocation(snippet Snippet) string {
 		return fmt.Sprintf("%s:%d-%d", snippet.Path, snippet.StartLine, snippet.EndLine)
 	}
 	return snippet.Path
+}
+
+var pascalCasePattern = regexp.MustCompile(`\b[A-Z][A-Za-z0-9_]*\b`)
+
+func dependentTypeContextCandidates(db *sql.DB, seed Snippet) []graphContextCandidate {
+	if db == nil || seed.Path == "" {
+		return nil
+	}
+
+	var candidates []graphContextCandidate
+	seenKeys := map[string]bool{}
+
+	// 1. Fetch all local types/classes/interfaces in the same file
+	localRows, err := db.Query(`
+		SELECT name, line, kind FROM symbols
+		WHERE path = ? AND kind IN ('class', 'type', 'interface')`, seed.Path)
+	if err == nil {
+		defer localRows.Close()
+		for localRows.Next() {
+			var name string
+			var line int
+			var kind string
+			if err := localRows.Scan(&name, &line, &kind); err == nil {
+				if line > 0 && (line < seed.StartLine || line > seed.EndLine) {
+					wordRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+					if wordRe.MatchString(seed.Content) {
+						snippet, ok, err := indexedSnippetAtLine(db, seed.Path, line, 24)
+						if err == nil && ok {
+							key := snippetDedupeKey(snippet)
+							if !seenKeys[key] {
+								seenKeys[key] = true
+								snippet.Score = minFloat(snippet.Score, -0.75)
+								evidence := fmt.Sprintf("%s:%d uses local type %s defined at line %d", seed.Path, seed.StartLine, name, line)
+								receipt := receiptForSnippet(0, snippet, 0.85, []string{
+									"included through dependent type expansion",
+									"defines a type/class used in a retrieved snippet",
+								}, []string{evidence})
+								candidates = append(candidates, graphContextCandidate{
+									snippet:  snippet,
+									receipt:  receipt,
+									priority: graphContextPriorityForRelation(snippet, "dependent_type"),
+								})
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Scan content for global/imported PascalCase type identifiers
+	words := pascalCasePattern.FindAllString(seed.Content, -1)
+	uniqueWords := uniqueStrings(words)
+
+	globalCount := 0
+	for _, word := range uniqueWords {
+		if len(word) <= 2 || isCommonGenericWord(word) {
+			continue
+		}
+		if globalCount >= 3 { // Limit to 3 external dependent types to avoid bloating budget
+			break
+		}
+
+		globalRows, err := db.Query(`
+			SELECT name, line, kind, path FROM symbols
+			WHERE name = ? AND kind IN ('class', 'type', 'interface') AND path != ?
+			LIMIT 2`, word, seed.Path)
+		if err == nil {
+			defer globalRows.Close()
+			for globalRows.Next() {
+				var name string
+				var line int
+				var kind string
+				var path string
+				if err := globalRows.Scan(&name, &line, &kind, &path); err == nil {
+					snippet, ok, err := indexedSnippetAtLine(db, path, line, 24)
+					if err == nil && ok {
+						key := snippetDedupeKey(snippet)
+						if !seenKeys[key] {
+							seenKeys[key] = true
+							globalCount++
+							snippet.Score = minFloat(snippet.Score, -0.74)
+							evidence := fmt.Sprintf("%s:%d references external type %s defined in %s:%d", seed.Path, seed.StartLine, name, path, line)
+							receipt := receiptForSnippet(0, snippet, 0.82, []string{
+								"included through dependent type expansion",
+								"defines an external type/class referenced by a retrieved snippet",
+							}, []string{evidence})
+							candidates = append(candidates, graphContextCandidate{
+								snippet:  snippet,
+								receipt:  receipt,
+								priority: graphContextPriorityForRelation(snippet, "dependent_type"),
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return candidates
+}
+
+func isCommonGenericWord(word string) bool {
+	switch word {
+	case "JSON", "HTTP", "URL", "URI", "API", "GET", "POST", "PUT", "DELETE", "HTML", "XML", "YAML", "SDK", "CLI", "DB", "SQL", "ID", "UID", "UUID", "OK", "ERR", "EOF", "nil", "true", "false", "NULL":
+		return true
+	default:
+		return false
+	}
 }
