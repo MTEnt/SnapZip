@@ -4,7 +4,7 @@ All notable changes to SnapZip are documented here.
 
 ## Unreleased
 
-- Nothing yet.
+- Replaced heuristic bracket-counting parsers with pure-Go AST Tree-Sitter chunking for over 200 languages, increasing parsing correctness and reducing codebase complexity.
 
 ## 0.1.0 - 2026-06-20
 
