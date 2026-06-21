@@ -6,6 +6,7 @@ sketch_*
 optimized_*.py
 /dist/
 /package/
+/assets/
 
 # Database files
 *.db
