@@ -386,6 +386,23 @@ def metrics_delta(after, before):
     return {field: round(after.get(field, 0.0) - before.get(field, 0.0), 6) for field in fields}
 
 
+def validation_summary(metric, baseline_validation, tuned_validation):
+    if not baseline_validation:
+        return {
+            "status": "not_run",
+            "metric": metric,
+            "passes": None,
+            "delta_vs_baseline": {},
+        }
+    delta = metrics_delta(tuned_validation, baseline_validation)
+    return {
+        "status": "pass" if delta.get(metric, 0.0) >= 0 else "hold",
+        "metric": metric,
+        "passes": delta.get(metric, 0.0) >= 0,
+        "delta_vs_baseline": delta,
+    }
+
+
 def changed_cases(records, weights, limit):
     changes = []
     for record in records:
@@ -440,6 +457,7 @@ def build_report(args, payload):
     baseline_train = evaluate_records(train) if train else {}
     baseline_validation = evaluate_records(validation) if validation else {}
     tuned_validation = evaluate_records(validation, tuned_weights) if validation else {}
+    validation_decision = validation_summary(args.metric, baseline_validation, tuned_validation)
 
     gold_in_candidates = sum(1 for record in prepared if record["gold"] in [candidate["index"] for candidate in record["candidates"]])
     report = {
@@ -466,6 +484,7 @@ def build_report(args, payload):
             "all": tuned_all,
             "delta_vs_baseline_all": metrics_delta(tuned_all, baseline_all),
         },
+        "validation_decision": validation_decision,
         "history": history,
         "changed_cases": changed_cases(prepared, tuned_weights, args.top_moves),
     }
@@ -496,19 +515,38 @@ def print_report(report):
         f"hit@5={delta['hit@5']:+.6f} mrr@5={delta['mrr@5']:+.6f} ndcg@5={delta['ndcg@5']:+.6f}"
     )
     if report["baseline"]["validation"]:
+        baseline_validation = report["baseline"]["validation"]
         validation = report["tuned"]["validation"]
+        validation_delta = report["validation_decision"]["delta_vs_baseline"]
+        print(
+            "Baseline validation: "
+            f"hit@1={baseline_validation['hit@1']:.6f} hit@3={baseline_validation['hit@3']:.6f} "
+            f"hit@5={baseline_validation['hit@5']:.6f} mrr@5={baseline_validation['mrr@5']:.6f} "
+            f"ndcg@5={baseline_validation['ndcg@5']:.6f}"
+        )
         print(
             "Validation tuned: "
             f"hit@1={validation['hit@1']:.6f} hit@3={validation['hit@3']:.6f} "
             f"hit@5={validation['hit@5']:.6f} mrr@5={validation['mrr@5']:.6f} ndcg@5={validation['ndcg@5']:.6f}"
         )
+        print(
+            "Validation delta: "
+            f"hit@1={validation_delta['hit@1']:+.6f} hit@3={validation_delta['hit@3']:+.6f} "
+            f"hit@5={validation_delta['hit@5']:+.6f} mrr@5={validation_delta['mrr@5']:+.6f} "
+            f"ndcg@5={validation_delta['ndcg@5']:+.6f}"
+        )
+        decision = report["validation_decision"]
+        if decision["status"] == "pass":
+            print(f"Validation decision: pass on {decision['metric']}; candidate weights can be tested in runtime.")
+        else:
+            print(f"Validation decision: hold on {decision['metric']}; keep these weights offline.")
     weights = report["tuned"]["weights"]
     if weights:
-        print("Suggested nonzero weights:")
+        print("Candidate nonzero weights:")
         for feature, weight in weights.items():
             print(f"  {feature}: {weight}")
     else:
-        print("Suggested nonzero weights: none")
+        print("Candidate nonzero weights: none")
     if report["changed_cases"]:
         print("Most affected cases:")
         for item in report["changed_cases"]:
