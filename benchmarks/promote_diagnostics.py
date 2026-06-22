@@ -50,6 +50,9 @@ PROMOTION_FEATURES = (
     "query_symbol_header_coverage",
     "declaration_ordered_overlap",
     "candidate_declaration_density",
+    "language_symbol_score",
+    "knowledge_card_rank_recip",
+    "knowledge_card_score",
 )
 
 PROMOTION_PROFILES = {
@@ -120,6 +123,15 @@ PROMOTION_PROFILES = {
         "query_declaration_coverage": 0.30,
         "rare_query_token_coverage": 0.20,
         "structured_path_boost": 0.20,
+    },
+    "knowledge_card_consensus": {
+        "knowledge_card_rank_recip": 0.55,
+        "knowledge_card_score": 0.35,
+        "rare_query_token_coverage": 0.25,
+        "query_symbol_header_coverage": 0.25,
+        "query_declaration_coverage": 0.20,
+        "consensus_boost": 0.20,
+        "structured_path_boost": 0.15,
     },
 }
 

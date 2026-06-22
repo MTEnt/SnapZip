@@ -68,6 +68,9 @@ DEFAULT_FEATURES = (
     "query_symbol_header_coverage",
     "declaration_ordered_overlap",
     "candidate_declaration_density",
+    "language_symbol_score",
+    "knowledge_card_rank_recip",
+    "knowledge_card_score",
     "matched_query_token_count",
 )
 
@@ -223,6 +226,9 @@ def raw_features(item, rank=0):
         "query_symbol_header_coverage": numeric(benchmark_features.get("query_symbol_header_coverage")),
         "declaration_ordered_overlap": numeric(benchmark_features.get("declaration_ordered_overlap")),
         "candidate_declaration_density": numeric(benchmark_features.get("candidate_declaration_density")),
+        "language_symbol_score": numeric(diagnostics.get("language_symbol_score")),
+        "knowledge_card_rank_recip": reciprocal_rank_feature(diagnostics.get("knowledge_card_rank")),
+        "knowledge_card_score": numeric(diagnostics.get("knowledge_card_score")),
         "matched_query_token_count": float(len(diagnostics.get("matched_query_tokens") or [])),
     }
     return features
