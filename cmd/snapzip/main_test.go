@@ -611,8 +611,15 @@ func TestRepositoryPackagingAndDemoAssets(t *testing.T) {
 	if !strings.Contains(ciWorkflow, "examples/review_demo/app/cache.py") || !strings.Contains(ciWorkflow, "examples/review_demo/tests/test_cache.py") {
 		t.Fatalf("CI workflow does not compile review demo files:\n%s", ciWorkflow)
 	}
-	if !strings.Contains(ciWorkflow, "benchmarks/tune_diagnostics.py") {
-		t.Fatalf("CI workflow does not compile diagnostics tuner:\n%s", ciWorkflow)
+	for _, want := range []string{
+		"benchmarks/analyze_repobench.py",
+		"benchmarks/learn_ranker.py",
+		"benchmarks/promote_diagnostics.py",
+		"benchmarks/tune_diagnostics.py",
+	} {
+		if !strings.Contains(ciWorkflow, want) {
+			t.Fatalf("CI workflow does not compile benchmark helper %q:\n%s", want, ciWorkflow)
+		}
 	}
 	if !strings.Contains(ciWorkflow, "Run public safety scan") || !strings.Contains(ciWorkflow, "scripts/public_safety_scan.py --root .") {
 		t.Fatalf("CI workflow does not run public safety scan:\n%s", ciWorkflow)

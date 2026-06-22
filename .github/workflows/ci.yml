@@ -45,6 +45,9 @@ jobs:
             examples/review_demo/app/cache.py \
             examples/review_demo/tests/test_cache.py \
             benchmarks/run.py \
+            benchmarks/analyze_repobench.py \
+            benchmarks/learn_ranker.py \
+            benchmarks/promote_diagnostics.py \
             benchmarks/tune_diagnostics.py \
             benchmarks/stress_rbt.py \
             benchmarks/suites/algorithm_20/*.py \
