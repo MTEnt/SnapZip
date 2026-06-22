@@ -23,6 +23,16 @@ ALGORITHM_SUITE = BENCHMARK_ROOT / "suites" / "algorithm_20"
 STRESS_RBT = BENCHMARK_ROOT / "stress_rbt.py"
 REPOBENCH_R_CONFIGS = ("python_cff", "python_cfr", "java_cff", "java_cfr")
 REPOBENCH_R_SPLITS = ("easy", "hard")
+CODE_STOP_TOKENS = {
+    "and", "as", "async", "await", "break", "case", "catch", "class", "const", "continue",
+    "def", "else", "elif", "enum", "except", "false", "finally", "for", "from", "func",
+    "function", "if", "import", "in", "interface", "is", "let", "new", "none", "not",
+    "null", "or", "package", "pass", "public", "private", "protected", "return", "self",
+    "static", "switch", "this", "throw", "true", "try", "var", "void", "while", "with",
+}
+CONTROL_CALL_TOKENS = {
+    "assert", "catch", "for", "if", "return", "super", "switch", "throw", "while",
+}
 
 
 class BenchmarkFailure(Exception):
@@ -50,6 +60,21 @@ def run_cmd(cmd, cwd, allow_failure=False):
 
 def tokenize_for_retrieval(text):
     return [token for token in re.split(r"[^A-Za-z0-9]+", text.lower()) if len(token) > 1]
+
+
+def identifier_support_tokens(text):
+    tokens = []
+    for raw in re.findall(r"[A-Za-z0-9]+", text or ""):
+        if len(raw) <= 1:
+            continue
+        expanded = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", raw)
+        expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", expanded)
+        parts = [part.lower() for part in re.split(r"[^A-Za-z0-9]+", expanded) if len(part) > 1]
+        lowered = raw.lower()
+        if len(lowered) > 1:
+            tokens.append(lowered)
+        tokens.extend(parts)
+    return tokens
 
 
 def top_k_indices(scores, k):
@@ -1107,14 +1132,217 @@ def report_paths(values):
 
 
 def completion_support_tokens(text):
-    stop = {
-        "and", "as", "async", "await", "break", "case", "catch", "class", "const", "continue",
-        "def", "else", "elif", "enum", "except", "false", "finally", "for", "from", "func",
-        "function", "if", "import", "in", "interface", "is", "let", "new", "none", "not",
-        "null", "or", "package", "pass", "public", "private", "protected", "return", "self",
-        "static", "switch", "this", "throw", "true", "try", "var", "void", "while", "with",
-    }
-    return [token for token in tokenize_for_retrieval(text) if token not in stop and not token.isdigit()]
+    return [token for token in identifier_support_tokens(text) if token not in CODE_STOP_TOKENS and not token.isdigit()]
+
+
+def generated_candidate_index(path):
+    stem = Path(path or "").stem
+    match = re.search(r"(?:snippet|candidate)_([0-9]+)$", stem)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"([0-9]+)$", stem)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def nonempty_tail_line(text):
+    for line in reversed((text or "").splitlines()):
+        if line.strip():
+            return line
+    return ""
+
+
+def token_coverage_ratio(query_tokens, candidate_tokens):
+    if not query_tokens:
+        return 0.0
+    candidate_set = set(candidate_tokens)
+    if not candidate_set:
+        return 0.0
+    return len(set(query_tokens) & candidate_set) / len(set(query_tokens))
+
+
+def ordered_lcs_ratio(query_tokens, candidate_tokens):
+    if not query_tokens or not candidate_tokens:
+        return 0.0
+    previous = [0] * (len(candidate_tokens) + 1)
+    current = [0] * (len(candidate_tokens) + 1)
+    for query_token in query_tokens:
+        for index, candidate_token in enumerate(candidate_tokens, start=1):
+            if query_token == candidate_token:
+                current[index] = previous[index - 1] + 1
+            else:
+                current[index] = max(previous[index], current[index - 1])
+        previous, current = current, [0] * (len(candidate_tokens) + 1)
+    return previous[-1] / len(query_tokens)
+
+
+def call_target_tokens(text):
+    tokens = []
+    for name in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", text or ""):
+        if name.lower() in CONTROL_CALL_TOKENS:
+            continue
+        for token in completion_support_tokens(name):
+            tokens.append(token)
+    return list(dict.fromkeys(tokens))
+
+
+def assignment_lhs_tokens(text):
+    tokens = []
+    for line in (text or "").splitlines():
+        if "==" in line or "!=" in line or "<=" in line or ">=" in line:
+            continue
+        match = re.search(r"^\s*([A-Za-z_][A-Za-z0-9_./-]*)\s*=(?!=)", line)
+        if not match:
+            continue
+        tokens.extend(completion_support_tokens(match.group(1)))
+    return list(dict.fromkeys(tokens))
+
+
+def attribute_leaf_tokens(text):
+    tokens = []
+    for name in re.findall(r"(?:\.|::)\s*([A-Za-z_][A-Za-z0-9_]*)", text or ""):
+        if name.lower() in CONTROL_CALL_TOKENS:
+            continue
+        tokens.extend(completion_support_tokens(name))
+    return list(dict.fromkeys(tokens))
+
+
+def imported_symbol_tokens(text):
+    tokens = []
+    for line in (text or "").splitlines():
+        stripped = line.strip().rstrip(";")
+        from_match = re.match(r"from\s+([A-Za-z_][A-Za-z0-9_.]*)\s+import\s+(.+)$", stripped)
+        if from_match:
+            tokens.extend(completion_support_tokens(from_match.group(1).split(".")[-1]))
+            for item in re.split(r",", from_match.group(2)):
+                item = item.strip().split(" as ")[0].strip()
+                if item and item != "*":
+                    tokens.extend(completion_support_tokens(item.split(".")[-1]))
+            continue
+        import_match = re.match(r"import\s+(.+)$", stripped)
+        if import_match:
+            for item in re.split(r",", import_match.group(1)):
+                item = item.strip().split(" as ")[0].strip()
+                if item and item != "*":
+                    tokens.extend(completion_support_tokens(item.split(".")[-1]))
+            continue
+        java_match = re.match(r"import\s+(?:static\s+)?([A-Za-z_][A-Za-z0-9_.]*)(?:\.\*)?$", stripped)
+        if java_match:
+            tokens.extend(completion_support_tokens(java_match.group(1).split(".")[-1]))
+    return list(dict.fromkeys(tokens))
+
+
+def declaration_name_tokens(text):
+    tokens = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "//", "*", "@")):
+            continue
+        for pattern in (
+            r"\b(?:async\s+def|def)\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"\b(?:class|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ):
+            match = re.search(pattern, stripped)
+            if match:
+                tokens.extend(completion_support_tokens(match.group(1)))
+        method_match = re.match(
+            r"^(?:(?:public|private|protected|static|final|abstract|synchronized|native|default)\s+)*"
+            r"(?:[A-Za-z_][A-Za-z0-9_<>\[\],.?]*\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            stripped,
+        )
+        if method_match and method_match.group(1).lower() not in CONTROL_CALL_TOKENS:
+            tokens.extend(completion_support_tokens(method_match.group(1)))
+    return list(dict.fromkeys(tokens))
+
+
+def declaration_header_text(text, line_limit=8):
+    lines = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if (
+            re.search(r"\b(?:async\s+def|def|class|interface|enum|record|function)\b", stripped)
+            or re.match(
+                r"^(?:(?:public|private|protected|static|final|abstract|synchronized|native|default)\s+)*"
+                r"(?:[A-Za-z_][A-Za-z0-9_<>\[\],.?]*\s+)+[A-Za-z_][A-Za-z0-9_]*\s*\(",
+                stripped,
+            )
+        ):
+            lines.append(stripped)
+            if len(lines) >= line_limit:
+                break
+    return "\n".join(lines)
+
+
+def candidate_token_idf(candidate_texts):
+    documents = [set(completion_support_tokens(text)) for text in candidate_texts]
+    doc_count = len(documents)
+    doc_freq = {}
+    for document in documents:
+        for token in document:
+            doc_freq[token] = doc_freq.get(token, 0) + 1
+    return {token: math.log(1 + (doc_count + 1) / (freq + 0.5)) for token, freq in doc_freq.items()}
+
+
+def weighted_token_coverage(query_tokens, candidate_tokens, idf):
+    unique_query = list(dict.fromkeys(query_tokens))
+    if not unique_query:
+        return 0.0
+    candidate_set = set(candidate_tokens)
+    total = sum(idf.get(token, 1.0) for token in unique_query)
+    if total <= 0:
+        return 0.0
+    matched = sum(idf.get(token, 1.0) for token in unique_query if token in candidate_set)
+    return matched / total
+
+
+def repobench_candidate_content_features(query, candidate_texts):
+    query_tokens = completion_support_tokens(query)
+    tail_tokens = query_tokens[-8:]
+    wider_tail_tokens = query_tokens[-16:]
+    last_line_tokens = completion_support_tokens(nonempty_tail_line(query))
+    query_call_tokens = call_target_tokens(query)
+    query_lhs_tokens = assignment_lhs_tokens(query)
+    query_attribute_tokens = attribute_leaf_tokens(query)
+    query_import_tokens = imported_symbol_tokens(query)
+    query_symbol_tokens = list(dict.fromkeys(query_call_tokens + query_attribute_tokens + query_import_tokens + query_lhs_tokens))
+    idf = candidate_token_idf(candidate_texts)
+
+    features = []
+    for candidate in candidate_texts:
+        candidate_tokens = completion_support_tokens(candidate)
+        header_tokens = completion_support_tokens("\n".join((candidate or "").splitlines()[:4]))
+        declaration_tokens = declaration_name_tokens(candidate)
+        declaration_header_tokens = completion_support_tokens(declaration_header_text(candidate))
+        symbol_header_tokens = list(dict.fromkeys(header_tokens + declaration_tokens + declaration_header_tokens))
+        candidate_set = set(candidate_tokens)
+        overlap_count = len(set(query_tokens) & candidate_set)
+        features.append(
+            {
+                "tail_token_coverage": round(token_coverage_ratio(tail_tokens, candidate_tokens), 6),
+                "tail_ordered_overlap": round(ordered_lcs_ratio(wider_tail_tokens, candidate_tokens), 6),
+                "last_line_token_coverage": round(token_coverage_ratio(last_line_tokens, candidate_tokens), 6),
+                "call_target_coverage": round(token_coverage_ratio(query_call_tokens, candidate_tokens), 6),
+                "assignment_lhs_coverage": round(token_coverage_ratio(query_lhs_tokens, candidate_tokens), 6),
+                "rare_query_token_coverage": round(weighted_token_coverage(query_tokens, candidate_tokens, idf), 6),
+                "header_token_coverage": round(token_coverage_ratio(query_tokens, header_tokens), 6),
+                "query_token_density": round(overlap_count / math.sqrt(max(1, len(candidate_tokens))), 6),
+                "candidate_shortness": round(1 / math.sqrt(max(1, len(candidate_tokens))), 6),
+                "call_target_declaration_coverage": round(token_coverage_ratio(query_call_tokens, declaration_tokens), 6),
+                "attribute_declaration_coverage": round(token_coverage_ratio(query_attribute_tokens, declaration_tokens), 6),
+                "import_declaration_coverage": round(token_coverage_ratio(query_import_tokens, declaration_tokens), 6),
+                "tail_declaration_coverage": round(token_coverage_ratio(tail_tokens, declaration_tokens), 6),
+                "query_declaration_coverage": round(token_coverage_ratio(query_tokens, declaration_tokens), 6),
+                "query_symbol_coverage": round(token_coverage_ratio(query_symbol_tokens, candidate_tokens), 6),
+                "query_symbol_header_coverage": round(token_coverage_ratio(query_symbol_tokens, symbol_header_tokens), 6),
+                "declaration_ordered_overlap": round(ordered_lcs_ratio(wider_tail_tokens, declaration_header_tokens), 6),
+                "candidate_declaration_density": round(len(set(declaration_tokens)) / math.sqrt(max(1, len(candidate_tokens))), 6),
+            }
+        )
+    return features
 
 
 def selected_context_text(indices, candidate_texts):
@@ -1229,10 +1457,11 @@ def snapzip_top5_from_search(output):
     return top5, len(snippets), receipt_count
 
 
-def snapzip_diagnostics_from_search(output, limit=5):
+def snapzip_diagnostics_from_search(output, limit=5, query="", candidate_texts=None):
     payload = json.loads(output)
     if not isinstance(payload, dict):
         return []
+    content_features = repobench_candidate_content_features(query, candidate_texts or []) if candidate_texts else []
     diagnostics = []
     for rank, snippet in enumerate((payload.get("snippets") or payload.get("results") or [])[:limit], start=1):
         item = {
@@ -1240,6 +1469,9 @@ def snapzip_diagnostics_from_search(output, limit=5):
             "path": snippet.get("path") or "",
             "score": snippet.get("score"),
         }
+        candidate_index = generated_candidate_index(item["path"])
+        if candidate_index is not None and 0 <= candidate_index < len(content_features):
+            item["benchmark_features"] = content_features[candidate_index]
         if snippet.get("diagnostics"):
             item["diagnostics"] = snippet["diagnostics"]
         diagnostics.append(item)
@@ -1372,7 +1604,12 @@ def run_repobench_r(parent, args, snapzip_bin, config=None, split=None, name=Non
             record["snapzip_diagnostics_return_count"] = snapzip_diagnostics_return_count
             record["snapzip_diagnostics_receipt_count"] = snapzip_diagnostics_receipt_count
             record["snapzip_diagnostics_elapsed_seconds"] = diagnostics_record["elapsed_seconds"]
-            record["snapzip_diagnostics"] = snapzip_diagnostics_from_search(diagnostics_record["stdout"], diagnostics_limit)
+            record["snapzip_diagnostics"] = snapzip_diagnostics_from_search(
+                diagnostics_record["stdout"],
+                diagnostics_limit,
+                query,
+                row["context"],
+            )
             diagnostics_search_times.append(diagnostics_record["elapsed_seconds"])
         records.append(record)
         index_times.append(index_record["elapsed_seconds"])
@@ -1592,7 +1829,12 @@ def prepare_repobench_p_case(case_no, row_idx, row, work_dir, language, ext, sna
         "snapzip_diagnostics_return_count": snapzip_diagnostics_return_count if args.snapzip_diagnostics else 0,
         "snapzip_diagnostics_receipt_count": snapzip_diagnostics_receipt_count if args.snapzip_diagnostics else 0,
         "snapzip_diagnostics_elapsed_seconds": diagnostics_record["elapsed_seconds"] if args.snapzip_diagnostics else 0.0,
-        "snapzip_diagnostics": snapzip_diagnostics_from_search(diagnostics_record["stdout"], diagnostics_limit) if args.snapzip_diagnostics else [],
+        "snapzip_diagnostics": snapzip_diagnostics_from_search(
+            diagnostics_record["stdout"],
+            diagnostics_limit,
+            query,
+            candidate_texts,
+        ) if args.snapzip_diagnostics else [],
         "index_record": index_record,
         "search_record": search_record,
         "diagnostics_record": diagnostics_record,

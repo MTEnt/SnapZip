@@ -33,6 +33,7 @@ type Snippet struct {
 	SourceMTime int64                 `json:"source_mtime,omitempty"`
 	Score       float64               `json:"score"`
 	Diagnostics *RetrievalDiagnostics `json:"diagnostics,omitempty"`
+	rankSignals retrievalRankSignals
 }
 
 type KnowledgeEntry struct {
@@ -52,6 +53,7 @@ type RetrieveOptions struct {
 
 type RetrievalDiagnostics struct {
 	FinalRank             int      `json:"final_rank,omitempty"`
+	QueryIntent           string   `json:"query_intent,omitempty"`
 	QND                   float64  `json:"qnd"`
 	BaseScore             float64  `json:"base_score"`
 	FinalScore            float64  `json:"final_score"`
@@ -74,17 +76,31 @@ type RetrievalDiagnostics struct {
 	TopicPenalty          float64  `json:"topic_penalty,omitempty"`
 	RankFusionScore       float64  `json:"rank_fusion_score,omitempty"`
 	RankFusionBoost       float64  `json:"rank_fusion_boost,omitempty"`
+	ConsensusBoost        float64  `json:"consensus_boost,omitempty"`
 	PrimaryFTSRank        int      `json:"primary_fts_rank,omitempty"`
 	QueryPathRank         int      `json:"query_path_rank,omitempty"`
 	LexicalCoverageRank   int      `json:"lexical_coverage_rank,omitempty"`
 	ProtectedCandidate    bool     `json:"protected_candidate,omitempty"`
 	ExternalRerankRank    int      `json:"external_rerank_rank,omitempty"`
 	ExternalRRFScore      float64  `json:"external_rrf_score,omitempty"`
+	OrderedTokenOverlap   float64  `json:"ordered_token_overlap,omitempty"`
+	AssignmentLHSCoverage float64  `json:"assignment_lhs_coverage,omitempty"`
+	HeaderTokenCoverage   float64  `json:"header_token_coverage,omitempty"`
+	LanguageSymbolScore   float64  `json:"language_symbol_score,omitempty"`
 	MatchedQueryTokens    []string `json:"matched_query_tokens,omitempty"`
+}
+
+type retrievalRankSignals struct {
+	PathTokenBoost      float64
+	ProtectedCandidate  bool
+	StructureBoost      float64
+	StructuredPathBoost float64
+	StructuredPathRank  int
 }
 
 var DBPath string
 var RerankCmd string
+var RankProfile string
 
 const defaultSearchCandidateLimit = 50
 const maxSearchCandidateLimit = 200
@@ -97,6 +113,10 @@ const structuralRerankBlend = 0.06
 const rankFusionBlend = 0.04
 const rankFusionK = 60.0
 const rankFusionWindow = 5
+const consensusPathTokenWeight = 0.05
+const consensusProtectedWeight = 0.05
+const consensusStructureWeight = 0.05
+const consensusStructuredPathRankWeight = 0.05
 const lexicalTailCoverageStart = 4
 const lexicalTailCoverageSlots = 1
 const relevanceRankFusionWeight = 1.0
@@ -110,6 +130,8 @@ const pathProximityRankFusionWeight = 0.50
 const lexicalCoverageJaccardWeight = 0.35
 const lexicalCoverageBM25Weight = 1.3
 const structuralRerankMetadataLimit = 48
+const languageSymbolRankProfile = "language-symbol"
+const languageSymbolRankWindow = 20
 
 type retrievalQueryPlan struct {
 	FTSTokens        []string
@@ -918,6 +940,7 @@ func RetrieveSimilarSnippetsWithOptions(db *sql.DB, comp Compressor, prompt stri
 			rankingTokens = words
 		}
 		uniqueTokens := uniqueStrings(rankingTokens)
+		queryIntent := retrievalQueryIntent(prompt)
 		structureIntent := queryStructureIntent(prompt)
 		structureWeight := queryStructureBoostWeight(prompt, uniqueTokens)
 		tokenWeights := queryTokenWeights(uniqueTokens, candidates)
@@ -965,12 +988,21 @@ func RetrieveSimilarSnippetsWithOptions(db *sql.DB, comp Compressor, prompt stri
 						}
 					}
 					components := candidateScoreComponents(uniqueTokens, tokenWeights, 0, structuralBoost, candidates[idx], detectedLang, structureIntent, structureWeight)
+					candidates[idx].rankSignals = retrievalRankSignals{
+						PathTokenBoost:      components.PathTokenBoost,
+						StructureBoost:      components.StructureBoost,
+						StructuredPathBoost: structuredBoosts[idx],
+						StructuredPathRank:  structuredPathRanks[normalizeIndexedPath(candidates[idx].Path)],
+					}
 					baseScore := components.score(qnd) - gitBoost
 					baseScores[idx] = baseScore
 					candidates[idx].Score = baseScore - bm25Boosts[idx] - bm25FBoosts[idx]
 					if options.IncludeDiagnostics {
+						orderedTokenOverlap := orderedTokenOverlapScore(prompt, candidates[idx].Content)
+						contentSignals := candidateContentRankSignals(prompt, candidates[idx].Content)
 						candidates[idx].Diagnostics = &RetrievalDiagnostics{
 							QND:                   qnd,
+							QueryIntent:           queryIntent,
 							BaseScore:             baseScore,
 							FinalScore:            candidates[idx].Score,
 							LexicalBoost:          components.LexicalBoost,
@@ -991,6 +1023,9 @@ func RetrieveSimilarSnippetsWithOptions(db *sql.DB, comp Compressor, prompt stri
 							TopicPenalty:          components.TopicPenalty,
 							PrimaryFTSRank:        primaryCandidateRanks[candidates[idx].ID],
 							QueryPathRank:         queryPathCandidateRanks[candidates[idx].ID],
+							OrderedTokenOverlap:   orderedTokenOverlap,
+							AssignmentLHSCoverage: contentSignals.AssignmentLHSCoverage,
+							HeaderTokenCoverage:   contentSignals.HeaderTokenCoverage,
 							MatchedQueryTokens:    matchedDiagnosticQueryTokens(uniqueTokens, candidates[idx]),
 						}
 					}
@@ -1006,13 +1041,15 @@ func RetrieveSimilarSnippetsWithOptions(db *sql.DB, comp Compressor, prompt stri
 
 		if usedFTS && len(primaryCandidateIDs) > 0 {
 			protectedCandidateID = topCandidateIDByBaseScore(candidates, baseScores, primaryCandidateIDs)
-			if options.IncludeDiagnostics {
-				for idx := range candidates {
-					if candidates[idx].ID == protectedCandidateID && candidates[idx].Diagnostics != nil {
-						candidates[idx].Diagnostics.ProtectedCandidate = true
-						break
-					}
+			for idx := range candidates {
+				if candidates[idx].ID != protectedCandidateID {
+					continue
 				}
+				candidates[idx].rankSignals.ProtectedCandidate = true
+				if candidates[idx].Diagnostics != nil {
+					candidates[idx].Diagnostics.ProtectedCandidate = true
+				}
+				break
 			}
 		}
 
@@ -1048,6 +1085,9 @@ func RetrieveSimilarSnippetsWithOptions(db *sql.DB, comp Compressor, prompt stri
 			}
 		}
 		fusionDiagnostics := applyCandidateRankFusion(candidates, primaryCandidateRanks, queryPathCandidateRanks, bm25CandidateRanks, bm25FCandidateRanks, structuredPathRanks, structuralRerankRanks, pathProximityRanks)
+		if allowConsensusScoreProfile(prompt) {
+			applyConsensusScoreProfile(candidates)
+		}
 		if options.IncludeDiagnostics {
 			for idx := range candidates {
 				diagnostics := candidates[idx].Diagnostics
@@ -1065,6 +1105,14 @@ func RetrieveSimilarSnippetsWithOptions(db *sql.DB, comp Compressor, prompt stri
 
 	if usedFTS && len(primaryCandidateIDs) > 0 {
 		ranked := rankSearchCandidates(candidates, primaryCandidateIDs, protectedCandidateID, lexicalCoverageRanks, limit)
+		if languageSymbolRankProfileEnabled() {
+			rankingLimit := min(max(limit, languageSymbolRankWindow), len(candidates))
+			profileWindow := ranked
+			if rankingLimit > limit {
+				profileWindow = rankSearchCandidates(candidates, primaryCandidateIDs, protectedCandidateID, lexicalCoverageRanks, rankingLimit)
+			}
+			ranked = applyLanguageSymbolRankProfile(prompt, profileWindow, ranked, limit)
+		}
 		if options.IncludeDiagnostics {
 			for idx := range ranked {
 				if ranked[idx].Diagnostics != nil {
@@ -1204,6 +1252,371 @@ func addRankFusionScore(scores map[int]float64, id int, rank int, weight float64
 		return
 	}
 	scores[id] += weight / (rankFusionK + float64(rank))
+}
+
+func applyConsensusScoreProfile(candidates []Snippet) {
+	if len(candidates) < 2 {
+		return
+	}
+	changed := false
+	for idx := range candidates {
+		boost := consensusScoreBoost(candidates[idx].rankSignals)
+		if boost <= 0 {
+			continue
+		}
+		changed = true
+		candidates[idx].Score -= boost
+		if candidates[idx].Diagnostics != nil {
+			candidates[idx].Diagnostics.ConsensusBoost = boost
+			candidates[idx].Diagnostics.FinalScore = candidates[idx].Score
+		}
+	}
+	if !changed {
+		return
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Score == candidates[j].Score {
+			return candidates[i].ID < candidates[j].ID
+		}
+		return candidates[i].Score < candidates[j].Score
+	})
+}
+
+func consensusScoreBoost(signals retrievalRankSignals) float64 {
+	boost := consensusPathTokenWeight*signals.PathTokenBoost + consensusStructureWeight*signals.StructureBoost
+	if signals.ProtectedCandidate {
+		boost += consensusProtectedWeight
+	}
+	if signals.StructuredPathRank > 0 && (signals.PathTokenBoost > 0 || signals.StructureBoost > 0 || signals.ProtectedCandidate) {
+		boost += consensusStructuredPathRankWeight / float64(signals.StructuredPathRank)
+	}
+	return boost
+}
+
+func allowConsensusScoreProfile(prompt string) bool {
+	return importStatementLineCount(prompt) < 2
+}
+
+func importStatementLineCount(prompt string) int {
+	count := 0
+	for _, line := range strings.Split(prompt, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "from ") {
+			count++
+		}
+	}
+	return count
+}
+
+func languageSymbolRankProfileEnabled() bool {
+	profile := strings.TrimSpace(RankProfile)
+	if profile == "" {
+		profile = strings.TrimSpace(os.Getenv("SNAPZIP_RANK_PROFILE"))
+	}
+	profile = strings.ToLower(profile)
+	return profile == languageSymbolRankProfile || profile == "language_symbol"
+}
+
+type languageSymbolRankFeatures struct {
+	BaselineRankReciprocal    float64
+	ConsensusBoost            float64
+	StructuredPathBoost       float64
+	DeclarationOrderedOverlap float64
+	QueryDeclarationCoverage  float64
+	RareQueryTokenCoverage    float64
+}
+
+func applyLanguageSymbolRankProfile(prompt string, ranked []Snippet, baseline []Snippet, limit int) []Snippet {
+	if limit <= 0 {
+		return ranked
+	}
+	if len(ranked) == 0 {
+		return limitLanguageSymbolRankResults(limit, baseline)
+	}
+	if len(ranked) <= limit {
+		return limitLanguageSymbolRankResults(limit, baseline, ranked)
+	}
+	language := dominantRankedLanguage(ranked)
+	if language != "java" && language != "py" {
+		return limitLanguageSymbolRankResults(limit, ranked, baseline)
+	}
+	if !allowLanguageSymbolRankProfileForRoute(prompt, language) {
+		return limitLanguageSymbolRankResults(limit, ranked, baseline)
+	}
+
+	features := languageSymbolRankFeatureValues(prompt, ranked, baseline, limit)
+	if len(features) != len(ranked) {
+		return limitLanguageSymbolRankResults(limit, ranked, baseline)
+	}
+	scores := languageSymbolRankScores(language, features)
+	scoreByKey := map[string]float64{}
+	reranked := append([]Snippet(nil), ranked...)
+	for idx := range reranked {
+		scoreByKey[languageSymbolCandidateKey(reranked[idx])] = scores[idx]
+		if reranked[idx].Diagnostics != nil {
+			reranked[idx].Diagnostics.LanguageSymbolScore = scores[idx]
+		}
+	}
+	sort.SliceStable(reranked, func(i, j int) bool {
+		leftKey := languageSymbolCandidateKey(reranked[i])
+		rightKey := languageSymbolCandidateKey(reranked[j])
+		leftScore := scoreByKey[leftKey]
+		rightScore := scoreByKey[rightKey]
+		if leftScore == rightScore {
+			leftRank := languageSymbolOriginalRank(ranked, leftKey)
+			rightRank := languageSymbolOriginalRank(ranked, rightKey)
+			if leftRank == rightRank {
+				return leftKey < rightKey
+			}
+			return leftRank < rightRank
+		}
+		return leftScore > rightScore
+	})
+	return limitLanguageSymbolRankResults(limit, reranked, baseline, ranked)
+}
+
+func allowLanguageSymbolRankProfileForRoute(prompt, language string) bool {
+	if language == "java" && retrievalQueryIntent(prompt) == "declaration" {
+		return false
+	}
+	return true
+}
+
+func limitLanguageSymbolRankResults(limit int, rankedLists ...[]Snippet) []Snippet {
+	if limit <= 0 {
+		return nil
+	}
+	merged := make([]Snippet, 0, limit)
+	used := make(map[string]bool, limit)
+	for _, rankedList := range rankedLists {
+		for _, candidate := range rankedList {
+			key := languageSymbolCandidateKey(candidate)
+			if used[key] {
+				continue
+			}
+			merged = append(merged, candidate)
+			used[key] = true
+		}
+	}
+	if len(merged) <= limit {
+		return merged
+	}
+	return diversifyRankedSearchCandidates(merged, limit)
+}
+
+func dominantRankedLanguage(ranked []Snippet) string {
+	counts := map[string]int{}
+	bestLanguage := ""
+	bestCount := 0
+	for _, candidate := range ranked {
+		language := NormalizeLanguage(candidate.Language)
+		if language == "" {
+			continue
+		}
+		counts[language]++
+		if counts[language] > bestCount {
+			bestLanguage = language
+			bestCount = counts[language]
+		}
+	}
+	return bestLanguage
+}
+
+func languageSymbolOriginalRank(ranked []Snippet, key string) int {
+	for idx := range ranked {
+		if languageSymbolCandidateKey(ranked[idx]) == key {
+			return idx + 1
+		}
+	}
+	return len(ranked) + 1
+}
+
+func languageSymbolRankFeatureValues(prompt string, ranked []Snippet, baseline []Snippet, limit int) []languageSymbolRankFeatures {
+	queryTokens := codeContextSearchTokens(prompt)
+	orderedQueryTokens := orderedMeaningfulIdentifierTokens(prompt, 64)
+	idf := languageSymbolIDF(ranked)
+	baselineRanks := languageSymbolBaselineRanks(baseline, limit)
+	if len(baselineRanks) == 0 {
+		baselineRanks = languageSymbolBaselineRanks(ranked, limit)
+	}
+	raw := make([]languageSymbolRankFeatures, len(ranked))
+	for idx := range ranked {
+		declarationTokens, declarationHeaderTokens := snippetDeclarationTokens(ranked[idx])
+		features := languageSymbolRankFeatures{
+			ConsensusBoost:            consensusScoreBoost(ranked[idx].rankSignals),
+			StructuredPathBoost:       ranked[idx].rankSignals.StructuredPathBoost,
+			DeclarationOrderedOverlap: orderedTokenLCSRatio(orderedQueryTokens, declarationHeaderTokens),
+			QueryDeclarationCoverage:  tokenCoverage(queryTokens, declarationTokens),
+			RareQueryTokenCoverage:    weightedTokenCoverage(queryTokens, codeContextSearchTokens(ranked[idx].Content), idf),
+		}
+		if rank := baselineRanks[languageSymbolCandidateKey(ranked[idx])]; rank > 0 {
+			features.BaselineRankReciprocal = 1.0 / float64(rank)
+		}
+		raw[idx] = features
+	}
+	return normalizeLanguageSymbolFeatures(raw)
+}
+
+func languageSymbolBaselineRanks(ranked []Snippet, limit int) map[string]int {
+	baselineLimit := min(5, limit, len(ranked))
+	if baselineLimit <= 0 {
+		return nil
+	}
+	ranks := make(map[string]int, baselineLimit)
+	for idx := range ranked[:baselineLimit] {
+		ranks[languageSymbolCandidateKey(ranked[idx])] = idx + 1
+	}
+	return ranks
+}
+
+func languageSymbolCandidateKey(candidate Snippet) string {
+	hash := strings.TrimSpace(candidate.ContentHash)
+	if hash == "" && candidate.Content != "" {
+		hash = contentHash([]byte(candidate.Content))
+	}
+	return fmt.Sprintf("%d\x00%s\x00%d\x00%d\x00%s",
+		candidate.ID,
+		normalizeIndexedPath(candidate.Path),
+		candidate.StartLine,
+		candidate.EndLine,
+		hash,
+	)
+}
+
+func languageSymbolRankScores(language string, features []languageSymbolRankFeatures) []float64 {
+	scores := make([]float64, len(features))
+	for idx, feature := range features {
+		switch language {
+		case "java":
+			scores[idx] =
+				0.025*feature.BaselineRankReciprocal +
+					0.025*feature.ConsensusBoost +
+					0.10*feature.DeclarationOrderedOverlap +
+					0.05*feature.QueryDeclarationCoverage +
+					0.025*feature.RareQueryTokenCoverage +
+					0.05*feature.StructuredPathBoost
+		case "py":
+			scores[idx] = 0.025 * feature.ConsensusBoost
+		}
+	}
+	return scores
+}
+
+func normalizeLanguageSymbolFeatures(raw []languageSymbolRankFeatures) []languageSymbolRankFeatures {
+	if len(raw) == 0 {
+		return nil
+	}
+	baselineValues := make([]float64, len(raw))
+	consensusValues := make([]float64, len(raw))
+	structuredValues := make([]float64, len(raw))
+	declarationOrderedValues := make([]float64, len(raw))
+	queryDeclarationValues := make([]float64, len(raw))
+	rareQueryValues := make([]float64, len(raw))
+	for idx, feature := range raw {
+		baselineValues[idx] = feature.BaselineRankReciprocal
+		consensusValues[idx] = feature.ConsensusBoost
+		structuredValues[idx] = feature.StructuredPathBoost
+		declarationOrderedValues[idx] = feature.DeclarationOrderedOverlap
+		queryDeclarationValues[idx] = feature.QueryDeclarationCoverage
+		rareQueryValues[idx] = feature.RareQueryTokenCoverage
+	}
+	normalized := make([]languageSymbolRankFeatures, len(raw))
+	for idx := range raw {
+		normalized[idx] = languageSymbolRankFeatures{
+			BaselineRankReciprocal:    normalizeFeatureValue(raw[idx].BaselineRankReciprocal, baselineValues),
+			ConsensusBoost:            normalizeFeatureValue(raw[idx].ConsensusBoost, consensusValues),
+			StructuredPathBoost:       normalizeFeatureValue(raw[idx].StructuredPathBoost, structuredValues),
+			DeclarationOrderedOverlap: normalizeFeatureValue(raw[idx].DeclarationOrderedOverlap, declarationOrderedValues),
+			QueryDeclarationCoverage:  normalizeFeatureValue(raw[idx].QueryDeclarationCoverage, queryDeclarationValues),
+			RareQueryTokenCoverage:    normalizeFeatureValue(raw[idx].RareQueryTokenCoverage, rareQueryValues),
+		}
+	}
+	return normalized
+}
+
+func normalizeFeatureValue(value float64, values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	low := values[0]
+	high := values[0]
+	for _, candidate := range values[1:] {
+		if candidate < low {
+			low = candidate
+		}
+		if candidate > high {
+			high = candidate
+		}
+	}
+	if high == low {
+		return 0
+	}
+	return (value - low) / (high - low)
+}
+
+func snippetDeclarationTokens(snippet Snippet) ([]string, []string) {
+	language := NormalizeLanguage(snippet.Language)
+	symbols := ExtractSymbols(language, snippet.Path, snippet.Content)
+	var declarationTokens []string
+	var headerTokens []string
+	for _, symbol := range symbols {
+		declarationTokens = mergeTokenLists(declarationTokens, codeContextSearchTokens(symbol.Name))
+		headerTokens = mergeTokenLists(headerTokens, codeContextSearchTokens(symbol.Signature))
+	}
+	return uniqueStrings(declarationTokens), uniqueStrings(headerTokens)
+}
+
+func orderedTokenLCSRatio(queryTokens, candidateTokens []string) float64 {
+	if len(queryTokens) == 0 || len(candidateTokens) == 0 {
+		return 0
+	}
+	lcs := orderedTokenLCSLength(queryTokens, candidateTokens)
+	if lcs == 0 {
+		return 0
+	}
+	return float64(lcs) / float64(len(queryTokens))
+}
+
+func languageSymbolIDF(ranked []Snippet) map[string]float64 {
+	documents := make([]map[string]bool, 0, len(ranked))
+	docFreq := map[string]int{}
+	for _, candidate := range ranked {
+		document := stringSet(codeContextSearchTokens(candidate.Content)...)
+		documents = append(documents, document)
+		for token := range document {
+			docFreq[token]++
+		}
+	}
+	docCount := len(documents)
+	idf := map[string]float64{}
+	for token, freq := range docFreq {
+		idf[token] = math.Log(1 + (float64(docCount)+1)/(float64(freq)+0.5))
+	}
+	return idf
+}
+
+func weightedTokenCoverage(queryTokens, candidateTokens []string, idf map[string]float64) float64 {
+	querySet := stringSet(queryTokens...)
+	if len(querySet) == 0 || len(candidateTokens) == 0 {
+		return 0
+	}
+	candidateSet := stringSet(candidateTokens...)
+	total := 0.0
+	matched := 0.0
+	for token := range querySet {
+		weight := idf[token]
+		if weight <= 0 {
+			weight = 1
+		}
+		total += weight
+		if candidateSet[token] {
+			matched += weight
+		}
+	}
+	if total <= 0 {
+		return 0
+	}
+	return matched / total
 }
 
 func rankSearchCandidates(candidates []Snippet, primaryCandidateIDs map[int]bool, protectedID int, lexicalRanks map[int]int, limit int) []Snippet {
@@ -1800,6 +2213,127 @@ func codeContextSearchTokens(prompt string) []string {
 		}
 	}
 	return uniqueStrings(tokens)
+}
+
+func orderedTokenOverlapScore(query, candidate string) float64 {
+	queryTokens := orderedMeaningfulIdentifierTokens(query, 64)
+	candidateTokens := orderedMeaningfulIdentifierTokens(candidate, 256)
+	if len(queryTokens) == 0 || len(candidateTokens) == 0 {
+		return 0
+	}
+	lcs := orderedTokenLCSLength(queryTokens, candidateTokens)
+	if lcs == 0 {
+		return 0
+	}
+	return float64(lcs) / float64(len(queryTokens))
+}
+
+func orderedMeaningfulIdentifierTokens(input string, limit int) []string {
+	var tokens []string
+	for _, raw := range identifierFields(input) {
+		for _, token := range appendIdentifierTokens(nil, raw) {
+			if meaningfulCodeSearchToken(token) || isLanguageQueryToken(token) {
+				tokens = append(tokens, token)
+				if limit > 0 && len(tokens) >= limit {
+					return tokens
+				}
+			}
+		}
+	}
+	return tokens
+}
+
+func orderedTokenLCSLength(a, b []string) int {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	previous := make([]int, len(b)+1)
+	current := make([]int, len(b)+1)
+	for i := 1; i <= len(a); i++ {
+		for j := 1; j <= len(b); j++ {
+			if a[i-1] == b[j-1] {
+				current[j] = previous[j-1] + 1
+				continue
+			}
+			if previous[j] >= current[j-1] {
+				current[j] = previous[j]
+			} else {
+				current[j] = current[j-1]
+			}
+		}
+		previous, current = current, previous
+		for j := range current {
+			current[j] = 0
+		}
+	}
+	return previous[len(b)]
+}
+
+type contentRankSignals struct {
+	AssignmentLHSCoverage float64
+	HeaderTokenCoverage   float64
+}
+
+func candidateContentRankSignals(prompt, content string) contentRankSignals {
+	candidateTokens := codeContextSearchTokens(content)
+	headerTokens := codeContextSearchTokens(firstNonEmptyLines(content, 4))
+	queryTokens := codeContextSearchTokens(prompt)
+	return contentRankSignals{
+		AssignmentLHSCoverage: tokenCoverage(queryAssignmentLHSTokens(prompt), candidateTokens),
+		HeaderTokenCoverage:   tokenCoverage(queryTokens, headerTokens),
+	}
+}
+
+func queryAssignmentLHSTokens(prompt string) []string {
+	var tokens []string
+	for _, line := range strings.Split(prompt, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.Contains(trimmed, "==") || strings.Contains(trimmed, "!=") || strings.Contains(trimmed, "<=") || strings.Contains(trimmed, ">=") {
+			continue
+		}
+		idx := strings.Index(trimmed, "=")
+		if idx <= 0 {
+			continue
+		}
+		left := strings.TrimSpace(trimmed[:idx])
+		if left == "" || strings.ContainsAny(left, "+-*/%&|^!<>") {
+			continue
+		}
+		tokens = mergeTokenLists(tokens, codeContextSearchTokens(left))
+	}
+	return uniqueStrings(tokens)
+}
+
+func firstNonEmptyLines(input string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	var lines []string
+	for _, line := range strings.Split(input, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lines = append(lines, line)
+		if len(lines) >= limit {
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func tokenCoverage(queryTokens, candidateTokens []string) float64 {
+	querySet := stringSet(queryTokens...)
+	if len(querySet) == 0 || len(candidateTokens) == 0 {
+		return 0
+	}
+	candidateSet := stringSet(candidateTokens...)
+	matched := 0
+	for token := range querySet {
+		if candidateSet[token] {
+			matched++
+		}
+	}
+	return float64(matched) / float64(len(querySet))
 }
 
 func filterLowSignalSearchTokens(tokens []string) []string {
@@ -2737,6 +3271,145 @@ func documentSearchTokens(input string) []string {
 		tokens = appendIdentifierTokens(tokens, raw)
 	}
 	return tokens
+}
+
+func retrievalQueryIntent(prompt string) string {
+	lines := nonEmptyTrimmedLines(prompt)
+	if len(lines) == 0 {
+		return "empty"
+	}
+	if allCommentLikeLines(lines) {
+		return "comment"
+	}
+	if promptHasImportContext(prompt) {
+		return "import"
+	}
+	if queryStructureIntent(prompt) != "" || hasDeclarationLikeLine(lines) {
+		return "declaration"
+	}
+	if containsCodeWord(lines, "except", "catch", "raise", "throw") {
+		return "exception"
+	}
+	if containsAssignmentLikeLine(lines) {
+		return "assignment"
+	}
+	if symbolReferenceCallPattern.MatchString(strings.Join(lines, "\n")) {
+		return "call"
+	}
+	if sparseIdentifierContext(lines) {
+		return "sparse"
+	}
+	return "mixed"
+}
+
+func nonEmptyTrimmedLines(input string) []string {
+	var lines []string
+	for _, line := range strings.Split(input, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			lines = append(lines, trimmed)
+		}
+	}
+	return lines
+}
+
+func allCommentLikeLines(lines []string) bool {
+	for _, line := range lines {
+		if !(strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") || strings.HasPrefix(line, "*")) {
+			return false
+		}
+	}
+	return len(lines) > 0
+}
+
+func hasDeclarationLikeLine(lines []string) bool {
+	for _, line := range lines {
+		if startsWithAny(line,
+			"async def ",
+			"def ",
+			"class ",
+			"func ",
+			"function ",
+			"public ",
+			"private ",
+			"protected ",
+			"static ",
+			"final ",
+		) {
+			return true
+		}
+		if annotationLineContainsDeclaration(line) {
+			return true
+		}
+	}
+	return false
+}
+
+func annotationLineContainsDeclaration(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) < 2 || !strings.HasPrefix(fields[0], "@") {
+		return false
+	}
+	for _, field := range fields[1:] {
+		if field == "public" || field == "private" || field == "protected" || field == "static" || field == "final" {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCodeWord(lines []string, words ...string) bool {
+	for _, line := range lines {
+		for _, raw := range identifierFields(line) {
+			token := strings.ToLower(raw)
+			for _, word := range words {
+				if token == word {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func containsAssignmentLikeLine(lines []string) bool {
+	for _, line := range lines {
+		for idx, char := range line {
+			if char != '=' {
+				continue
+			}
+			prev := rune(0)
+			next := rune(0)
+			if idx > 0 {
+				prev = rune(line[idx-1])
+			}
+			if idx+1 < len(line) {
+				next = rune(line[idx+1])
+			}
+			if prev == '=' || prev == '!' || prev == '<' || prev == '>' || next == '=' || next == '>' {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func sparseIdentifierContext(lines []string) bool {
+	seen := map[string]bool{}
+	for _, line := range lines {
+		for _, raw := range identifierFields(line) {
+			token := normalizeStructuralIdentifier(raw)
+			if token == "" {
+				continue
+			}
+			seen[token] = true
+			if len(seen) > 2 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func queryStructureIntent(prompt string) string {

@@ -722,12 +722,12 @@ func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int, i
 		current.Evidence = uniqueStrings(append(current.Evidence, receipt.Evidence...))
 		current.Confidence = maxFloat(current.Confidence, receipt.Confidence)
 	}
-	addSnippet := func(snippet Snippet, receipt ContextReceipt) bool {
+	addSnippet := func(snippet Snippet, receipt ContextReceipt, dedupePath bool) bool {
 		if len(merged) >= limit {
 			return false
 		}
 		path := normalizeIndexedPath(snippet.Path)
-		if path != "" {
+		if dedupePath && path != "" {
 			if existing, ok := mergedIndexByPath[path]; ok {
 				mergeReceipt(existing, receipt)
 				return false
@@ -778,13 +778,13 @@ func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int, i
 		return true
 	}
 
-	addSnippet(result.Snippets[0], ContextReceipt{})
+	addSnippet(result.Snippets[0], ContextReceipt{}, false)
 	graphAdded := 0
 	for _, candidate := range candidates {
 		if graphAdded >= graphBudget {
 			break
 		}
-		if addSnippet(candidate.snippet, candidate.receipt) {
+		if addSnippet(candidate.snippet, candidate.receipt, true) {
 			graphAdded++
 		}
 	}
@@ -792,7 +792,7 @@ func addGraphContextToSearchResult(db *sql.DB, result SearchResult, limit int, i
 		if len(merged) >= limit {
 			break
 		}
-		addSnippet(snippet, ContextReceipt{})
+		addSnippet(snippet, ContextReceipt{}, false)
 	}
 	result.Snippets = merged
 	result.Receipts = receipts

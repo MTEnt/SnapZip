@@ -198,6 +198,48 @@ func TestSearchMemoryAddsSymbolReferenceDefinition(t *testing.T) {
 	}
 }
 
+func TestGraphContextKeepsDistinctDirectChunksFromSamePath(t *testing.T) {
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	result := SearchResult{
+		Query: "cache key",
+		Snippets: []Snippet{
+			{
+				ID:        1,
+				Language:  "py",
+				Path:      "app/cache.py",
+				StartLine: 1,
+				EndLine:   20,
+				Content:   "def first_cache_key():\n    return 'one'\n",
+			},
+			{
+				ID:        2,
+				Language:  "py",
+				Path:      "app/cache.py",
+				StartLine: 40,
+				EndLine:   60,
+				Content:   "def second_cache_key():\n    return 'two'\n",
+			},
+		},
+		Receipts: []ContextReceipt{
+			{Path: "app/cache.py", StartLine: 1, EndLine: 20, Reasons: []string{"direct retrieval"}},
+			{Path: "app/cache.py", StartLine: 40, EndLine: 60, Reasons: []string{"direct retrieval"}},
+		},
+	}
+
+	merged := addGraphContextToSearchResult(db, result, 2, false)
+	if len(merged.Snippets) != 2 {
+		t.Fatalf("merged snippets length = %d, want both direct chunks: %+v", len(merged.Snippets), merged.Snippets)
+	}
+	if merged.Snippets[0].StartLine == merged.Snippets[1].StartLine {
+		t.Fatalf("merged snippets collapsed distinct same-path chunks: %+v", merged.Snippets)
+	}
+}
+
 func TestBuildContextPackAddsSymbolReferenceCaller(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root, "app/cache.py", "class CacheStore:\n    pass\n\ndef build_cache():\n    return CacheStore()\n")

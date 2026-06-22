@@ -70,6 +70,12 @@ Current 100-sample public readout on `python_cff` / `test_hard`, seed `42`:
 - BM25: 14/100 acc@1, 31/100 acc@3, 52/100 acc@5, 0.261167 MRR@5, 0.324596 nDCG@5
 - SnapZip: 17/100 acc@1, 34/100 acc@3, 59/100 acc@5, 0.3005 MRR@5, 0.370936 nDCG@5, 0 duplicate top-5 records
 
+Current 800-case public matrix readout with the opt-in `language-symbol` profile, seed `42`:
+
+- Baseline SnapZip: 0.19625 acc@1, 0.48375 acc@3, 0.71000 acc@5, 0.367833 MRR@5, 0.451986 nDCG@5
+- `SNAPZIP_RANK_PROFILE=language-symbol`: 0.20625 acc@1, 0.50125 acc@3, 0.72125 acc@5, 0.380396 MRR@5, 0.464355 nDCG@5
+- Delta: +0.01000 acc@1, +0.01750 acc@3, +0.01125 acc@5, +0.012563 MRR@5, +0.012369 nDCG@5, with 0 duplicate top-5 records
+
 Use optional quality gates for release or CI checks:
 
 ```bash
@@ -89,9 +95,9 @@ python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobenc
 
 The default CI workflow runs this gated public sample so retrieval changes must preserve both the current measured floor and the current measured lift over raw baselines before merging.
 
-Add `--snapzip-diagnostics` to RepoBench-R or RepoBench-P runs when tuning ranking. The JSON records will include compact score diagnostics for SnapZip's returned results, including QND, lexical/BM25/BM25F boosts, identifier/path/structure boosts, rank-fusion contribution, final rank, and matched query tokens.
+Add `--snapzip-diagnostics` to RepoBench-R or RepoBench-P runs when tuning ranking. The JSON records will include compact score diagnostics for SnapZip's returned results, including detected query intent, QND, lexical/BM25/BM25F boosts, identifier/path/structure boosts, rank-fusion and consensus contributions, ordered token overlap, final rank, and matched query tokens.
 
-Use the offline tuner to test alternate score-feature weights against those returned candidates:
+Start by summarizing miss patterns and baseline overlap:
 
 ```bash
 python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip \
@@ -100,14 +106,131 @@ python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip \
   --snapzip-diagnostics-limit 20 \
   --json /tmp/snapzip-repobench-r-diagnostics.json
 
+python3 benchmarks/analyze_repobench.py \
+  --input /tmp/snapzip-repobench-r-diagnostics.json \
+  --json /tmp/snapzip-repobench-r-analysis.json
+```
+
+The analyzer accepts single runs and matrix runs. Matrix analysis starts with an aggregate section covering macro metrics, SnapZip-vs-baseline deltas, recoverable misses, all-system misses, diagnostic recall ceilings, query-intent miss shapes, and the largest split blockers:
+
+```bash
+python3 benchmarks/run.py --suite repobench-r-matrix --snapzip-bin ./snapzip \
+  --repobench-sample-size 100 \
+  --snapzip-diagnostics \
+  --snapzip-diagnostics-limit 20 \
+  --json /tmp/snapzip-repobench-r-matrix-diagnostics.json
+
+python3 benchmarks/analyze_repobench.py \
+  --input /tmp/snapzip-repobench-r-matrix-diagnostics.json \
+  --json /tmp/snapzip-repobench-r-matrix-analysis.json
+```
+
+Then use the offline tuner to test alternate score-feature weights against those returned candidates:
+
+```bash
 python3 benchmarks/tune_diagnostics.py \
   --input /tmp/snapzip-repobench-r-diagnostics.json \
   --metric mrr@5 \
   --guardrails hit@5 \
+  --cv-folds 5 \
   --json /tmp/snapzip-repobench-r-tuning.json
 ```
 
-The tuner only reorders candidates SnapZip already returned. Keep the default `--snapzip-search-limit 5` when reproducing published top-5 numbers, and raise `--snapzip-diagnostics-limit` during offline diagnostics when you want to see whether lower-ranked candidates can be promoted into the top five without perturbing the measured top-5 search. The default tuner guardrail is `hit@5`, so MRR tuning does not accept candidates that lose top-5 recall against the benchmark baseline.
+For stricter cross-validation, add an inner selection validation split. In each outer fold, candidate weights are tuned on a subtrain split and applied to the outer holdout only if they pass the inner validation guardrails; otherwise that fold falls back to the baseline ranking:
+
+```bash
+python3 benchmarks/tune_diagnostics.py \
+  --input /tmp/snapzip-repobench-r-matrix-diagnostics.json \
+  --metric hit@5 \
+  --guardrails hit@3,mrr@5,ndcg@5 \
+  --cv-folds 5 \
+  --cv-selection-validation-fraction 0.25 \
+  --json /tmp/snapzip-repobench-r-tuning-nested.json
+```
+
+When global weights do not move, use grouped tuning to look for intent- or split-specific profiles without committing them to runtime:
+
+```bash
+python3 benchmarks/tune_diagnostics.py \
+  --input /tmp/snapzip-repobench-r-matrix-diagnostics.json \
+  --metric mrr@5 \
+  --guardrails hit@5 \
+  --group-by query_intent \
+  --cv-folds 5 \
+  --json /tmp/snapzip-repobench-r-tuning-by-intent.json
+
+python3 benchmarks/tune_diagnostics.py \
+  --input /tmp/snapzip-repobench-r-matrix-diagnostics.json \
+  --metric mrr@5 \
+  --guardrails hit@5 \
+  --group-by config_split \
+  --cv-folds 5 \
+  --json /tmp/snapzip-repobench-r-tuning-by-split.json
+```
+
+To test a routed ranker offline, add `--route-by`. The routed evaluation applies only groups that pass validation and falls back to the baseline ranking everywhere else:
+
+```bash
+python3 benchmarks/tune_diagnostics.py \
+  --input /tmp/snapzip-repobench-r-matrix-diagnostics.json \
+  --metric mrr@5 \
+  --guardrails hit@5 \
+  --group-by query_intent \
+  --route-by query_intent \
+  --cv-folds 5 \
+  --json /tmp/snapzip-repobench-r-routed-by-intent.json
+```
+
+Use `--route-by language` for a coarser profile when intent- or split-level routing overfits. Routed cross-validation reports `pass`, `neutral`, or `hold` and includes fold failures when any requested metric regresses:
+
+```bash
+python3 benchmarks/tune_diagnostics.py \
+  --input /tmp/snapzip-repobench-r-matrix-diagnostics.json \
+  --metric hit@5 \
+  --guardrails hit@3,mrr@5,ndcg@5 \
+  --group-by language \
+  --route-by language \
+  --cv-folds 5 \
+  --json /tmp/snapzip-repobench-r-routed-by-language.json
+```
+
+If a routed profile passes offline gates, test the matching runtime profile as an opt-in experiment before considering it for default ranking:
+
+```bash
+SNAPZIP_RANK_PROFILE=language-symbol \
+python3 benchmarks/run.py --suite repobench-r-matrix --snapzip-bin ./snapzip \
+  --repobench-sample-size 100 \
+  --json /tmp/snapzip-repobench-r-runtime-language-symbol.json
+```
+
+Runtime profile runs are the release gate. Offline tuning can identify candidate weights, but the profile should stay experimental unless the actual `snapzip search` path improves aggregate metrics without unacceptable split regressions.
+
+For learning-to-rank experiments, use the pairwise offline learner. Its default profile anchors to the measured SnapZip top-5, then tests residual feature weights with deterministic held-out folds:
+
+```bash
+python3 benchmarks/learn_ranker.py \
+  --input /tmp/snapzip-repobench-r-matrix-diagnostics.json \
+  --metric mrr@5 \
+  --guardrails hit@5 \
+  --cv-folds 5 \
+  --freeze-anchor \
+  --json /tmp/snapzip-repobench-r-learned-ranker.json
+```
+
+When full reranking is too unstable, test bounded promotion policies. Promotion changes at most one top-5 slot and only when lower-ranked diagnostic candidates clear explicit feature thresholds. This is useful for investigating whether a recoverable gold snippet at rank 6-20 can be moved into the top five without disturbing the rest of the ranking:
+
+```bash
+python3 benchmarks/promote_diagnostics.py \
+  --input /tmp/snapzip-repobench-r-matrix-diagnostics.json \
+  --metric mrr@5 \
+  --guardrails hit@5,ndcg@5 \
+  --cv-folds 5 \
+  --json /tmp/snapzip-repobench-r-promotion.json
+```
+
+`promote_diagnostics.py` reports two different signals. Fixed policy candidates show which hand-specified policies look promising on the supplied diagnostics; they are research leads, not release decisions. Cross-validated selection is the gate that matters. If its decision is `hold`, do not move the policy into runtime ranking, even when a fixed candidate shows positive aggregate numbers.
+
+The tuner, learner, and promotion tools only reorder candidates SnapZip already returned. Keep the default `--snapzip-search-limit 5` when reproducing published top-5 numbers, and raise `--snapzip-diagnostics-limit` during offline diagnostics when you want to see whether lower-ranked candidates can be promoted into the top five without perturbing the measured top-5 search. The benchmark harness may attach numeric `benchmark_features` such as token coverage, parser-lite declaration/call/import coverage, and candidate-shape features to diagnostics for offline analysis; these fields are benchmark-side signals and should be validated with held-out folds before being considered for runtime scoring. The default guardrail is `hit@5`, so MRR tuning does not accept candidates that lose top-5 recall against the benchmark baseline. Treat in-sample, fixed-policy, and single-validation wins as exploratory until `--cv-folds` also passes.
 
 ## RepoBench v1.1 Pipeline-Context Proxy
 

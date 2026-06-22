@@ -663,6 +663,47 @@ func TestCandidateRankFusionCombinesIndependentSignals(t *testing.T) {
 	}
 }
 
+func TestApplyConsensusScoreProfilePromotesTunedSignalAgreement(t *testing.T) {
+	candidates := []Snippet{
+		{ID: 1, Path: "app/noise.py", Score: 0.100},
+		{
+			ID:    2,
+			Path:  "app/target.py",
+			Score: 0.140,
+			Diagnostics: &RetrievalDiagnostics{
+				FinalScore: 0.140,
+			},
+			rankSignals: retrievalRankSignals{
+				PathTokenBoost:     0.05,
+				ProtectedCandidate: true,
+				StructureBoost:     0.05,
+				StructuredPathRank: 1,
+			},
+		},
+	}
+
+	applyConsensusScoreProfile(candidates)
+
+	if candidates[0].ID != 2 {
+		t.Fatalf("first candidate ID = %d, want tuned consensus candidate 2: %+v", candidates[0].ID, candidates)
+	}
+	if candidates[0].Diagnostics == nil || candidates[0].Diagnostics.ConsensusBoost <= 0 {
+		t.Fatalf("consensus diagnostics missing: %+v", candidates[0].Diagnostics)
+	}
+	if candidates[0].Diagnostics.FinalScore != candidates[0].Score {
+		t.Fatalf("diagnostic final score=%f, candidate score=%f", candidates[0].Diagnostics.FinalScore, candidates[0].Score)
+	}
+}
+
+func TestAllowConsensusScoreProfileSkipsImportHeavyPrompts(t *testing.T) {
+	if !allowConsensusScoreProfile("value = cache.get(key)\nreturn value") {
+		t.Fatal("plain code context should allow the consensus profile")
+	}
+	if allowConsensusScoreProfile("import os\nfrom app.cache import Cache\nreturn Cache()") {
+		t.Fatal("import-heavy cross-file prompt should skip the consensus profile")
+	}
+}
+
 func TestCandidateStructuralRerankBoostsUseMetadataEvidence(t *testing.T) {
 	db, err := InitDB(t.TempDir())
 	if err != nil {
@@ -938,6 +979,313 @@ func TestStructureBoostUsesQueryDeclarationIntent(t *testing.T) {
 	topLevelFunctionBoost := structureBoost("method", "def fetch(store):\n    return True\n", 0.10)
 	if methodBoost <= topLevelFunctionBoost {
 		t.Fatalf("method boost=%f, top-level boost=%f; want method higher", methodBoost, topLevelFunctionBoost)
+	}
+}
+
+func TestRetrievalQueryIntentClassifiesCompletionShapes(t *testing.T) {
+	cases := []struct {
+		name   string
+		query  string
+		intent string
+	}{
+		{
+			name:   "assignment",
+			query:  "model_path = self.alignment_model_path\nargs.append(model_path)",
+			intent: "assignment",
+		},
+		{
+			name:   "declaration",
+			query:  "def test_conversion_output_type(self):\n    text = text_type(value)",
+			intent: "declaration",
+		},
+		{
+			name:   "inline java annotation declaration",
+			query:  "@Override public boolean onVolumeUpDown(int keyCode) {\n    if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {",
+			intent: "declaration",
+		},
+		{
+			name:   "import",
+			query:  "from app.cache import CacheStore\nstore = CacheStore()",
+			intent: "import",
+		},
+		{
+			name:   "exception",
+			query:  "try:\n    run()\nexcept TargetNotFoundError as err:",
+			intent: "exception",
+		},
+		{
+			name:   "call",
+			query:  "input_check(\n    \"lpThreadAttributes\", lpThreadAttributes,",
+			intent: "call",
+		},
+		{
+			name:   "comment",
+			query:  "# FILTER OPTIONS\n# CMD_OPTION_FILTER_HELP_LINE",
+			intent: "comment",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retrievalQueryIntent(tc.query); got != tc.intent {
+				t.Fatalf("retrievalQueryIntent() = %q, want %q", got, tc.intent)
+			}
+		})
+	}
+}
+
+func TestOrderedTokenOverlapScoreRewardsIdentifierOrder(t *testing.T) {
+	query := "cache_key = build_cache_key(user_id)\nreturn cache.get(cache_key)"
+	ordered := "func read() { cache_key := build_cache_key(user_id); return cache.get(cache_key) }"
+	reversed := "func read() { cache.get(cache_key); user_id := build_cache_key(cache_key) }"
+
+	orderedScore := orderedTokenOverlapScore(query, ordered)
+	reversedScore := orderedTokenOverlapScore(query, reversed)
+	if orderedScore <= reversedScore {
+		t.Fatalf("ordered overlap = %f, reversed overlap = %f; want ordered higher", orderedScore, reversedScore)
+	}
+	if orderedScore <= 0 {
+		t.Fatalf("ordered overlap = %f, want positive score", orderedScore)
+	}
+}
+
+func TestCandidateContentRankSignalsExtractsAssignmentAndHeaderCoverage(t *testing.T) {
+	query := "cache_key = build_cache_key(user_id)\nreturn cache.get(cache_key)"
+	candidate := "def cache_key_builder(cache_key, user_id):\n    return build_cache_key(user_id)\n"
+
+	signals := candidateContentRankSignals(query, candidate)
+	if signals.AssignmentLHSCoverage <= 0 {
+		t.Fatalf("assignment lhs coverage = %f, want positive", signals.AssignmentLHSCoverage)
+	}
+	if signals.HeaderTokenCoverage <= 0 {
+		t.Fatalf("header token coverage = %f, want positive", signals.HeaderTokenCoverage)
+	}
+}
+
+func TestApplyLanguageSymbolRankProfilePromotesJavaDeclarationMatch(t *testing.T) {
+	query := "cache_key = build_cache_key(user_id)\nreturn cache.get(cache_key)"
+	ranked := []Snippet{
+		{
+			ID:       1,
+			Language: "java",
+			Path:     "Noise.java",
+			Content:  "public class Noise {\n  public String unrelated(String userId) { return userId; }\n}\n",
+		},
+		{
+			ID:       2,
+			Language: "java",
+			Path:     "CacheKeys.java",
+			Content:  "public class CacheKeys {\n  public String buildCacheKey(String userId) { return userId; }\n}\n",
+			rankSignals: retrievalRankSignals{
+				StructuredPathBoost: 0.2,
+			},
+		},
+	}
+
+	reranked := applyLanguageSymbolRankProfile(query, ranked, ranked, 1)
+	if len(reranked) != 1 || reranked[0].ID != 2 {
+		t.Fatalf("language symbol rerank = %+v, want Java declaration candidate 2", reranked)
+	}
+}
+
+func TestApplyLanguageSymbolRankProfileSkipsJavaDeclarationRoute(t *testing.T) {
+	query := "public String buildCacheKey(String userId) {\n  return userId;\n}"
+	ranked := []Snippet{
+		{
+			ID:       1,
+			Language: "java",
+			Path:     "Noise.java",
+			Content:  "public class Noise {\n  public String unrelated(String userId) { return userId; }\n}\n",
+		},
+		{
+			ID:       2,
+			Language: "java",
+			Path:     "CacheKeys.java",
+			Content:  "public class CacheKeys {\n  public String buildCacheKey(String userId) { return userId; }\n}\n",
+			rankSignals: retrievalRankSignals{
+				StructuredPathBoost: 0.2,
+			},
+		},
+	}
+
+	reranked := applyLanguageSymbolRankProfile(query, ranked, ranked, 1)
+	if len(reranked) != 1 || reranked[0].ID != 1 {
+		t.Fatalf("language symbol declaration route = %+v, want baseline candidate 1", reranked)
+	}
+}
+
+func TestApplyLanguageSymbolRankProfileUsesPythonConsensusRoute(t *testing.T) {
+	ranked := []Snippet{
+		{
+			ID:       1,
+			Language: "py",
+			Path:     "noise.py",
+			Content:  "def unrelated():\n    return None\n",
+		},
+		{
+			ID:       2,
+			Language: "py",
+			Path:     "cache.py",
+			Content:  "def build_cache_key(user_id):\n    return str(user_id)\n",
+			rankSignals: retrievalRankSignals{
+				PathTokenBoost:     0.1,
+				ProtectedCandidate: true,
+				StructureBoost:     0.1,
+				StructuredPathRank: 1,
+			},
+		},
+	}
+
+	reranked := applyLanguageSymbolRankProfile("return build_cache_key(user_id)", ranked, ranked, 1)
+	if len(reranked) != 1 || reranked[0].ID != 2 {
+		t.Fatalf("language symbol rerank = %+v, want Python consensus candidate 2", reranked)
+	}
+}
+
+func TestApplyLanguageSymbolRankProfileBackfillsBaselineResults(t *testing.T) {
+	query := "cache_key = build_cache_key(user_id)\nreturn cache.get(cache_key)"
+	profileWindow := []Snippet{
+		{
+			ID:       2,
+			Language: "java",
+			Path:     "CacheKeys.java",
+			Content:  "public class CacheKeys {\n  public String buildCacheKey(String userId) { return userId; }\n}\n",
+		},
+	}
+	baseline := []Snippet{
+		{
+			ID:       1,
+			Language: "java",
+			Path:     "Controller.java",
+			Content:  "public class Controller {}\n",
+		},
+		profileWindow[0],
+		{
+			ID:       3,
+			Language: "java",
+			Path:     "Cache.java",
+			Content:  "public class Cache {}\n",
+		},
+		{
+			ID:       4,
+			Language: "java",
+			Path:     "User.java",
+			Content:  "public class User {}\n",
+		},
+		{
+			ID:       5,
+			Language: "java",
+			Path:     "Session.java",
+			Content:  "public class Session {}\n",
+		},
+	}
+
+	reranked := applyLanguageSymbolRankProfile(query, profileWindow, baseline, 5)
+	if len(reranked) != 5 {
+		t.Fatalf("language symbol rerank length = %d, want 5: %+v", len(reranked), reranked)
+	}
+	seen := map[int]bool{}
+	for _, candidate := range reranked {
+		if seen[candidate.ID] {
+			t.Fatalf("language symbol rerank contains duplicate candidate %d: %+v", candidate.ID, reranked)
+		}
+		seen[candidate.ID] = true
+	}
+	for _, id := range []int{1, 2, 3, 4, 5} {
+		if !seen[id] {
+			t.Fatalf("language symbol rerank missing baseline candidate %d: %+v", id, reranked)
+		}
+	}
+}
+
+func TestApplyLanguageSymbolRankProfileKeepsBaselineWhenWindowNotExpanded(t *testing.T) {
+	query := "return build_cache_key(user_id)"
+	ranked := []Snippet{
+		{
+			ID:       1,
+			Language: "py",
+			Path:     "cache.py",
+			Content:  "def build_cache_key(user_id):\n    return str(user_id)\n",
+		},
+		{
+			ID:       2,
+			Language: "py",
+			Path:     "helper.py",
+			Content:  "def unrelated():\n    return None\n",
+			rankSignals: retrievalRankSignals{
+				PathTokenBoost:     0.1,
+				ProtectedCandidate: true,
+				StructureBoost:     0.1,
+				StructuredPathRank: 1,
+			},
+		},
+	}
+
+	reranked := applyLanguageSymbolRankProfile(query, ranked, ranked, 2)
+	if len(reranked) != 2 || reranked[0].ID != 1 || reranked[1].ID != 2 {
+		t.Fatalf("language symbol rerank without expanded window = %+v, want baseline order", reranked)
+	}
+}
+
+func TestLimitLanguageSymbolRankResultsKeepsDistinctSameIDCandidates(t *testing.T) {
+	ranked := []Snippet{
+		{ID: 1, Path: "snippet_001.py", Content: "def one():\n    return 1\n"},
+	}
+	baseline := []Snippet{
+		ranked[0],
+		{ID: 1, Path: "snippet_002.py", Content: "def two():\n    return 2\n"},
+		{ID: 1, Path: "snippet_003.py", Content: "def three():\n    return 3\n"},
+	}
+
+	selected := limitLanguageSymbolRankResults(3, ranked, baseline)
+	if len(selected) != 3 {
+		t.Fatalf("selected length = %d, want 3: %+v", len(selected), selected)
+	}
+	if selected[1].Path != "snippet_002.py" || selected[2].Path != "snippet_003.py" {
+		t.Fatalf("selected candidates = %+v, want distinct same-ID baseline candidates preserved", selected)
+	}
+}
+
+func TestLimitLanguageSymbolRankResultsDiversifiesPathsWithBaseline(t *testing.T) {
+	reranked := []Snippet{
+		{ID: 1, Path: "snippet_003.py", Content: "def chunk_one():\n    return 1\n"},
+		{ID: 2, Path: "snippet_003.py", Content: "def chunk_two():\n    return 2\n"},
+		{ID: 3, Path: "snippet_003.py", Content: "def chunk_three():\n    return 3\n"},
+	}
+	baseline := []Snippet{
+		reranked[0],
+		{ID: 4, Path: "snippet_002.py", Content: "def two():\n    return 2\n"},
+		{ID: 5, Path: "snippet_004.py", Content: "def four():\n    return 4\n"},
+	}
+
+	selected := limitLanguageSymbolRankResults(3, reranked, baseline)
+	if len(selected) != 3 {
+		t.Fatalf("selected length = %d, want 3: %+v", len(selected), selected)
+	}
+	paths := []string{selected[0].Path, selected[1].Path, selected[2].Path}
+	if paths[0] != "snippet_003.py" || paths[1] != "snippet_002.py" || paths[2] != "snippet_004.py" {
+		t.Fatalf("selected paths = %+v, want reranked winner followed by distinct baseline paths", paths)
+	}
+}
+
+func TestLanguageSymbolRankProfileEnabledUsesFlagOrEnvironment(t *testing.T) {
+	original := RankProfile
+	defer func() { RankProfile = original }()
+	RankProfile = ""
+	t.Setenv("SNAPZIP_RANK_PROFILE", "")
+	if languageSymbolRankProfileEnabled() {
+		t.Fatal("language symbol rank profile should be disabled by default")
+	}
+
+	t.Setenv("SNAPZIP_RANK_PROFILE", "language-symbol")
+	if !languageSymbolRankProfileEnabled() {
+		t.Fatal("language symbol rank profile should be enabled from environment")
+	}
+
+	RankProfile = "language_symbol"
+	t.Setenv("SNAPZIP_RANK_PROFILE", "")
+	if !languageSymbolRankProfileEnabled() {
+		t.Fatal("language symbol rank profile should be enabled from explicit profile")
 	}
 }
 

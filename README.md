@@ -193,7 +193,7 @@ Plain-text search output includes context receipts when receipts are available, 
 snapzip search --query "python lru cache" --limit 3 --json
 ```
 
-For ranking analysis, add `--diagnostics` to JSON search output. Each snippet then includes score components such as QND, lexical boost, BM25/BM25F boost, identifier/path/structure boosts, rank-fusion contribution, final rank, and matched query tokens:
+For ranking analysis, add `--diagnostics` to JSON search output. Each snippet then includes the detected query intent plus score components such as QND, lexical boost, BM25/BM25F boost, identifier/path/structure boosts, rank-fusion and consensus contributions, ordered token overlap, final rank, and matched query tokens:
 
 ```bash
 snapzip search --query "python lru cache" --limit 3 --json --diagnostics
@@ -520,6 +520,12 @@ Current 100-sample `python_cff` / `test_hard` readout, seed `42`:
 - BM25: 14/100 acc@1, 31/100 acc@3, 52/100 acc@5, 0.261167 MRR@5, 0.324596 nDCG@5
 - SnapZip: 17/100 acc@1, 34/100 acc@3, 59/100 acc@5, 0.3005 MRR@5, 0.370936 nDCG@5
 
+Current 800-case public Python/Java matrix readout with the opt-in `language-symbol` profile, seed `42`:
+
+- Baseline SnapZip: 0.19625 acc@1, 0.48375 acc@3, 0.71000 acc@5, 0.367833 MRR@5, 0.451986 nDCG@5
+- `SNAPZIP_RANK_PROFILE=language-symbol`: 0.20625 acc@1, 0.50125 acc@3, 0.72125 acc@5, 0.380396 MRR@5, 0.464355 nDCG@5
+- Delta: +0.01000 acc@1, +0.01750 acc@3, +0.01125 acc@5, +0.012563 MRR@5, +0.012369 nDCG@5, with 0 duplicate top-5 records
+
 For release checks, add benchmark quality gates:
 ```bash
 python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobench-sample-size 100 \
@@ -538,7 +544,7 @@ python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobenc
 
 When tuning ranking, add `--snapzip-diagnostics` to RepoBench-R or RepoBench-P benchmark runs. The JSON records then include compact score diagnostics for SnapZip's returned results without changing retrieval behavior.
 
-To analyze those diagnostics offline, run `python3 benchmarks/tune_diagnostics.py --input /tmp/snapzip-repobench-r.json --metric mrr@5 --guardrails hit@5 --json /tmp/snapzip-tuning.json`. Keep the default benchmark `--snapzip-search-limit 5` when reproducing published top-5 numbers, and raise `--snapzip-diagnostics-limit` during offline diagnostics when you want to see whether lower-ranked candidates can be promoted into the top five without perturbing the measured top-5 search.
+To analyze those diagnostics offline, run `python3 benchmarks/tune_diagnostics.py --input /tmp/snapzip-repobench-r.json --metric mrr@5 --guardrails hit@5 --cv-folds 5 --json /tmp/snapzip-tuning.json`. For more conservative rank experiments, run `python3 benchmarks/promote_diagnostics.py --input /tmp/snapzip-repobench-r.json --metric mrr@5 --guardrails hit@5,ndcg@5 --cv-folds 5 --json /tmp/snapzip-promotion.json`; this tests bounded one-slot promotion policies and reports `hold` unless the selected policy survives held-out folds. Keep the default benchmark `--snapzip-search-limit 5` when reproducing published top-5 numbers, and raise `--snapzip-diagnostics-limit` during offline diagnostics when you want to see whether lower-ranked candidates can be promoted into the top five without perturbing the measured top-5 search.
 
 Run the public RepoBench v1.1 pipeline-context proxy:
 ```bash

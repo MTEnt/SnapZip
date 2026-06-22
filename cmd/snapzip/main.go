@@ -193,6 +193,7 @@ func handleSearch() {
 	dbDir := fs.String("db-dir", ".", "Directory of memory.db")
 	limit := fs.Int("limit", 3, "Number of snippets to return")
 	rerankCmd := fs.String("rerank-cmd", "", "Command to run external reranker (e.g. 'python rerank.py')")
+	rankProfile := fs.String("rank-profile", "", "Experimental built-in rank profile (for example: language-symbol)")
 	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
 	diagnostics := fs.Bool("diagnostics", false, "Include retrieval score diagnostics in JSON output")
 	_ = fs.Parse(os.Args[2:])
@@ -204,6 +205,7 @@ func handleSearch() {
 	}
 
 	core.RerankCmd = *rerankCmd
+	core.RankProfile = *rankProfile
 
 	db, err := core.InitDB(*dbDir)
 	if err != nil {
@@ -254,6 +256,7 @@ func handlePack() {
 	feedbackLimit := fs.Int("feedback-limit", 5, "Maximum feedback entries to include")
 	mode := fs.String("mode", "", "Pack mode: debug, refactor, test, docs, review, or default")
 	rerankCmd := fs.String("rerank-cmd", "", "Command to run external reranker (e.g. 'python rerank.py')")
+	rankProfile := fs.String("rank-profile", "", "Experimental built-in rank profile (for example: language-symbol)")
 	jsonOutput := fs.Bool("json", false, "Write machine-readable JSON")
 	_ = fs.Parse(os.Args[2:])
 
@@ -264,6 +267,7 @@ func handlePack() {
 	}
 
 	core.RerankCmd = *rerankCmd
+	core.RankProfile = *rankProfile
 
 	db, err := core.InitDB(*dbDir)
 	if err != nil {
