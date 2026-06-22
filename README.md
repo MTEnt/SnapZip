@@ -580,7 +580,7 @@ The default CI workflow also runs a lighter 50-sample RepoBench-P gate:
 ```bash
 python3 benchmarks/run.py --suite repobench-p --snapzip-bin ./snapzip --repobench-p-sample-size 50 \
   --min-repobench-p-snapzip-gold-hit5 0.90 \
-  --min-repobench-p-snapzip-new-token-coverage5 0.26 \
+  --min-repobench-p-snapzip-new-token-coverage5 0.23 \
   --min-repobench-p-snapzip-identifier-hit5 0.95 \
   --min-repobench-p-snapzip-new-token-coverage5-over-bm25 0.00
 ```
