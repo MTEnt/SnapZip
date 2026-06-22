@@ -121,6 +121,9 @@ func TestCLIInitSearchStatsAndReset(t *testing.T) {
 	if !strings.Contains(statsOutput, "feedback rows: 0") {
 		t.Fatalf("search query polluted feedback memory:\n%s", statsOutput)
 	}
+	if !strings.Contains(statsOutput, "knowledge card rows:") {
+		t.Fatalf("stats output did not expose knowledge card rows:\n%s", statsOutput)
+	}
 
 	statsJSON := runSnapZip(t, repoRoot, "stats", "--db-dir", dbDir, "--json")
 	var statsPayload core.DatabaseStats

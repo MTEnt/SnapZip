@@ -1142,6 +1142,99 @@ func TestApplyLanguageSymbolRankProfileUsesPythonConsensusRoute(t *testing.T) {
 	}
 }
 
+func TestSearchKnowledgeCardsIndexesTaskAwareRepoCards(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "app/cache.py", `from app.settings import CacheSettings
+
+def build_cache_key(user_id):
+    return f"cache:{user_id}"
+
+def read_cache(user_id):
+    return build_cache_key(user_id)
+`)
+	writeTestFile(t, root, "tests/test_cache.py", `from app.cache import build_cache_key
+
+def test_build_cache_key():
+    assert build_cache_key("u1") == "cache:u1"
+`)
+	writeTestFile(t, root, "app/settings.yaml", "cache_ttl: 300\n")
+
+	db, err := InitDB(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	options := DefaultIndexOptions()
+	options.KnowledgeCards = true
+	if _, err := IndexDirectoryWithOptions(db, root, NewLanguageFilter("all"), options); err != nil {
+		t.Fatal(err)
+	}
+
+	cards, err := SearchKnowledgeCards(db, "build_cache_key cache ttl", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := tableExists(db, "knowledge_cards_fts"); err != nil || !exists {
+		t.Fatalf("knowledge card FTS table exists=%v err=%v, want lazy search index", exists, err)
+	}
+	if !knowledgeCardsContain(cards, "symbol", "build_cache_key", "app/cache.py") {
+		t.Fatalf("knowledge cards missing symbol card: %+v", cards)
+	}
+	if !knowledgeCardsContain(cards, "test", "test_build_cache_key", "tests/test_cache.py") {
+		t.Fatalf("knowledge cards missing test card: %+v", cards)
+	}
+	if !knowledgeCardsContain(cards, "config", "settings.yaml", "app/settings.yaml") {
+		t.Fatalf("knowledge cards missing config card: %+v", cards)
+	}
+}
+
+func TestApplyLanguageSymbolRankProfileUsesKnowledgeCardSignal(t *testing.T) {
+	ranked := []Snippet{
+		{
+			ID:       1,
+			Language: "py",
+			Path:     "noise.py",
+			Content:  "def unrelated(user_id):\n    return user_id\n",
+		},
+		{
+			ID:       2,
+			Language: "py",
+			Path:     "cache.py",
+			Content:  "def build_cache_key(user_id):\n    return f'cache:{user_id}'\n",
+		},
+	}
+
+	reranked := applyLanguageSymbolRankProfile(
+		"return build_cache_key(user_id)",
+		ranked,
+		ranked,
+		1,
+		languageSymbolCardSignals{
+			Ranks:  map[int]int{2: 1},
+			Scores: map[int]float64{2: 1},
+		},
+	)
+	if len(reranked) != 1 || reranked[0].ID != 2 {
+		t.Fatalf("language symbol knowledge-card rerank = %+v, want candidate 2", reranked)
+	}
+}
+
+func TestKnowledgeCardRankProfileRouteIsConservative(t *testing.T) {
+	if !allowKnowledgeCardRankProfileForRoute("return build_cache_key(user_id)", "py") {
+		t.Fatal("call-shaped Python query should allow knowledge-card ranking")
+	}
+	if !allowKnowledgeCardRankProfileForRoute("from app.cache import build_cache_key", "py") {
+		t.Fatal("import-shaped Python query should allow knowledge-card ranking")
+	}
+	if allowKnowledgeCardRankProfileForRoute("public String buildCacheKey(String userId) {\n  return userId;\n}", "java") {
+		t.Fatal("declaration-shaped Java query should not use knowledge-card ranking")
+	}
+	if allowKnowledgeCardRankProfileForRoute("# FILTER OPTIONS\n# CMD_OPTION_FILTER_HELP_LINE", "py") {
+		t.Fatal("comment-shaped query should not use knowledge-card ranking")
+	}
+}
+
 func TestApplyLanguageSymbolRankProfileBackfillsBaselineResults(t *testing.T) {
 	query := "cache_key = build_cache_key(user_id)\nreturn cache.get(cache_key)"
 	profileWindow := []Snippet{
@@ -1287,6 +1380,16 @@ func TestLanguageSymbolRankProfileEnabledUsesFlagOrEnvironment(t *testing.T) {
 	if !languageSymbolRankProfileEnabled() {
 		t.Fatal("language symbol rank profile should be enabled from explicit profile")
 	}
+
+	RankProfile = "language-symbol-cards"
+	if !languageSymbolRankProfileEnabled() || !knowledgeCardRankProfileEnabled() {
+		t.Fatal("language symbol cards rank profile should enable both language-symbol and knowledge-card ranking")
+	}
+	RankProfile = "language-symbol"
+	t.Setenv("SNAPZIP_KNOWLEDGE_CARD_RANKING", "true")
+	if !knowledgeCardRankProfileEnabled() {
+		t.Fatal("knowledge-card ranking should be enabled from explicit environment flag")
+	}
 }
 
 func TestRetrieveSimilarSnippetsExpandsResolvedImportTargets(t *testing.T) {
@@ -1316,6 +1419,15 @@ func TestRetrieveSimilarSnippetsExpandsResolvedImportTargets(t *testing.T) {
 func snippetPathsContain(snippets []Snippet, path string) bool {
 	for _, snippet := range snippets {
 		if snippet.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func knowledgeCardsContain(cards []KnowledgeCard, kind, name, path string) bool {
+	for _, card := range cards {
+		if card.Kind == kind && card.Name == name && card.Path == path {
 			return true
 		}
 	}

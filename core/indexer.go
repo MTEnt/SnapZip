@@ -48,6 +48,7 @@ type IndexOptions struct {
 	SkipFiles       map[string]bool
 	IgnorePatterns  []string
 	Force           bool
+	KnowledgeCards  bool
 }
 
 type ContextBundle struct {
@@ -63,7 +64,13 @@ func DefaultIndexOptions() IndexOptions {
 		SkipDirs:        copyBoolMap(defaultSkipDirs),
 		SkipFiles:       copyBoolMap(defaultSkipFiles),
 		Force:           true,
+		KnowledgeCards:  KnowledgeCardsEnabledFromEnv(),
 	}
+}
+
+func KnowledgeCardsEnabledFromEnv() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("SNAPZIP_KNOWLEDGE_CARDS")))
+	return value == "1" || value == "true" || value == "yes"
 }
 
 func IndexDirectory(db *sql.DB, root string, filter LanguageFilter) (int, error) {
@@ -186,6 +193,11 @@ func IndexFileWithOptions(db *sql.DB, root, path string, filter LanguageFilter, 
 	}
 	if err := ReplaceImportsForFile(db, language, relPath, content); err != nil {
 		return 0, err
+	}
+	if options.KnowledgeCards {
+		if err := ReplaceKnowledgeCardsForFile(db, language, relPath, content); err != nil {
+			return 0, err
+		}
 	}
 	return chunks, nil
 }

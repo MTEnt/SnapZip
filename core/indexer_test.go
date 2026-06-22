@@ -486,7 +486,9 @@ func TestIndexDirectoryStoresSymbolsAndRepoMap(t *testing.T) {
 	}
 	defer db.Close()
 
-	count, err := IndexDirectory(db, root, NewLanguageFilter("go"))
+	options := DefaultIndexOptions()
+	options.KnowledgeCards = true
+	count, err := IndexDirectoryWithOptions(db, root, NewLanguageFilter("go"), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,6 +523,9 @@ func TestIndexDirectoryStoresSymbolsAndRepoMap(t *testing.T) {
 	}
 	if stats.ImportRows == 0 {
 		t.Fatal("expected indexed import references")
+	}
+	if stats.KnowledgeCardRows == 0 {
+		t.Fatal("expected indexed knowledge cards")
 	}
 	assertMetadataFTSRowCounts(t, db)
 

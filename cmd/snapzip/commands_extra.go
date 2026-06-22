@@ -37,6 +37,7 @@ func handleIndex() {
 	reset := fs.Bool("reset", false, "Remove any existing memory.db before indexing")
 	maxFileBytes := fs.Int64("max-file-bytes", core.DefaultMaxIndexFileBytes, "Maximum individual source file size to index")
 	maxContentBytes := fs.Int("max-content-bytes", core.DefaultMaxKnowledgeContentBytes, "Maximum source bytes per indexed snippet")
+	knowledgeCards := fs.Bool("knowledge-cards", core.KnowledgeCardsEnabledFromEnv(), "Build experimental task-aware knowledge cards during indexing")
 	changed := fs.Bool("changed", false, "Index files changed against HEAD")
 	since := fs.String("since", "", "Index files changed since a git ref")
 	watch := fs.Bool("watch", false, "Continuously re-run changed-file indexing")
@@ -59,7 +60,7 @@ func handleIndex() {
 	defer db.Close()
 
 	run := func() (int, error) {
-		return runIndexOnce(db, *crawl, *langs, *maxFileBytes, *maxContentBytes, *changed, *since)
+		return runIndexOnce(db, *crawl, *langs, *maxFileBytes, *maxContentBytes, *knowledgeCards, *changed, *since)
 	}
 
 	if !*watch {
@@ -91,7 +92,7 @@ func handleIndex() {
 	}
 }
 
-func runIndexOnce(db *sql.DB, crawl, langs string, maxFileBytes int64, maxContentBytes int, changed bool, since string) (int, error) {
+func runIndexOnce(db *sql.DB, crawl, langs string, maxFileBytes int64, maxContentBytes int, knowledgeCards bool, changed bool, since string) (int, error) {
 	root, err := filepath.Abs(crawl)
 	if err != nil {
 		return 0, err
@@ -100,6 +101,7 @@ func runIndexOnce(db *sql.DB, crawl, langs string, maxFileBytes int64, maxConten
 	options := core.DefaultIndexOptions()
 	options.MaxFileBytes = maxFileBytes
 	options.MaxContentBytes = maxContentBytes
+	options.KnowledgeCards = knowledgeCards
 
 	if changed || strings.TrimSpace(since) != "" {
 		files, err := gitChangedFiles(root, strings.TrimSpace(since))

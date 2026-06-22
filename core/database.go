@@ -87,6 +87,8 @@ type RetrievalDiagnostics struct {
 	AssignmentLHSCoverage float64  `json:"assignment_lhs_coverage,omitempty"`
 	HeaderTokenCoverage   float64  `json:"header_token_coverage,omitempty"`
 	LanguageSymbolScore   float64  `json:"language_symbol_score,omitempty"`
+	KnowledgeCardRank     int      `json:"knowledge_card_rank,omitempty"`
+	KnowledgeCardScore    float64  `json:"knowledge_card_score,omitempty"`
 	MatchedQueryTokens    []string `json:"matched_query_tokens,omitempty"`
 }
 
@@ -131,6 +133,7 @@ const lexicalCoverageJaccardWeight = 0.35
 const lexicalCoverageBM25Weight = 1.3
 const structuralRerankMetadataLimit = 48
 const languageSymbolRankProfile = "language-symbol"
+const languageSymbolCardsRankProfile = "language-symbol-cards"
 const languageSymbolRankWindow = 20
 
 type retrievalQueryPlan struct {
@@ -391,6 +394,7 @@ type DatabaseStats struct {
 	SymbolRows          int            `json:"symbol_rows"`
 	SymbolReferenceRows int            `json:"symbol_reference_rows"`
 	ImportRows          int            `json:"import_rows"`
+	KnowledgeCardRows   int            `json:"knowledge_card_rows"`
 	Languages           []LanguageStat `json:"languages"`
 }
 
@@ -415,6 +419,13 @@ func GetDatabaseStats(db *sql.DB) (DatabaseStats, error) {
 	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM import_refs").Scan(&stats.ImportRows); err != nil {
 		return stats, err
+	}
+	if exists, err := tableExists(db, "knowledge_cards"); err != nil {
+		return stats, err
+	} else if exists {
+		if err := db.QueryRow("SELECT COUNT(*) FROM knowledge_cards").Scan(&stats.KnowledgeCardRows); err != nil {
+			return stats, err
+		}
 	}
 
 	rows, err := db.Query(`
@@ -595,6 +606,12 @@ func tableRowCount(db *sql.DB, table string) (int, error) {
 	var count int
 	err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count)
 	return count, err
+}
+
+func tableExists(db *sql.DB, table string) (bool, error) {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?", table).Scan(&count)
+	return count > 0, err
 }
 
 func ensureTableColumn(db *sql.DB, table, name, definition string) error {
@@ -1111,7 +1128,18 @@ func RetrieveSimilarSnippetsWithOptions(db *sql.DB, comp Compressor, prompt stri
 			if rankingLimit > limit {
 				profileWindow = rankSearchCandidates(candidates, primaryCandidateIDs, protectedCandidateID, lexicalCoverageRanks, rankingLimit)
 			}
-			ranked = applyLanguageSymbolRankProfile(prompt, profileWindow, ranked, limit)
+			cardSignals := languageSymbolCardSignals{}
+			if knowledgeCardRankProfileEnabled() && allowKnowledgeCardRankProfileForRoute(prompt, dominantRankedLanguage(profileWindow)) {
+				cardRanks, cardScores, err := candidateKnowledgeCardRankMap(db, prompt, profileWindow, rankingLimit)
+				if err != nil {
+					return nil, err
+				}
+				cardSignals = languageSymbolCardSignals{
+					Ranks:  cardRanks,
+					Scores: cardScores,
+				}
+			}
+			ranked = applyLanguageSymbolRankProfile(prompt, profileWindow, ranked, limit, cardSignals)
 		}
 		if options.IncludeDiagnostics {
 			for idx := range ranked {
@@ -1314,19 +1342,39 @@ func languageSymbolRankProfileEnabled() bool {
 		profile = strings.TrimSpace(os.Getenv("SNAPZIP_RANK_PROFILE"))
 	}
 	profile = strings.ToLower(profile)
-	return profile == languageSymbolRankProfile || profile == "language_symbol"
+	return profile == languageSymbolRankProfile || profile == "language_symbol" || profile == languageSymbolCardsRankProfile || profile == "language_symbol_cards"
+}
+
+func knowledgeCardRankProfileEnabled() bool {
+	profile := strings.TrimSpace(RankProfile)
+	if profile == "" {
+		profile = strings.TrimSpace(os.Getenv("SNAPZIP_RANK_PROFILE"))
+	}
+	profile = strings.ToLower(profile)
+	if profile == languageSymbolCardsRankProfile || profile == "language_symbol_cards" {
+		return true
+	}
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("SNAPZIP_KNOWLEDGE_CARD_RANKING")))
+	return value == "1" || value == "true" || value == "yes"
 }
 
 type languageSymbolRankFeatures struct {
 	BaselineRankReciprocal    float64
 	ConsensusBoost            float64
 	StructuredPathBoost       float64
+	KnowledgeCardReciprocal   float64
+	KnowledgeCardScore        float64
 	DeclarationOrderedOverlap float64
 	QueryDeclarationCoverage  float64
 	RareQueryTokenCoverage    float64
 }
 
-func applyLanguageSymbolRankProfile(prompt string, ranked []Snippet, baseline []Snippet, limit int) []Snippet {
+type languageSymbolCardSignals struct {
+	Ranks  map[int]int
+	Scores map[int]float64
+}
+
+func applyLanguageSymbolRankProfile(prompt string, ranked []Snippet, baseline []Snippet, limit int, cardSignals ...languageSymbolCardSignals) []Snippet {
 	if limit <= 0 {
 		return ranked
 	}
@@ -1344,7 +1392,11 @@ func applyLanguageSymbolRankProfile(prompt string, ranked []Snippet, baseline []
 		return limitLanguageSymbolRankResults(limit, ranked, baseline)
 	}
 
-	features := languageSymbolRankFeatureValues(prompt, ranked, baseline, limit)
+	signals := languageSymbolCardSignals{}
+	if len(cardSignals) > 0 {
+		signals = cardSignals[0]
+	}
+	features := languageSymbolRankFeatureValues(prompt, ranked, baseline, limit, signals)
 	if len(features) != len(ranked) {
 		return limitLanguageSymbolRankResults(limit, ranked, baseline)
 	}
@@ -1355,6 +1407,8 @@ func applyLanguageSymbolRankProfile(prompt string, ranked []Snippet, baseline []
 		scoreByKey[languageSymbolCandidateKey(reranked[idx])] = scores[idx]
 		if reranked[idx].Diagnostics != nil {
 			reranked[idx].Diagnostics.LanguageSymbolScore = scores[idx]
+			reranked[idx].Diagnostics.KnowledgeCardRank = signals.Ranks[reranked[idx].ID]
+			reranked[idx].Diagnostics.KnowledgeCardScore = signals.Scores[reranked[idx].ID]
 		}
 	}
 	sort.SliceStable(reranked, func(i, j int) bool {
@@ -1380,6 +1434,18 @@ func allowLanguageSymbolRankProfileForRoute(prompt, language string) bool {
 		return false
 	}
 	return true
+}
+
+func allowKnowledgeCardRankProfileForRoute(prompt, language string) bool {
+	if language != "java" && language != "py" {
+		return false
+	}
+	switch retrievalQueryIntent(prompt) {
+	case "call", "import":
+		return true
+	default:
+		return false
+	}
 }
 
 func limitLanguageSymbolRankResults(limit int, rankedLists ...[]Snippet) []Snippet {
@@ -1431,7 +1497,7 @@ func languageSymbolOriginalRank(ranked []Snippet, key string) int {
 	return len(ranked) + 1
 }
 
-func languageSymbolRankFeatureValues(prompt string, ranked []Snippet, baseline []Snippet, limit int) []languageSymbolRankFeatures {
+func languageSymbolRankFeatureValues(prompt string, ranked []Snippet, baseline []Snippet, limit int, cardSignals languageSymbolCardSignals) []languageSymbolRankFeatures {
 	queryTokens := codeContextSearchTokens(prompt)
 	orderedQueryTokens := orderedMeaningfulIdentifierTokens(prompt, 64)
 	idf := languageSymbolIDF(ranked)
@@ -1452,6 +1518,10 @@ func languageSymbolRankFeatureValues(prompt string, ranked []Snippet, baseline [
 		if rank := baselineRanks[languageSymbolCandidateKey(ranked[idx])]; rank > 0 {
 			features.BaselineRankReciprocal = 1.0 / float64(rank)
 		}
+		if rank := cardSignals.Ranks[ranked[idx].ID]; rank > 0 {
+			features.KnowledgeCardReciprocal = 1.0 / float64(rank)
+		}
+		features.KnowledgeCardScore = cardSignals.Scores[ranked[idx].ID]
 		raw[idx] = features
 	}
 	return normalizeLanguageSymbolFeatures(raw)
@@ -1491,12 +1561,17 @@ func languageSymbolRankScores(language string, features []languageSymbolRankFeat
 			scores[idx] =
 				0.025*feature.BaselineRankReciprocal +
 					0.025*feature.ConsensusBoost +
+					0.06*feature.KnowledgeCardReciprocal +
+					0.04*feature.KnowledgeCardScore +
 					0.10*feature.DeclarationOrderedOverlap +
 					0.05*feature.QueryDeclarationCoverage +
 					0.025*feature.RareQueryTokenCoverage +
 					0.05*feature.StructuredPathBoost
 		case "py":
-			scores[idx] = 0.025 * feature.ConsensusBoost
+			scores[idx] =
+				0.025*feature.ConsensusBoost +
+					0.045*feature.KnowledgeCardReciprocal +
+					0.025*feature.KnowledgeCardScore
 		}
 	}
 	return scores
@@ -1509,6 +1584,8 @@ func normalizeLanguageSymbolFeatures(raw []languageSymbolRankFeatures) []languag
 	baselineValues := make([]float64, len(raw))
 	consensusValues := make([]float64, len(raw))
 	structuredValues := make([]float64, len(raw))
+	knowledgeCardRankValues := make([]float64, len(raw))
+	knowledgeCardScoreValues := make([]float64, len(raw))
 	declarationOrderedValues := make([]float64, len(raw))
 	queryDeclarationValues := make([]float64, len(raw))
 	rareQueryValues := make([]float64, len(raw))
@@ -1516,6 +1593,8 @@ func normalizeLanguageSymbolFeatures(raw []languageSymbolRankFeatures) []languag
 		baselineValues[idx] = feature.BaselineRankReciprocal
 		consensusValues[idx] = feature.ConsensusBoost
 		structuredValues[idx] = feature.StructuredPathBoost
+		knowledgeCardRankValues[idx] = feature.KnowledgeCardReciprocal
+		knowledgeCardScoreValues[idx] = feature.KnowledgeCardScore
 		declarationOrderedValues[idx] = feature.DeclarationOrderedOverlap
 		queryDeclarationValues[idx] = feature.QueryDeclarationCoverage
 		rareQueryValues[idx] = feature.RareQueryTokenCoverage
@@ -1526,6 +1605,8 @@ func normalizeLanguageSymbolFeatures(raw []languageSymbolRankFeatures) []languag
 			BaselineRankReciprocal:    normalizeFeatureValue(raw[idx].BaselineRankReciprocal, baselineValues),
 			ConsensusBoost:            normalizeFeatureValue(raw[idx].ConsensusBoost, consensusValues),
 			StructuredPathBoost:       normalizeFeatureValue(raw[idx].StructuredPathBoost, structuredValues),
+			KnowledgeCardReciprocal:   normalizeFeatureValue(raw[idx].KnowledgeCardReciprocal, knowledgeCardRankValues),
+			KnowledgeCardScore:        normalizeFeatureValue(raw[idx].KnowledgeCardScore, knowledgeCardScoreValues),
 			DeclarationOrderedOverlap: normalizeFeatureValue(raw[idx].DeclarationOrderedOverlap, declarationOrderedValues),
 			QueryDeclarationCoverage:  normalizeFeatureValue(raw[idx].QueryDeclarationCoverage, queryDeclarationValues),
 			RareQueryTokenCoverage:    normalizeFeatureValue(raw[idx].RareQueryTokenCoverage, rareQueryValues),

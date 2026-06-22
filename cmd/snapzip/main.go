@@ -119,6 +119,7 @@ func handleInitDB() {
 	reset := fs.Bool("reset", false, "Remove any existing memory.db before initializing")
 	maxFileBytes := fs.Int64("max-file-bytes", core.DefaultMaxIndexFileBytes, "Maximum individual source file size to index")
 	maxContentBytes := fs.Int("max-content-bytes", core.DefaultMaxKnowledgeContentBytes, "Maximum source bytes per indexed snippet")
+	knowledgeCards := fs.Bool("knowledge-cards", core.KnowledgeCardsEnabledFromEnv(), "Build experimental task-aware knowledge cards during indexing")
 	_ = fs.Parse(os.Args[2:])
 	langsProvided := flagWasProvided(fs, "langs")
 	crawlProvided := flagWasProvided(fs, "crawl")
@@ -177,6 +178,7 @@ func handleInitDB() {
 		options := core.DefaultIndexOptions()
 		options.MaxFileBytes = *maxFileBytes
 		options.MaxContentBytes = *maxContentBytes
+		options.KnowledgeCards = *knowledgeCards
 		entryCount, err := core.IndexDirectoryWithOptions(db, codebasePath, langFilter, options)
 
 		if err != nil {
@@ -402,6 +404,7 @@ func handleStats() {
 	fmt.Printf("symbol rows: %d\n", stats.SymbolRows)
 	fmt.Printf("symbol reference rows: %d\n", stats.SymbolReferenceRows)
 	fmt.Printf("import rows: %d\n", stats.ImportRows)
+	fmt.Printf("knowledge card rows: %d\n", stats.KnowledgeCardRows)
 	if len(stats.Languages) == 0 {
 		fmt.Println("languages: none")
 		return

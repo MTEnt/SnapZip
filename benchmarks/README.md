@@ -95,7 +95,7 @@ python3 benchmarks/run.py --suite repobench-r --snapzip-bin ./snapzip --repobenc
 
 The default CI workflow runs this gated public sample so retrieval changes must preserve both the current measured floor and the current measured lift over raw baselines before merging.
 
-Add `--snapzip-diagnostics` to RepoBench-R or RepoBench-P runs when tuning ranking. The JSON records will include compact score diagnostics for SnapZip's returned results, including detected query intent, QND, lexical/BM25/BM25F boosts, identifier/path/structure boosts, rank-fusion and consensus contributions, ordered token overlap, final rank, and matched query tokens.
+Add `--snapzip-diagnostics` to RepoBench-R or RepoBench-P runs when tuning ranking. The JSON records will include compact score diagnostics for SnapZip's returned results, including detected query intent, QND, lexical/BM25/BM25F boosts, identifier/path/structure boosts, rank-fusion and consensus contributions, knowledge-card rank signals, ordered token overlap, final rank, and matched query tokens.
 
 Start by summarizing miss patterns and baseline overlap:
 
